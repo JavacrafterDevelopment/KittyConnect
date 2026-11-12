@@ -1,0 +1,73 @@
+{
+  "schema": 1,
+  "channels": {
+    "beta": {
+      "version": "0.1.0",
+      "published": "2026-11-12T01:03:02Z",
+      "notes": "**Full Changelog**: https://github.com/JavacrafterDevelopment/KittyConnect/commits/v0.1.0",
+      "page": "https://github.com/JavacrafterDevelopment/KittyConnect/releases/tag/v0.1.0",
+      "package": {
+        "url": "https://github.com/JavacrafterDevelopment/KittyConnect/releases/download/v0.1.0/KittyConnect-windows-x64.zip",
+        "size": 7765358,
+        "sha256": "00d095a806f289d39f819421eb2f36e527384591b586c1ac710feac0bdb098a3"
+      },
+      "exe": "KittyConnect.exe",
+      "files": [
+        {
+          "path": "KittyConnect.exe",
+          "size": 19450368,
+          "sha256": "3446e6c3ab71395cf4dd434bc359b19c5000e5c7aa185e1c088fc6c52b38b2c5"
+        },
+        {
+          "path": "licenses/LICENSE-APACHE",
+          "size": 11560,
+          "sha256": "3ddf9be5c28fe27dad143a5dc76eea25222ad1dd68934a047064e56ed2fa40c5"
+        },
+        {
+          "path": "licenses/LICENSE-MIT",
+          "size": 1100,
+          "sha256": "fed465d19758687fabfc1b1d6cdcb36b08c795aaf87bcb2185f2cd4ca2f282f3"
+        },
+        {
+          "path": "licenses/TailCat-LICENSE.txt",
+          "size": 1515,
+          "sha256": "a7ca6186a7963a0a60740f6047760eecd7a0234e8c38bd7e1e0bbcb324bda45b"
+        }
+      ]
+    },
+    "stable": {
+      "version": "0.1.0",
+      "published": "2026-11-12T01:03:02Z",
+      "notes": "**Full Changelog**: https://github.com/JavacrafterDevelopment/KittyConnect/commits/v0.1.0",
+      "page": "https://github.com/JavacrafterDevelopment/KittyConnect/releases/tag/v0.1.0",
+      "package": {
+        "url": "https://github.com/JavacrafterDevelopment/KittyConnect/releases/download/v0.1.0/KittyConnect-windows-x64.zip",
+        "size": 7765358,
+        "sha256": "00d095a806f289d39f819421eb2f36e527384591b586c1ac710feac0bdb098a3"
+      },
+      "exe": "KittyConnect.exe",
+      "files": [
+        {
+          "path": "KittyConnect.exe",
+          "size": 19450368,
+          "sha256": "3446e6c3ab71395cf4dd434bc359b19c5000e5c7aa185e1c088fc6c52b38b2c5"
+        },
+        {
+          "path": "licenses/LICENSE-APACHE",
+          "size": 11560,
+          "sha256": "3ddf9be5c28fe27dad143a5dc76eea25222ad1dd68934a047064e56ed2fa40c5"
+        },
+        {
+          "path": "licenses/LICENSE-MIT",
+          "size": 1100,
+          "sha256": "fed465d19758687fabfc1b1d6cdcb36b08c795aaf87bcb2185f2cd4ca2f282f3"
+        },
+        {
+          "path": "licenses/TailCat-LICENSE.txt",
+          "size": 1515,
+          "sha256": "a7ca6186a7963a0a60740f6047760eecd7a0234e8c38bd7e1e0bbcb324bda45b"
+        }
+      ]
+    }
+  }
+}
