@@ -154,6 +154,8 @@ fn serve_one(
         return Ok(());
     };
     match req.op.as_str() {
+        // The receiver checks every 30 seconds that sharing is still on.
+        "ping" => stream.write_all(b"{\"pong\":true}\n")?,
         "list" => {
             let files = lib.lock().unwrap().clone();
             let body = json!({ "v": 1, "files": files });

@@ -1,11 +1,13 @@
 // No console window in release builds; debug builds keep one for logs.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod beacon;
 mod code;
 mod icon;
 mod portable;
 mod share;
 mod tailcat;
+mod voip;
 
 use std::collections::{BTreeMap, VecDeque};
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
@@ -29,7 +31,8 @@ use wry::WebViewBuilderExtWindows;
 use code::Kind;
 use portable::data_dir;
 use share::{Library, RecvEvent, Remote, Server, ShareEvent};
-use tailcat::{Proc, Role, TcEvent};
+use tailcat::{Link, Proc, Role, TcEvent};
+use voip::{Voip, VoipEvent};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const INDEX_HTML: &str = include_str!("../ui/index.html");
@@ -44,6 +47,49 @@ pub enum UserEvent {
     Recv(RecvEvent),
     Dropped(Vec<PathBuf>),
     Tick,
+    Voip(u64, VoipEvent),
+    /// A 30-second liveness ping came back (or didn't).
+    Ping(PingTarget, Result<Duration, String>),
+}
+
+#[derive(Clone, Copy)]
+pub enum PingTarget {
+    /// The file share we're receiving from, by its local tunnel port.
+    Recv(u16),
+    /// A joined port set, by key.
+    Join(u64),
+}
+
+/// Bytes per second, smoothed so the number doesn't jump around.
+#[derive(Clone)]
+struct Speed {
+    at: Instant,
+    done: u64,
+    bps: f64,
+}
+
+impl Speed {
+    fn new(done: u64) -> Speed {
+        Speed { at: Instant::now(), done, bps: 0.0 }
+    }
+
+    fn update(&mut self, done: u64) {
+        let dt = self.at.elapsed().as_secs_f64();
+        if dt < 0.15 {
+            return;
+        }
+        let rate = done.saturating_sub(self.done) as f64 / dt;
+        self.bps = if self.bps == 0.0 { rate } else { self.bps * 0.6 + rate * 0.4 };
+        self.at = Instant::now();
+        self.done = done;
+    }
+}
+
+struct Sending {
+    name: String,
+    done: u64,
+    total: u64,
+    speed: Speed,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -66,17 +112,26 @@ impl St {
 }
 
 #[derive(Default)]
-struct Log(VecDeque<String>);
+pub(crate) struct Log(VecDeque<String>);
 
 impl Log {
-    fn push(&mut self, line: impl Into<String>) {
+    pub(crate) fn push(&mut self, line: impl Into<String>) {
         if self.0.len() >= LOG_LINES {
             self.0.pop_front();
         }
         self.0.push_back(line.into());
     }
-    fn json(&self) -> Value {
+    pub(crate) fn json(&self) -> Value {
         json!(self.0)
+    }
+}
+
+/// Handles one TailCat output line for a tunnel: updates its link (relay or
+/// direct) and keeps the line in the visible log unless it's verbose chatter.
+fn tc_line(log: &mut Log, link: &mut Link, line: String) {
+    link.observe(&line);
+    if !tailcat::is_verbose(&line) || tailcat::keep_verbose(&line) {
+        log.push(line);
     }
 }
 
@@ -88,9 +143,10 @@ struct ShareHost {
     server: Option<Server>,
     proc: Option<Proc>,
     addr: Option<String>,
-    /// Downloads in progress, by connection: (name, done, total).
-    sending: BTreeMap<u64, (String, u64, u64)>,
+    /// Downloads in progress, by connection.
+    sending: BTreeMap<u64, Sending>,
     sent: u64,
+    link: Link,
     log: Log,
 }
 
@@ -99,6 +155,7 @@ struct FileState {
     st: &'static str,
     done: u64,
     total: u64,
+    speed: Speed,
     path: Option<PathBuf>,
     error: String,
 }
@@ -114,6 +171,7 @@ struct Recv {
     files: Vec<Remote>,
     states: BTreeMap<u64, FileState>,
     inbox: PathBuf,
+    link: Link,
     log: Log,
 }
 
@@ -127,10 +185,12 @@ struct PortHost {
     proc: Option<Proc>,
     ports: Vec<u16>,
     addr: Option<String>,
+    link: Link,
     log: Log,
 }
 
-/// One joined port set: `tailcat forward <addr> <local>:<remote>…`.
+/// One joined port set: `tailcat forward <addr> <local>:<remote>…`, plus a
+/// mapping to the host's beacon for the 30-second check.
 struct PortJoin {
     key: u64,
     st: St,
@@ -139,6 +199,8 @@ struct PortJoin {
     maps: Vec<(u16, u16)>,
     lan: bool,
     started: Instant,
+    beacon: Option<u16>,
+    link: Link,
     log: Log,
 }
 
@@ -152,6 +214,7 @@ struct App {
     host_error: String,
     join_error: String,
     next_key: u64,
+    voip: Voip,
     status: (String, &'static str),
 }
 
@@ -262,6 +325,15 @@ fn main() {
                 true
             }
             Event::UserEvent(UserEvent::Tick) => app.on_tick(),
+            Event::UserEvent(UserEvent::Ping(target, result)) => app.on_ping(target, result),
+            Event::UserEvent(UserEvent::Voip(gen, ev)) => match app.voip.on_event(gen, ev) {
+                // Talking lights and the mic meter go on their own, many times a second.
+                Some(live) => {
+                    send(&webview, live);
+                    false
+                }
+                None => true,
+            },
             _ => false,
         };
         if changed {
@@ -294,7 +366,7 @@ fn plural(n: usize) -> &'static str {
     }
 }
 
-fn free_port() -> Result<u16, String> {
+pub(crate) fn free_port() -> Result<u16, String> {
     TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
         .and_then(|l| l.local_addr())
         .map(|a| a.port())
@@ -314,7 +386,7 @@ fn something_listening(port: u16) -> bool {
 }
 
 /// The last useful thing TailCat said, for an error message.
-fn last_words(log: &Log) -> String {
+pub(crate) fn last_words(log: &Log) -> String {
     log.0
         .iter()
         .rev()
@@ -336,6 +408,7 @@ impl App {
                 addr: None,
                 sending: BTreeMap::new(),
                 sent: 0,
+                link: Link::default(),
                 log: Log::default(),
             },
             recv: Recv {
@@ -348,6 +421,7 @@ impl App {
                 files: Vec::new(),
                 states: BTreeMap::new(),
                 inbox: portable::default_inbox(),
+                link: Link::default(),
                 log: Log::default(),
             },
             hosts: Vec::new(),
@@ -355,6 +429,7 @@ impl App {
             host_error: String::new(),
             join_error: String::new(),
             next_key: 1,
+            voip: Voip::default(),
             status: ("Ready. Everything runs from this folder.".into(), "idle"),
         }
     }
@@ -368,6 +443,7 @@ impl App {
         self.stop_recv();
         self.hosts.clear();
         self.joins.clear();
+        self.voip.shutdown();
     }
 
     /// Returns true when the app should exit.
@@ -495,6 +571,23 @@ impl App {
                 self.set_status("Disconnected", "idle");
             }
 
+            // ------------------------------------------------------- voip
+            "voip.host" => {
+                self.voip.host(&s("room"), &s("name"), &self.proxy);
+                self.set_status("Opening your room…", "busy");
+            }
+            "voip.join" => {
+                self.voip.join(&s("code"), &s("name"), &self.proxy);
+                self.set_status("Joining the room through TailCat…", "busy");
+            }
+            "voip.leave" => {
+                self.voip.leave();
+                self.set_status("Left the room", "idle");
+            }
+            "voip.chat" => self.voip.chat(&s("text")),
+            "voip.voice" => self.voip.voice(msg["on"].as_bool().unwrap_or(false), &self.proxy),
+            "voip.mute" => self.voip.set_mute(msg["muted"].as_bool().unwrap_or(false), msg["deaf"].as_bool().unwrap_or(false)),
+
             // ------------------------------------------------------- misc
             "copy" => {
                 let ok = arboard::Clipboard::new().and_then(|mut c| c.set_text(s("text"))).is_ok();
@@ -532,6 +625,7 @@ impl App {
         }
         self.share.error.clear();
         self.share.log = Log::default();
+        self.share.link = Link::default();
         let server = match Server::start(self.share.lib.clone(), self.proxy.clone()) {
             Ok(s) => s,
             Err(e) => return self.fail_share(e),
@@ -569,9 +663,11 @@ impl App {
         self.stop_recv();
         self.recv.error.clear();
         self.recv.log = Log::default();
+        self.recv.link = Link::default();
         let c = match code::parse(input) {
             Ok(c) if c.kind == Kind::File => c,
             Ok(c) if c.kind == Kind::Port => return self.fail_recv("That's a port code. Paste it in the Ports tab.".into()),
+            Ok(c) if c.kind == Kind::Voip => return self.fail_recv("That's a room code. Paste it in the VOIP tab.".into()),
             Ok(_) => return self.fail_recv("That's a port code. Paste it in the Ports tab, or ask for the file code (it starts with kitty:file:).".into()),
             Err(e) => return self.fail_recv(e),
         };
@@ -623,7 +719,10 @@ impl App {
             if let Some(file) = self.recv.files.iter().find(|f| f.id == *id).cloned() {
                 let total = file.size;
                 if jobs.send(share::Job { file, dest: self.recv.inbox.clone() }).is_ok() {
-                    self.recv.states.insert(*id, FileState { st: "queued", done: 0, total, path: None, error: String::new() });
+                    self.recv.states.insert(
+                        *id,
+                        FileState { st: "queued", done: 0, total, speed: Speed::new(0), path: None, error: String::new() },
+                    );
                     n += 1;
                 }
             }
@@ -659,7 +758,11 @@ impl App {
                 idle.join(", ")
             )
         };
-        let list: Vec<String> = ports.iter().map(|p| p.to_string()).collect();
+        let mut list: Vec<String> = ports.iter().map(|p| p.to_string()).collect();
+        // The beacon rides in the same tunnel so the friend can tell we're still here.
+        if let Some(b) = beacon::ensure().filter(|b| !ports.contains(b)) {
+            list.push(b.to_string());
+        }
         let args = vec!["serve".into(), "--key=new".into(), list.join(",")];
         match tailcat::spawn(Role::PortHost, &args, &self.proxy) {
             Ok(p) => {
@@ -672,6 +775,7 @@ impl App {
                     proc: Some(p),
                     ports,
                     addr: None,
+                    link: Link::default(),
                     log: Log::default(),
                 });
                 self.set_status("Starting TailCat…", "busy");
@@ -686,6 +790,7 @@ impl App {
             Ok(c) if c.kind == Kind::File => {
                 return self.join_error = "That's a file share code. Paste it in the File Share tab.".into()
             }
+            Ok(c) if c.kind == Kind::Voip => return self.join_error = "That's a room code. Paste it in the VOIP tab.".into(),
             Ok(c) => c,
             Err(e) => return self.join_error = e,
         };
@@ -719,9 +824,15 @@ impl App {
         }
         args.push(c.addr);
         args.extend(maps.iter().map(|(l, r)| format!("{l}:{r}")));
+        // A private local port to the host's beacon, for the 30-second check.
+        let beacon = (!remotes.contains(&beacon::PORT)).then(free_port).and_then(Result::ok);
+        if let Some(b) = beacon {
+            args.push(format!("{b}:{}", beacon::PORT));
+        }
         match tailcat::spawn(Role::PortJoin, &args, &self.proxy) {
             Ok(p) => {
                 let key = self.key();
+                let link = Link { next_ping: Some(Instant::now() + Duration::from_secs(4)), ..Link::default() };
                 self.joins.insert(0, PortJoin {
                     key,
                     st: St::Starting,
@@ -730,6 +841,8 @@ impl App {
                     maps,
                     lan,
                     started: Instant::now(),
+                    beacon,
+                    link,
                     log: Log::default(),
                 });
                 self.set_status("Connecting through TailCat…", "busy");
@@ -741,16 +854,22 @@ impl App {
     // -------------------------------------------------------------- events
 
     fn on_tailcat(&mut self, role: Role, id: u64, ev: TcEvent) -> bool {
+        // --verbose networking chatter changes nothing; drop it before it costs a redraw.
+        if let TcEvent::Line(l) = &ev {
+            if tailcat::is_verbose(l) && !tailcat::keep_verbose(l) {
+                return false;
+            }
+        }
         let current = |p: &Option<Proc>| p.as_ref().map(|p| p.id) == Some(id);
         match role {
             Role::ShareHost if current(&self.share.proc) => match ev {
                 TcEvent::Line(line) => {
-                    if let Some(addr) = tailcat::find_addr(&line) {
+                    if let Some(addr) = tailcat::find_addr(&line).filter(|_| !tailcat::is_verbose(&line)) {
                         self.share.addr = Some(addr);
                         self.share.st = St::Live;
                         self.set_status("Sharing is live. Send the code to your friend.", "ok");
                     }
-                    self.share.log.push(line);
+                    tc_line(&mut self.share.log, &mut self.share.link, line);
                 }
                 TcEvent::Exited => {
                     let code = self.share.proc.as_mut().and_then(|p| p.exit_code());
@@ -760,7 +879,7 @@ impl App {
                 }
             },
             Role::RecvForward if current(&self.recv.proc) => match ev {
-                TcEvent::Line(line) => self.recv.log.push(line),
+                TcEvent::Line(line) => tc_line(&mut self.recv.log, &mut self.recv.link, line),
                 TcEvent::Exited => {
                     let why = last_words(&self.recv.log);
                     self.fail_recv(format!("The tunnel closed. {why}"));
@@ -770,12 +889,12 @@ impl App {
                 let Some(h) = self.hosts.iter_mut().find(|h| current(&h.proc)) else { return false };
                 match ev {
                     TcEvent::Line(line) => {
-                        if let Some(addr) = tailcat::find_addr(&line) {
+                        if let Some(addr) = tailcat::find_addr(&line).filter(|_| !tailcat::is_verbose(&line)) {
                             h.addr = Some(addr);
                             h.st = St::Live;
                             self.status = ("Port is open. Send the code and port number to your friend.".into(), "ok");
                         }
-                        h.log.push(line);
+                        tc_line(&mut h.log, &mut h.link, line);
                     }
                     TcEvent::Exited => {
                         let why = last_words(&h.log);
@@ -791,11 +910,11 @@ impl App {
                 match ev {
                     TcEvent::Line(line) => {
                         let l = line.to_ascii_lowercase();
-                        if j.st == St::Starting && (l.contains("listening") || l.contains("forwarding") || l.contains("127.0.0.1:")) {
+                        if j.st == St::Starting && !tailcat::is_verbose(&line) && (l.contains("listening") || l.contains("forwarding")) {
                             j.st = St::Live;
                             self.status = ("Connected. Use the address shown.".into(), "ok");
                         }
-                        j.log.push(line);
+                        tc_line(&mut j.log, &mut j.link, line);
                     }
                     TcEvent::Exited => {
                         let why = last_words(&j.log);
@@ -805,6 +924,7 @@ impl App {
                     }
                 }
             }
+            Role::VoipHost | Role::VoipJoin => return self.voip.on_tailcat(role, id, ev),
             _ => return false,
         }
         true
@@ -813,7 +933,16 @@ impl App {
     fn on_share(&mut self, ev: ShareEvent) -> bool {
         match ev {
             ShareEvent::Sending { conn, name, done, total } => {
-                self.share.sending.insert(conn, (name, done, total));
+                let s = self.share.sending.entry(conn).or_insert_with(|| Sending {
+                    name: name.clone(),
+                    done,
+                    total,
+                    speed: Speed::new(done),
+                });
+                s.name = name;
+                s.done = done;
+                s.total = total;
+                s.speed.update(done);
             }
             ShareEvent::Sent { conn, name, ok } => {
                 self.share.sending.remove(&conn);
@@ -835,6 +964,12 @@ impl App {
         match ev {
             RecvEvent::List(Ok(files)) => {
                 self.recv.st = St::Live;
+                // The list arriving proves the tunnel; keep checking every 30 seconds.
+                if !self.recv.link.ok_once {
+                    self.recv.link.ok_once = true;
+                    self.recv.link.peer_seen = true;
+                    self.recv.link.next_ping = Some(Instant::now());
+                }
                 let n = files.len();
                 self.recv.files = files;
                 self.set_status(format!("Connected. {n} file{} shared with you.", plural(n)), "ok");
@@ -845,9 +980,13 @@ impl App {
             }
             RecvEvent::Progress { id, done, total } => {
                 if let Some(s) = self.recv.states.get_mut(&id) {
+                    if s.st != "downloading" {
+                        s.speed = Speed::new(done);
+                    }
                     s.st = "downloading";
                     s.done = done;
                     s.total = total;
+                    s.speed.update(done);
                 }
             }
             RecvEvent::Done { id, result } => {
@@ -888,7 +1027,66 @@ impl App {
                 changed = true;
             }
         }
+
+        // Every 30 seconds, ping the far end through each tunnel we joined.
+        let now = Instant::now();
+        if self.recv.st == St::Live && self.recv.link.ok_once && self.recv.link.ping_due(now) {
+            self.recv.link.ping_started();
+            self.spawn_ping(PingTarget::Recv(self.recv.port), self.recv.port);
+        }
+        let due: Vec<(u64, u16)> = self
+            .joins
+            .iter_mut()
+            .filter(|j| j.proc.is_some() && j.link.ping_due(now))
+            .filter_map(|j| {
+                let b = j.beacon?;
+                j.link.ping_started();
+                Some((j.key, b))
+            })
+            .collect();
+        for (key, port) in due {
+            self.spawn_ping(PingTarget::Join(key), port);
+        }
+        changed |= self.voip.tick();
         changed
+    }
+
+    fn spawn_ping(&self, target: PingTarget, port: u16) {
+        let proxy = self.proxy.clone();
+        std::thread::spawn(move || {
+            let result = tailcat::ping_port(port, Duration::from_secs(10));
+            let _ = proxy.send_event(UserEvent::Ping(target, result));
+        });
+    }
+
+    fn on_ping(&mut self, target: PingTarget, result: Result<Duration, String>) -> bool {
+        match target {
+            PingTarget::Recv(port) => {
+                if self.recv.port != port || self.recv.st != St::Live {
+                    return false;
+                }
+                if self.recv.link.ping_result(result) {
+                    self.fail_recv("The sharer stopped sharing or went offline.".into());
+                }
+            }
+            PingTarget::Join(key) => {
+                let Some(j) = self.joins.iter_mut().find(|j| j.key == key) else { return false };
+                if j.proc.is_none() {
+                    return false;
+                }
+                if j.link.ping_result(result) {
+                    j.proc = None;
+                    j.st = St::Error;
+                    j.error = "Your friend closed this port or went offline.".into();
+                    self.status = ("A joined port was disconnected by the other side.".into(), "bad");
+                }
+                // An older host with no beacon never answers; stop asking after a few tries.
+                if !j.link.ok_once && j.link.fails >= 3 {
+                    j.beacon = None;
+                }
+            }
+        }
+        true
     }
 
     fn snapshot(&self) -> Value {
@@ -909,6 +1107,7 @@ impl App {
                     "st": s.map(|s| s.st).unwrap_or("idle"),
                     "done": s.map(|s| s.done).unwrap_or(0),
                     "total": s.map(|s| s.total).unwrap_or(f.size),
+                    "speed": s.map(|s| s.speed.bps as u64).unwrap_or(0),
                     "error": s.map(|s| s.error.clone()).unwrap_or_default(),
                 })
             })
@@ -922,8 +1121,11 @@ impl App {
                 "code": share_code,
                 "files": files,
                 "totalSize": total,
-                "sending": self.share.sending.values().map(|(n, d, t)| json!({ "name": n, "done": d, "total": t })).collect::<Vec<_>>(),
+                "sending": self.share.sending.values().map(|s| json!({
+                    "name": s.name, "done": s.done, "total": s.total, "speed": s.speed.bps as u64,
+                })).collect::<Vec<_>>(),
                 "sent": self.share.sent,
+                "link": self.share.link.json(),
                 "log": self.share.log.json(),
             },
             "recv": {
@@ -931,8 +1133,10 @@ impl App {
                 "error": self.recv.error,
                 "files": recv_files,
                 "inbox": self.recv.inbox.display().to_string(),
+                "link": self.recv.link.json(),
                 "log": self.recv.log.json(),
             },
+            "voip": self.voip.json(),
             "hostError": self.host_error,
             "joinError": self.join_error,
             "hosts": self.hosts.iter().map(|h| json!({
@@ -942,6 +1146,7 @@ impl App {
                 "warn": h.warn,
                 "ports": h.ports,
                 "code": h.addr,
+                "link": h.link.json(),
                 "log": h.log.json(),
             })).collect::<Vec<_>>(),
             "joins": self.joins.iter().map(|j| json!({
@@ -950,6 +1155,8 @@ impl App {
                 "error": j.error,
                 "lan": j.lan,
                 "maps": j.maps.iter().map(|(l, r)| json!({ "local": l, "remote": r })).collect::<Vec<_>>(),
+                "link": j.link.json(),
+                "checks": j.beacon.is_some(),
                 "log": j.log.json(),
             })).collect::<Vec<_>>(),
         })

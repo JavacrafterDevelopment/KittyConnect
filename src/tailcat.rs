@@ -25,6 +25,8 @@ pub enum Role {
     RecvForward,
     PortHost,
     PortJoin,
+    VoipHost,
+    VoipJoin,
 }
 
 pub enum TcEvent {
@@ -86,7 +88,10 @@ pub fn spawn(role: Role, args: &[String], proxy: &EventLoopProxy<UserEvent>) -> 
     let home = home();
 
     let mut cmd = Command::new(&exe);
-    cmd.args(args)
+    // --verbose (a root flag, so it goes first) is what makes TailCat log
+    // "now using <ip:port>" when the tunnel goes direct; see [`Link`].
+    cmd.arg("--verbose")
+        .args(args)
         .current_dir(&home)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -155,6 +160,126 @@ pub fn is_addr(t: &str) -> bool {
     t.len() >= 40 && t.starts_with("tc") && t.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
+/// A Go `log.Printf` line ("2026/11/12 01:02:03 ..."), which TailCat only
+/// writes with --verbose. Most are networking chatter and stay out of the
+/// visible log; [`keep_verbose`] picks the ones worth showing.
+pub fn is_verbose(line: &str) -> bool {
+    let b = line.as_bytes();
+    b.len() > 20 && b[4] == b'/' && b[7] == b'/' && b[10] == b' ' && b[13] == b':' && b[..4].iter().all(u8::is_ascii_digit)
+}
+
+pub fn keep_verbose(line: &str) -> bool {
+    let l = line.to_ascii_lowercase();
+    l.contains("now using") || l.contains("got meow") || l.contains("error") || l.contains("fail")
+}
+
+/// How one tunnel is carried, and whether the far end still answers.
+///
+/// TailCat always starts over a DERP relay and logs
+/// `magicsock: disco: node … now using <ip:port>` when hole punching finds a
+/// direct path. KittyConnect also pings the far end through the tunnel every
+/// 30 seconds for the round-trip time and to notice when it's gone.
+#[derive(Clone, Default)]
+pub struct Link {
+    pub direct: Option<String>,
+    /// True once the far end has been seen at all (a meow, a pong, a reply).
+    pub peer_seen: bool,
+    pub rtt_ms: Option<u32>,
+    pub checked: Option<std::time::Instant>,
+    pub ok_once: bool,
+    pub fails: u8,
+    pub pinging: bool,
+    pub next_ping: Option<std::time::Instant>,
+}
+
+pub const PING_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
+pub const PING_RETRY: std::time::Duration = std::time::Duration::from_secs(5);
+
+impl Link {
+    /// Reads one TailCat output line. Returns true if the link changed.
+    pub fn observe(&mut self, line: &str) -> bool {
+        if let Some(rest) = line.split("now using ").nth(1) {
+            let addr = rest.split_whitespace().next().unwrap_or("").to_string();
+            // A peer-relay path (Tailscale's, not DERP) carries a VNI; it's still a relay.
+            if addr.is_empty() || addr.contains("vni") {
+                return false;
+            }
+            self.direct = Some(addr);
+            self.peer_seen = true;
+            return true;
+        }
+        if line.contains("got meow from") && !self.peer_seen {
+            self.peer_seen = true;
+            return true;
+        }
+        false
+    }
+
+    pub fn ping_due(&self, now: std::time::Instant) -> bool {
+        !self.pinging && self.next_ping.is_none_or(|t| now >= t)
+    }
+
+    pub fn ping_started(&mut self) {
+        self.pinging = true;
+    }
+
+    /// Records a ping result. Returns true when the far end should be treated
+    /// as gone: two failures in a row after it has answered before.
+    pub fn ping_result(&mut self, result: Result<std::time::Duration, String>) -> bool {
+        let now = std::time::Instant::now();
+        self.pinging = false;
+        self.checked = Some(now);
+        match result {
+            Ok(rtt) => {
+                self.rtt_ms = Some(rtt.as_millis().min(u32::MAX as u128) as u32);
+                self.ok_once = true;
+                self.peer_seen = true;
+                self.fails = 0;
+                self.next_ping = Some(now + PING_EVERY);
+                false
+            }
+            Err(_) => {
+                self.fails = self.fails.saturating_add(1);
+                self.next_ping = Some(now + if self.fails == 1 { PING_RETRY } else { PING_EVERY });
+                self.ok_once && self.fails >= 2
+            }
+        }
+    }
+
+    pub fn json(&self) -> serde_json::Value {
+        let kind = match (&self.direct, self.peer_seen) {
+            (Some(_), _) => "direct",
+            (None, true) => "relay",
+            (None, false) => "unknown",
+        };
+        serde_json::json!({
+            "path": kind,
+            "endpoint": self.direct,
+            "rtt": self.rtt_ms,
+            "checkedAgo": self.checked.map(|t| t.elapsed().as_secs()),
+        })
+    }
+}
+
+/// One request/reply ping through a forwarded port: `{"op":"ping"}` →
+/// a line containing `"pong"`. Answered by the file server and the port
+/// beacon on the far side, so a reply means the whole tunnel is up.
+pub fn ping_port(port: u16, timeout: std::time::Duration) -> Result<std::time::Duration, String> {
+    use std::io::Write;
+    let t0 = std::time::Instant::now();
+    let addr = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port));
+    let mut s = std::net::TcpStream::connect_timeout(&addr, timeout).map_err(|e| e.to_string())?;
+    s.set_read_timeout(Some(timeout)).ok();
+    s.write_all(b"{\"op\":\"ping\"}\n").map_err(|e| e.to_string())?;
+    let mut line = String::new();
+    BufReader::new(s.take(4096)).read_line(&mut line).map_err(|e| e.to_string())?;
+    if line.contains("pong") {
+        Ok(t0.elapsed())
+    } else {
+        Err("no answer".into())
+    }
+}
+
 /// A job object with kill-on-close: when KittyConnect exits, however it exits,
 /// Windows ends every TailCat it started.
 #[cfg(windows)]
@@ -207,5 +332,29 @@ mod tests {
         assert_eq!(find_addr(&format!("# 🐈 Server listening with new address: {a}")).as_deref(), Some(a));
         assert_eq!(find_addr(&format!("# 🐈 Server listening with saved key \"default\": {a}")).as_deref(), Some(a));
         assert_eq!(find_addr("# Selected bootstrap relay region 302, San Francisco"), None);
+    }
+
+    #[test]
+    fn link_sees_direct_path() {
+        let mut l = Link::default();
+        assert_eq!(l.json()["path"], "unknown");
+        let line = "2026/11/12 01:02:03 magicsock: disco: node [abc] d:123 now using 203.0.113.7:41641 mtu=1360 tx=a1b2c3";
+        assert!(is_verbose(line) && keep_verbose(line));
+        assert!(l.observe(line));
+        assert_eq!(l.json()["path"], "direct");
+        assert_eq!(l.direct.as_deref(), Some("203.0.113.7:41641"));
+        assert!(!is_verbose("# forwarding 127.0.0.1:5000 -> remote 25565"));
+    }
+
+    #[test]
+    fn link_gives_up_after_two_misses() {
+        let mut l = Link::default();
+        // Never answered (an older host without the beacon): never "gone".
+        assert!(!l.ping_result(Err("x".into())));
+        assert!(!l.ping_result(Err("x".into())));
+        assert!(!l.ping_result(Ok(std::time::Duration::from_millis(20))));
+        assert_eq!(l.json()["path"], "relay");
+        assert!(!l.ping_result(Err("x".into())));
+        assert!(l.ping_result(Err("x".into())));
     }
 }

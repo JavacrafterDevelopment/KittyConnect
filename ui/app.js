@@ -47,6 +47,38 @@ function setHtml(el, html) {
   el.innerHTML = html;
 }
 
+function speed(bps) {
+  return bps > 0 ? `${size(bps)}/s` : '';
+}
+
+function ago(at) {
+  const s = Math.max(0, Math.round(Date.now() / 1000 - at));
+  if (s < 5) return 'checked just now';
+  if (s < 60) return `checked ${s}s ago`;
+  return `checked ${Math.floor(s / 60)} min ago`;
+}
+
+/* Relay or direct, with the round trip from the last 30-second check.
+   `who` names the far end in the tooltip. Returns '' while nothing is known. */
+function linkPill(link, who = 'your friend') {
+  if (!link || link.path === 'unknown') return '';
+  const direct = link.path === 'direct';
+  const rtt = link.rtt != null ? ` · ${link.rtt} ms` : '';
+  const at = link.checkedAgo != null ? Math.round(Date.now() / 1000 - link.checkedAgo) : null;
+  const how = direct
+    ? `Direct peer-to-peer connection to ${who}${link.endpoint ? ` (${link.endpoint})` : ''}`
+    : `Going through a TailCat relay to ${who}. Still end-to-end encrypted; it switches to direct if it can.`;
+  return `<span class="linkpill ${direct ? 'direct' : 'relay'}" title="${esc(how)}">`
+    + `<span class="dot"></span>${direct ? 'Direct' : 'Relay'}${rtt}`
+    + (at != null ? ` <span class="ago" data-at="${at}">${ago(at)}</span>` : '')
+    + '</span>';
+}
+
+// Keeps "checked 12s ago" honest between snapshots.
+setInterval(() => {
+  document.querySelectorAll('[data-at]').forEach((el) => { el.textContent = ago(Number(el.dataset.at)); });
+}, 5000);
+
 function show(el, on) { el.classList.toggle('on', !!on); }
 function hide(el, hidden) { el.classList.toggle('hide', !!hidden); }
 
@@ -181,6 +213,7 @@ function renderShare(s) {
   const busy = s.st === 'starting' || live;
   pill('share-pill', 'share', s.st);
   $('share-card').classList.toggle('live', live);
+  setHtml($('share-link'), live ? linkPill(s.link, 'whoever is downloading') : '');
 
   setHtml($('share-files'), s.files.map((f) => `
     <div class="file">
@@ -200,7 +233,7 @@ function renderShare(s) {
 
   setHtml($('share-activity'), s.sending.map((t) => `
     <div class="act">
-      <div class="act-row"><span>Sending <b>${esc(t.name.split('/').pop())}</b></span><span class="meta">${size(t.done)} of ${size(t.total)}</span></div>
+      <div class="act-row"><span>Sending <b>${esc(t.name.split('/').pop())}</b></span><span class="meta">${size(t.done)} of ${size(t.total)}${t.speed ? ` · ${speed(t.speed)}` : ''}</span></div>
       <div class="bar-wrap"><div class="bar" style="width:${pct(t.done, t.total)}%"></div></div>
     </div>`).join(''));
 
@@ -216,6 +249,7 @@ function renderRecv(r) {
   const on = r.st === 'starting' || r.st === 'live';
   pill('recv-pill', 'recv', r.st);
   $('recv-card').classList.toggle('live', r.st === 'live');
+  setHtml($('recv-link'), r.st === 'live' ? linkPill(r.link, 'the sharer') : '');
   $('recv-code').disabled = on;
   hide($('recv-connect'), on);
   hide($('recv-stop'), !on);
@@ -235,7 +269,7 @@ function renderRecv(r) {
       let meta = size(f.size), cls = '', btn = `<button class="iconbtn" data-get="${f.id}" title="Download">${ICON_DL}</button>`, bar = '';
       if (f.st === 'queued') { meta = 'Waiting…'; btn = ''; }
       if (f.st === 'downloading') {
-        meta = `${size(f.done)} of ${size(f.total)} · ${pct(f.done, f.total)}%`; btn = '';
+        meta = `${size(f.done)} of ${size(f.total)} · ${pct(f.done, f.total)}%${f.speed ? ` · ${speed(f.speed)}` : ''}`; btn = '';
         bar = `<div class="bar-wrap"><div class="bar" style="width:${pct(f.done, f.total)}%"></div></div>`;
       }
       if (f.st === 'done') { meta = `Saved · ${size(f.size)}`; cls = 'ok'; btn = `<button class="iconbtn" data-reveal="${f.id}" title="Show in folder">${ICON_FOLDER}</button>`; }
@@ -291,13 +325,14 @@ function sessLog(id, lines) {
     </div>`;
 }
 
-function sessHead(title, kind, st, stopAttr) {
+function sessHead(title, kind, st, stopAttr, link = '') {
   const [cls, text] = PILL[kind][st] || PILL[kind].off;
   const stop = st === 'error' ? 'Remove' : (kind === 'host' ? 'Stop' : 'Disconnect');
   return `
     <div class="sess-head">
       <span class="sess-title">${title}</span>
       <span class="pill ${cls}"><span class="dot"></span><span class="pill-text">${text}</span></span>
+      ${st === 'live' ? link : ''}
       <span class="grow"></span>
       <button class="btn small ${st === 'error' ? 'ghost' : 'danger'}" ${stopAttr}>${stop}</button>
     </div>`;
@@ -316,7 +351,7 @@ function renderHosts(hosts, error) {
   $('host-count').textContent = hosts.length ? `${live} open` : '';
   setHtml($('host-list'), hosts.length ? hosts.map((h) => `
     <div class="sess${h.st === 'live' ? ' live' : ''}">
-      ${sessHead(portList(h.ports), 'host', h.st, `data-stop-host="${h.key}"`)}
+      ${sessHead(portList(h.ports), 'host', h.st, `data-stop-host="${h.key}"`, linkPill(h.link))}
       ${h.st === 'starting' ? '<p class="meta">Getting a code from TailCat…</p>' : ''}
       ${h.st === 'live' && h.code ? `
         <div class="sess-code">
@@ -405,7 +440,7 @@ function renderJoins(joins, error) {
   $('join-count').textContent = joins.length ? `${live} connected` : '';
   setHtml($('join-list'), joins.length ? joins.map((j) => `
     <div class="sess${j.st === 'live' ? ' live' : ''}">
-      ${sessHead(portList(j.maps.map((m) => m.remote)), 'join', j.st, `data-stop-join="${j.key}"`)}
+      ${sessHead(portList(j.maps.map((m) => m.remote)), 'join', j.st, `data-stop-join="${j.key}"`, linkPill(j.link))}
       ${j.st === 'starting' ? '<p class="meta">Reaching your friend through TailCat…</p>' : ''}
       ${j.st === 'live' ? j.maps.map((m) => `
         <div class="addr">
@@ -418,6 +453,159 @@ function renderJoins(joins, error) {
     </div>`).join('') : '<div class="empty">Not connected to any ports. Paste a code above to join one.</div>');
 }
 
+/* ------------------------------------------------------------------- voip */
+
+// The name is remembered for next time, in this app's own (portable) profile.
+try { $('voip-name').value = localStorage.getItem('kc-name') || ''; } catch (_) { /* no storage */ }
+$('voip-name').addEventListener('change', () => {
+  try { localStorage.setItem('kc-name', $('voip-name').value.trim()); } catch (_) { /* no storage */ }
+});
+
+function voipName() {
+  const n = $('voip-name').value.trim();
+  if (!n) $('voip-name').focus();
+  return n;
+}
+
+$('voip-host').addEventListener('click', () => {
+  const name = voipName();
+  if (name) post({ cmd: 'voip.host', name, room: $('voip-room-name').value.trim() || 'Hangout' });
+});
+$('voip-join').addEventListener('click', () => {
+  const name = voipName();
+  if (name) post({ cmd: 'voip.join', name, code: $('voip-code').value });
+});
+$('voip-code').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('voip-join').click(); });
+$('voip-room-name').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('voip-host').click(); });
+$('voip-leave').addEventListener('click', () => post({ cmd: 'voip.leave' }));
+$('voip-chatform').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const text = $('voip-text').value.trim();
+  if (!text) return;
+  post({ cmd: 'voip.chat', text });
+  $('voip-text').value = '';
+});
+$('voip-voice-join').addEventListener('click', () => post({ cmd: 'voip.voice', on: true }));
+$('voip-voice-leave').addEventListener('click', () => post({ cmd: 'voip.voice', on: false }));
+let voipState = null;
+$('voip-mute').addEventListener('click', () => {
+  if (voipState) post({ cmd: 'voip.mute', muted: !voipState.muted, deaf: false });
+});
+$('voip-deaf').addEventListener('click', () => {
+  if (voipState) post({ cmd: 'voip.mute', muted: voipState.muted, deaf: !voipState.deaf });
+});
+
+const VOIP_PILL = { starting: ['busy', 'Connecting'], live: ['ok', 'Connected'] };
+const ICON_MUTED = '<svg width="13" height="13" viewBox="0 0 16 16" fill="none"><rect x="5.5" y="1.5" width="5" height="8.5" rx="2.5" stroke="currentColor" stroke-width="1.4"/><path d="M3 7.5a5 5 0 0 0 10 0M8 12.5v2M2 2l12 12" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>';
+const ICON_DEAF = '<svg width="13" height="13" viewBox="0 0 16 16" fill="none"><path d="M2.5 10V8a5.5 5.5 0 0 1 11 0v2" stroke="currentColor" stroke-width="1.4"/><rect x="1.8" y="9.5" width="3" height="4.5" rx="1.2" stroke="currentColor" stroke-width="1.4"/><rect x="11.2" y="9.5" width="3" height="4.5" rx="1.2" stroke="currentColor" stroke-width="1.4"/><path d="M2 2l12 12" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>';
+
+function initials(name) {
+  const parts = name.trim().split(/\s+/);
+  return ((parts[0] || '?')[0] + (parts.length > 1 ? parts[parts.length - 1][0] : '')).toUpperCase();
+}
+
+function hue(name) {
+  let h = 0;
+  for (const c of name) h = (h * 31 + c.charCodeAt(0)) >>> 0;
+  return 200 + (h % 50); // blues and teals
+}
+
+function person(m, v, speaking) {
+  const you = m.id === v.me;
+  const tags = [];
+  if (m.host) tags.push('<span class="tag-sm">Host</span>');
+  if (you) tags.push('<span class="tag-sm you">You</span>');
+  const link = m.host ? '' : linkPill({ path: m.path, rtt: m.rtt }, m.name);
+  const icons = m.deaf ? `<span class="ico" title="Deafened">${ICON_DEAF}</span>` : m.muted ? `<span class="ico" title="Muted">${ICON_MUTED}</span>` : '';
+  return `
+    <div class="person" data-member="${m.id}">
+      <span class="avatar${speaking.includes(m.id) ? ' speaking' : ''}" style="--h:${hue(m.name)}">${esc(initials(m.name))}</span>
+      <span class="person-name">${esc(m.name)}</span>
+      ${tags.join('')}${icons}
+      <span class="grow"></span>
+      ${link}
+    </div>`;
+}
+
+function time(ts) {
+  const d = new Date(ts * 1000);
+  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+function renderVoip(v) {
+  voipState = v;
+  const inRoom = v.st === 'starting' || v.st === 'live';
+  hide($('voip-lobby'), inRoom);
+  hide($('voip-room'), !inRoom);
+  $('voip-error').textContent = v.error;
+  show($('voip-error'), !inRoom && v.error);
+  $('voip-notice').textContent = v.notice;
+  show($('voip-notice'), !inRoom && v.notice);
+  if (!inRoom) return;
+
+  const [cls, text] = VOIP_PILL[v.st];
+  $('voip-pill').className = `pill ${cls}`;
+  $('voip-pill').querySelector('.pill-text').textContent = v.st === 'live' && v.mode === 'host' ? 'Hosting' : text;
+  $('voip-room-title').textContent = v.room || (v.mode === 'host' ? 'Opening your room…' : 'Joining…');
+  setHtml($('voip-link'), v.mode === 'join' && v.st === 'live' ? linkPill(v.link, 'the host') : '');
+  $('voip-leave').textContent = v.mode === 'host' ? 'End room' : 'Leave room';
+  $('voip-leave').title = v.mode === 'host' ? 'Closes the room for everyone' : '';
+  $('voip-room-code').textContent = v.code || '';
+  show($('voip-codebox'), v.code);
+  $('voip-codebox').classList.toggle('on', !!v.code);
+
+  // Chat: stay pinned to the bottom unless the user has scrolled up to read.
+  const list = $('voip-chat');
+  const atBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 30;
+  setHtml(list, v.chat.length ? v.chat.map((m) => m.system
+    ? `<div class="msg system"><span>${esc(m.text)}</span><span class="msg-time">${time(m.ts)}</span></div>`
+    : `<div class="msg${m.from === v.me ? ' mine' : ''}">
+         <div class="msg-head"><span class="msg-name" style="--h:${hue(m.name)}">${esc(m.name)}</span><span class="msg-time">${time(m.ts)}</span></div>
+         <div class="msg-text">${esc(m.text)}</div>
+       </div>`).join('') : '<div class="empty">No messages yet. Say hi.</div>');
+  if (atBottom) list.scrollTop = list.scrollHeight;
+  $('voip-text').disabled = v.st !== 'live';
+
+  // Voice.
+  const voiceMembers = v.members.filter((m) => m.voice);
+  $('voip-voice-count').textContent = voiceMembers.length ? `${voiceMembers.length} in voice` : '';
+  hide($('voip-voice-join'), v.inVoice || v.st !== 'live');
+  hide($('voip-voice-leave'), !v.inVoice);
+  hide($('voip-mute'), !v.inVoice);
+  hide($('voip-deaf'), !v.inVoice);
+  $('voip-mute').classList.toggle('active', v.muted);
+  $('voip-mute').textContent = v.muted ? 'Unmute' : 'Mute';
+  $('voip-deaf').classList.toggle('active', v.deaf);
+  $('voip-deaf').textContent = v.deaf ? 'Undeafen' : 'Deafen';
+  hide($('voip-meterrow'), !v.inVoice);
+  $('voip-devices').textContent = v.devices;
+  $('voip-voice-error').textContent = v.voiceError;
+  show($('voip-voice-error'), v.voiceError);
+  const speaking = liveSpeaking(v);
+  setHtml($('voip-invoice'), voiceMembers.length
+    ? voiceMembers.map((m) => person(m, v, speaking)).join('')
+    : '<div class="empty small">Nobody is in voice yet.</div>');
+  setHtml($('voip-members'), v.members.map((m) => person(m, v, speaking)).join(''));
+  renderLog('voip', v.log);
+}
+
+/* The quick updates: who's talking (from the audio) and your mic level. */
+let lastSpeaking = [];
+let meTalking = false;
+function liveSpeaking(v) {
+  return meTalking && v ? [...lastSpeaking, v.me] : lastSpeaking;
+}
+
+function voipLive(msg) {
+  if (msg.speaking) lastSpeaking = msg.speaking;
+  if (msg.talking != null) meTalking = msg.talking;
+  if (msg.level != null) $('voip-meter').style.width = `${Math.round(msg.level * 100)}%`;
+  const speaking = new Set(liveSpeaking(voipState && { me: msg.me }));
+  document.querySelectorAll('#page-voip [data-member]').forEach((el) => {
+    el.querySelector('.avatar').classList.toggle('speaking', speaking.has(Number(el.dataset.member)));
+  });
+}
+
 /* ------------------------------------------------------------ host events */
 
 window.onHost = (msg) => {
@@ -427,15 +615,21 @@ window.onHost = (msg) => {
       renderRecv(msg.recv);
       renderHosts(msg.hosts, msg.hostError);
       renderJoins(msg.joins, msg.joinError);
+      renderVoip(msg.voip);
       $('statusText').textContent = msg.status.text;
       $('lamp').className = msg.status.kind;
       const filesLive = msg.share.st === 'live' || msg.recv.st === 'live';
       const portsLive = msg.hosts.some((h) => h.st === 'live') || msg.joins.some((j) => j.st === 'live');
+      const voipLiveNow = msg.voip.st === 'live';
       show($('files-badge'), filesLive);
       show($('ports-badge'), portsLive);
-      document.documentElement.classList.toggle('live', filesLive || portsLive);
+      show($('voip-badge'), voipLiveNow);
+      document.documentElement.classList.toggle('live', filesLive || portsLive || voipLiveNow);
       break;
     }
+    case 'voipLive':
+      voipLive(msg);
+      break;
     case 'paste': {
       const input = $(msg.target);
       if (input && !input.disabled) {
@@ -460,6 +654,7 @@ $('version').textContent = `v${BOOT.version} · TailCat ${BOOT.tailcat}`;
 window.addEventListener('keydown', (e) => {
   if (e.ctrlKey && e.key === '1') page('files');
   if (e.ctrlKey && e.key === '2') page('ports');
+  if (e.ctrlKey && e.key === '3') page('voip');
 });
 document.addEventListener('contextmenu', (e) => { if (!e.target.closest('input, .code, .log-body, .err')) e.preventDefault(); });
 
@@ -484,15 +679,35 @@ if (window.ipc) {
         { id: 3, name: 'Screenshots/2026-11-11 base.png', size: 2883584 },
         { id: 4, name: 'modpack.mrpack', size: 203685888 },
       ],
-      sending: [{ name: 'world-backup.zip', done: 199229440, total: 524288000 }],
+      sending: [{ name: 'world-backup.zip', done: 199229440, total: 524288000, speed: 6815744 }],
+      link: { path: 'direct', endpoint: '203.0.113.7:41641', rtt: null, checkedAgo: null },
       log: ['# Selected bootstrap relay region 302, San Francisco', `# 🐈 Server listening with new address: ${addr}`],
     },
     recv: {
       st: 'live', error: '', inbox: 'C:\\Users\\you\\Downloads',
+      link: { path: 'direct', endpoint: '198.51.100.4:41641', rtt: 23, checkedAgo: 12 },
       files: [
         { id: 7, name: 'song.mp3', size: 8388608, st: 'done', done: 8388608, total: 8388608, error: '' },
-        { id: 8, name: 'clips/funny.mp4', size: 94371840, st: 'downloading', done: 40000000, total: 94371840, error: '' },
+        { id: 8, name: 'clips/funny.mp4', size: 94371840, st: 'downloading', done: 40000000, total: 94371840, speed: 5452595, error: '' },
         { id: 9, name: 'notes.txt', size: 2048, st: 'idle', done: 0, total: 2048, error: '' },
+      ],
+      log: [],
+    },
+    voip: {
+      st: 'live', mode: 'host', error: '', notice: '', room: 'Friday raid', name: 'Sam', me: 1,
+      code: `kitty:voip:50211:${addr}`, inVoice: true, muted: false, deaf: false, voiceError: '',
+      devices: 'Headset Microphone · Headset Earphone', speaking: [2],
+      link: { path: 'unknown' },
+      members: [
+        { id: 1, name: 'Sam', host: true, voice: true, muted: false, deaf: false, path: 'host', rtt: null },
+        { id: 2, name: 'Alex Rivera', host: false, voice: true, muted: false, deaf: false, path: 'direct', rtt: 24 },
+        { id: 3, name: 'Jo', host: false, voice: false, muted: true, deaf: false, path: 'relay', rtt: 88 },
+      ],
+      chat: [
+        { system: true, text: 'Alex Rivera joined the room', ts: 1794443000 },
+        { from: 2, name: 'Alex Rivera', text: 'yo, server is up?', ts: 1794443030 },
+        { from: 1, name: 'Sam', text: 'yep, port 25565 is open in the Ports tab', ts: 1794443060 },
+        { system: true, text: 'Jo joined the room', ts: 1794443090 },
       ],
       log: [],
     },
@@ -502,7 +717,8 @@ if (window.ipc) {
       { key: 2, st: 'live', error: '', warn: 'Nothing is running on port 25565 on this PC yet. Start your server; your friend can connect once it\'s up.', ports: [25565], code: addr, log: [] },
     ],
     joins: [
-      { key: 4, st: 'live', error: '', lan: false, maps: [{ local: 7777, remote: 7777 }], log: [] },
+      { key: 4, st: 'live', error: '', lan: false, maps: [{ local: 7777, remote: 7777 }], link: { path: 'relay', rtt: 91, checkedAgo: 40 }, log: [] },
     ],
   });
+  voipLive({ speaking: [2], me: 1, level: 0.45, talking: false });
 }

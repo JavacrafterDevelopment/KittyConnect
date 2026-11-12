@@ -1,6 +1,6 @@
 # KittyConnect
 
-Portable peer-to-peer file sharing and port opening for Windows, built in Rust on
+Portable peer-to-peer file sharing, port opening and voice/text rooms for Windows, built in Rust on
 top of [TailCat](https://github.com/tailscale/tailcat), Tailscale's open-source
 "netcat over WireGuard". It needs no account, no install, and no router setup.
 
@@ -24,7 +24,23 @@ sent over Discord, and run `KittyConnect.exe`.
 
 TailCat forwards **TCP** ports. Games that only use UDP won't work this way.
 
-File codes look like `kitty:file:51234:tc…`, and port codes are a plain TailCat address (`tc…`). A code is a
+**VOIP**
+- Type your name, then *Host a room* (you get a `kitty:voip:` code) or paste a
+  code to *Join a room*.
+- Each room has a text channel and a voice channel. **Join voice**, then
+  **Mute** or **Deafen** as needed. Everyone in the room is listed with a
+  speaking light and how they're connected. Use headphones: there's no echo
+  cancellation.
+- When the host ends the room, everyone sees it closed.
+
+**Connection status.** Everything you're connected to shows **Direct** (peer to
+peer) or **Relay** (through a TailCat relay, still end-to-end encrypted) with
+the round-trip time. KittyConnect checks every 30 seconds through the tunnel,
+and when the other side stops sharing, closes the port or ends the room, your
+side disconnects by itself and says so. Downloads show their speed.
+
+File codes look like `kitty:file:51234:tc…`, room codes `kitty:voip:50211:tc…`,
+and port codes are a plain TailCat address (`tc…`). A code is a
 secret: anyone who has it can connect while that share is on. Stopping a
 share kills its code for good, and the next start gets a new one.
 
@@ -50,6 +66,21 @@ runtime into a `WebView2\` folder beside the exe.
   only that port with `tailcat serve`. The receiver forwards a local port to it
   and requests files by id. Only files you added can be fetched. Received names
   are cleaned so they can't escape the save folder.
+- **VOIP**: the host runs a room server on `127.0.0.1` exposed with
+  `tailcat serve`; members connect through `tailcat forward`, and the host over
+  loopback. Names, chat and voice (16 kHz IMA ADPCM, about 64 kbit/s per
+  speaker, sent only while you talk) are all frames on that one connection.
+  Voice is relayed by the room, not mixed; each member mixes what they hear.
+- **Every byte between peers goes through the WireGuard-encrypted TailCat
+  tunnel.** KittyConnect's own servers and clients only ever use `127.0.0.1`.
+  The one exception is *Share with my network* on a joined port, which lets
+  devices on your own LAN reach that port on your PC.
+- **Direct or relay**: TailCat runs with `--verbose`, and its
+  `magicsock … now using <ip:port>` line marks the switch to a direct path. The
+  30-second check is a ping through the tunnel itself: to the file server, to
+  the room, or for ports to a small beacon (`127.0.0.1:47474`) the host serves
+  in the same tunnel. KittyConnect doesn't use `tailcat ping`, because each
+  run adds a new client to the host that's never removed.
 
 ## Build
 

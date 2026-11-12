@@ -15,6 +15,7 @@ use crate::tailcat::is_addr;
 pub enum Kind {
     File,
     Port,
+    Voip,
     /// A bare `tc…` address with no KittyConnect wrapper.
     Bare,
 }
@@ -28,6 +29,10 @@ pub struct Code {
 
 pub fn file(port: u16, addr: &str) -> String {
     format!("kitty:file:{port}:{addr}")
+}
+
+pub fn voip(port: u16, addr: &str) -> String {
+    format!("kitty:voip:{port}:{addr}")
 }
 
 pub fn parse(input: &str) -> Result<Code, String> {
@@ -51,7 +56,8 @@ pub fn parse(input: &str) -> Result<Code, String> {
     let kind = match parts.next() {
         Some("file") => Kind::File,
         Some("port") => Kind::Port,
-        _ => return Err("Unknown code type. Expected kitty:file:… or kitty:port:…".into()),
+        Some("voip") => Kind::Voip,
+        _ => return Err("Unknown code type. Expected kitty:file:… or kitty:voip:…".into()),
     };
     let ports = parts
         .next()
@@ -103,6 +109,8 @@ mod tests {
     fn round_trips() {
         let c = parse(&file(41234, A)).unwrap();
         assert_eq!(c, Code { kind: Kind::File, ports: vec![41234], addr: A.into() });
+        let c = parse(&voip(50001, A)).unwrap();
+        assert_eq!(c, Code { kind: Kind::Voip, ports: vec![50001], addr: A.into() });
         // Older kitty:port codes still parse.
         let c = parse(&format!("kitty:port:25565,8080:{A}")).unwrap();
         assert_eq!(c.ports, vec![25565, 8080]);

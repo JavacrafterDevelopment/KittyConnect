@@ -35,6 +35,14 @@
             Ports
             <span class="badge" id="ports-badge"></span>
           </button>
+          <button class="chip" data-page="voip" title="Text and voice rooms">
+            <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <rect x="5.5" y="1.5" width="5" height="8.5" rx="2.5" stroke="currentColor" stroke-width="1.5"/>
+              <path d="M3 7.5a5 5 0 0 0 10 0M8 12.5v2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+            </svg>
+            VOIP
+            <span class="badge" id="voip-badge"></span>
+          </button>
         </nav>
       </div>
 
@@ -69,7 +77,10 @@
             <div class="card pane" id="share-card">
               <div class="card-head">
                 <h3>Send files</h3>
-                <span class="pill" id="share-pill"><span class="dot"></span><span class="pill-text">Off</span></span>
+                <span class="row">
+                  <span id="share-link"></span>
+                  <span class="pill" id="share-pill"><span class="dot"></span><span class="pill-text">Off</span></span>
+                </span>
               </div>
 
               <div class="drop" id="share-drop">
@@ -122,7 +133,10 @@
             <div class="card pane" id="recv-card">
               <div class="card-head">
                 <h3>Receive files</h3>
-                <span class="pill" id="recv-pill"><span class="dot"></span><span class="pill-text">Off</span></span>
+                <span class="row">
+                  <span id="recv-link"></span>
+                  <span class="pill" id="recv-pill"><span class="dot"></span><span class="pill-text">Off</span></span>
+                </span>
               </div>
 
               <label class="field-label" for="recv-code">Paste the code your friend sent</label>
@@ -243,6 +257,108 @@
               <span class="meta" id="join-count"></span>
             </div>
             <div class="sessions" id="join-list"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ---------------------------------------------------------------- voip -->
+      <section id="page-voip" class="page">
+        <div class="column wide">
+          <div class="lib-head">
+            <h1 class="page-title">VOIP</h1>
+          </div>
+          <p class="lib-note">A temporary room for you and your friends: a text channel and a voice
+            channel. Names, messages and voice only travel inside the encrypted <b>TailCat</b>
+            tunnel, and nothing is kept once the room ends. Use headphones in voice, so your mic
+            doesn't pick up the call.</p>
+
+          <!-- Before joining: pick a name, then host or join. -->
+          <div id="voip-lobby">
+            <div class="namebar">
+              <label class="field-label" for="voip-name">Your name</label>
+              <input id="voip-name" class="input" maxlength="32" spellcheck="false" autocomplete="off" placeholder="What should people call you?">
+            </div>
+            <div class="panes">
+              <div class="card pane">
+                <div class="card-head"><h3>Host a room</h3></div>
+                <label class="field-label" for="voip-room-name">Room name</label>
+                <input id="voip-room-name" class="input" maxlength="40" spellcheck="false" autocomplete="off" placeholder="Hangout">
+                <div class="actions">
+                  <button class="btn primary" id="voip-host">Create room</button>
+                  <span class="meta">You get a code to send your friends.</span>
+                </div>
+              </div>
+              <div class="card pane">
+                <div class="card-head"><h3>Join a room</h3></div>
+                <label class="field-label" for="voip-code">Paste the room code</label>
+                <div class="codein">
+                  <input id="voip-code" class="input mono" spellcheck="false" autocomplete="off" placeholder="kitty:voip:…">
+                  <button class="btn small" data-paste="voip-code">Paste</button>
+                </div>
+                <div class="actions">
+                  <button class="btn primary" id="voip-join">Join room</button>
+                </div>
+              </div>
+            </div>
+            <p class="err" id="voip-error"></p>
+            <p class="warn" id="voip-notice"></p>
+          </div>
+
+          <!-- In a room. -->
+          <div id="voip-room" class="hide">
+            <div class="card roombar">
+              <div class="roombar-head">
+                <span class="room-title" id="voip-room-title"></span>
+                <span class="pill" id="voip-pill"><span class="dot"></span><span class="pill-text"></span></span>
+                <span id="voip-link"></span>
+                <span class="grow"></span>
+                <button class="btn small danger" id="voip-leave">Leave room</button>
+              </div>
+              <div class="roomcode" id="voip-codebox">
+                <code class="code" id="voip-room-code"></code>
+                <button class="btn small primary" data-copy="voip-room-code" data-discord="1">Copy for Discord</button>
+                <button class="btn small" data-copy="voip-room-code">Copy code</button>
+              </div>
+            </div>
+
+            <div class="roomgrid">
+              <div class="card chatcard">
+                <div class="card-head">
+                  <h3># chat</h3>
+                  <span class="meta">Only people in this room see it</span>
+                </div>
+                <div class="chatlist" id="voip-chat"></div>
+                <form class="chatform" id="voip-chatform">
+                  <input id="voip-text" class="input" maxlength="2000" autocomplete="off" placeholder="Message #chat">
+                  <button class="btn primary" type="submit">Send</button>
+                </form>
+              </div>
+
+              <div class="card voicecard">
+                <div class="card-head">
+                  <h3>Voice</h3>
+                  <span class="meta" id="voip-voice-count"></span>
+                </div>
+                <div class="voicectl">
+                  <button class="btn primary" id="voip-voice-join">Join voice</button>
+                  <button class="btn danger" id="voip-voice-leave">Leave voice</button>
+                  <button class="btn toggle" id="voip-mute" title="Mute your microphone">Mute</button>
+                  <button class="btn toggle" id="voip-deaf" title="Mute everyone else, and your mic">Deafen</button>
+                </div>
+                <div class="meterrow" id="voip-meterrow">
+                  <span class="meter"><span class="meter-bar" id="voip-meter"></span></span>
+                  <span class="meta" id="voip-devices"></span>
+                </div>
+                <p class="warn" id="voip-voice-error"></p>
+                <span class="field-label">In voice</span>
+                <div class="people" id="voip-invoice"></div>
+                <span class="field-label">In the room</span>
+                <div class="people" id="voip-members"></div>
+              </div>
+            </div>
+            <div class="card logcard">
+              <div class="logbox" data-log="voip"></div>
+            </div>
           </div>
         </div>
       </section>
