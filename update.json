@@ -2,21 +2,366 @@
   "schema": 1,
   "channels": {
     "beta": {
-      "version": "0.5.0",
-      "published": "2026-11-12T09:22:40Z",
-      "notes": "**Full Changelog**: https://github.com/JavacrafterDevelopment/KittyConnect/compare/v0.4.0...v0.5.0",
-      "page": "https://github.com/JavacrafterDevelopment/KittyConnect/releases/tag/v0.5.0",
+      "version": "0.6.0",
+      "published": "2026-11-12T22:33:12Z",
+      "notes": "## What's Changed\n* VOIP: voice and screen share over UDP via a TailCat-library helper by @JavacrafterDevelopment in https://github.com/JavacrafterDevelopment/KittyConnect/pull/1\n\n## New Contributors\n* @JavacrafterDevelopment made their first contribution in https://github.com/JavacrafterDevelopment/KittyConnect/pull/1\n\n**Full Changelog**: https://github.com/JavacrafterDevelopment/KittyConnect/compare/v0.5.0...v0.6.0",
+      "page": "https://github.com/JavacrafterDevelopment/KittyConnect/releases/tag/v0.6.0",
       "package": {
-        "url": "https://github.com/JavacrafterDevelopment/KittyConnect/releases/download/v0.5.0/KittyConnect-windows-x64.zip",
-        "size": 8764036,
-        "sha256": "32b69395156cc52048d0f395f138596e1487265fe0e4ef887a5043f71615e23f"
+        "url": "https://github.com/JavacrafterDevelopment/KittyConnect/releases/download/v0.6.0/KittyConnect-windows-x64.zip",
+        "size": 15263059,
+        "sha256": "fcab6143729124866112212e92f0cc2eaef3d678fb2a0391f2364aebe1187373"
       },
       "exe": "KittyConnect.exe",
       "files": [
         {
           "path": "KittyConnect.exe",
-          "size": 21630976,
-          "sha256": "ea9dbbcf48508dea77cf04c893982c0cf4cbfec1fd783d5cf94ef85e2568a323"
+          "size": 37843456,
+          "sha256": "4a451895dd840cf0eb47b89ee52c7017c073fb7bcc20921f8c58b2500de9f800"
+        },
+        {
+          "path": "licenses/kc-voip/github.com_anmitsu_go-shlex/LICENSE",
+          "size": 1068,
+          "sha256": "8ff2b7cdb75693173319e65a691da7b9a065cf3fd643264fe8b6ec9e362627f4"
+        },
+        {
+          "path": "licenses/kc-voip/github.com_anmitsu_go-shlex/VERSION.txt",
+          "size": 64,
+          "sha256": "e8458ccbf6c61c7a78fbde864c46a441651d1d6c1d3708f20a1ebde930acacb8"
+        },
+        {
+          "path": "licenses/kc-voip/github.com_dblohm7_wingoes/LICENSE",
+          "size": 1522,
+          "sha256": "d92e8b4d5e41d2effe12a1df45143765c2256bb915553a4515a16ffd9603c06a"
+        },
+        {
+          "path": "licenses/kc-voip/github.com_dblohm7_wingoes/VERSION.txt",
+          "size": 63,
+          "sha256": "56439e23544266c63df7cf7c9b4277b2cd755bde6517c8e859bf0a5f4cc25c6d"
+        },
+        {
+          "path": "licenses/kc-voip/github.com_fxamacker_cbor_v2/LICENSE",
+          "size": 1076,
+          "sha256": "78cad457d5ea7318230f3d969d4cdf29cef45524a1fc8ca3a97646da1ad7a841"
+        },
+        {
+          "path": "licenses/kc-voip/github.com_fxamacker_cbor_v2/VERSION.txt",
+          "size": 37,
+          "sha256": "cdaf46ac8be86437eb6ce15b06cbe9fd2639a391d911b790869646e36cff6488"
+        },
+        {
+          "path": "licenses/kc-voip/github.com_gaissmai_bart/LICENSE",
+          "size": 1072,
+          "sha256": "12d27746d111da33969df0ecaa9b799e22c42db7d0b6a5164f383ec934233a41"
+        },
+        {
+          "path": "licenses/kc-voip/github.com_gaissmai_bart/VERSION.txt",
+          "size": 34,
+          "sha256": "c8bb2c37f2792dfceb6ef835db3fe26c1dd2b46126f2b9b4ef973fdcbb136c88"
+        },
+        {
+          "path": "licenses/kc-voip/github.com_go-json-experiment_json/LICENSE",
+          "size": 1479,
+          "sha256": "14a34c4db2d21bf9cf80d028b802cd22fed9bf597a6c2db7ce30ee6ffd04967a"
+        },
+        {
+          "path": "licenses/kc-voip/github.com_go-json-experiment_json/VERSION.txt",
+          "size": 71,
+          "sha256": "0f5436fccb75e52c32b6f5b263a6909ac8ff0f5aa38c90be89f84acb51822caf"
+        },
+        {
+          "path": "licenses/kc-voip/github.com_golang_groupcache/LICENSE",
+          "size": 10273,
+          "sha256": "73ba74dfaa520b49a401b5d21459a8523a146f3b7518a833eea5efa85130bf68"
+        },
+        {
+          "path": "licenses/kc-voip/github.com_golang_groupcache/VERSION.txt",
+          "size": 65,
+          "sha256": "833b5f789abd3dae265ec54d5faedd254352f2e8d35ac7cb6fca058221211a1c"
+        },
+        {
+          "path": "licenses/kc-voip/github.com_google_btree/LICENSE",
+          "size": 11358,
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+        },
+        {
+          "path": "licenses/kc-voip/github.com_google_btree/VERSION.txt",
+          "size": 32,
+          "sha256": "f806b65dfb6cb2e434657521512eec1971a1d43bf8f8a9ffd14de308794c1f40"
+        },
+        {
+          "path": "licenses/kc-voip/github.com_klauspost_compress/LICENSE",
+          "size": 16733,
+          "sha256": "0d9e582ee4bff57bf1189c9e514e6da7ce277f9cd3bc2d488b22fbb39a6d87cf"
+        },
+        {
+          "path": "licenses/kc-voip/github.com_klauspost_compress/VERSION.txt",
+          "size": 39,
+          "sha256": "e58a8d4318841984c4dd731d81316ba05e8a801c6e6c9e32d5c4bbaf44c4a538"
+        },
+        {
+          "path": "licenses/kc-voip/github.com_kr_fs/LICENSE",
+          "size": 1479,
+          "sha256": "dd26a7abddd02e2d0aba97805b31f248ef7835d9e10da289b22e3b8ab78b324d"
+        },
+        {
+          "path": "licenses/kc-voip/github.com_kr_fs/VERSION.txt",
+          "size": 25,
+          "sha256": "03920accfca6e66e003f6c14ca2161d63a0e090c508c93866d7b24cc164398f7"
+        },
+        {
+          "path": "licenses/kc-voip/github.com_pkg_sftp/LICENSE",
+          "size": 1289,
+          "sha256": "f5b5087b8e596d015cfea7db26527fe67a196c18ca37415c288dd2534ff74c37"
+        },
+        {
+          "path": "licenses/kc-voip/github.com_pkg_sftp/VERSION.txt",
+          "size": 29,
+          "sha256": "d81c6071553aa0b0fb261302b9ba648c48add40b756c60d00259680340949745"
+        },
+        {
+          "path": "licenses/kc-voip/github.com_tailscale_certstore/LICENSE.md",
+          "size": 1067,
+          "sha256": "e4a0c3d87230b78d441e4666fba1ab95211fd1e9be76bf445d664685ae0a9e48"
+        },
+        {
+          "path": "licenses/kc-voip/github.com_tailscale_certstore/VERSION.txt",
+          "size": 69,
+          "sha256": "5f2fa28d3dfc1b4fe0fea702c76d2d737ce5b121c1fc9944d15e70bd5d3b65bc"
+        },
+        {
+          "path": "licenses/kc-voip/github.com_tailscale_gliderssh/LICENSE",
+          "size": 1476,
+          "sha256": "ac32cbd9c0f04259c839d9ae01f039c1ee777a8add1a89fdafc6006237f66650"
+        },
+        {
+          "path": "licenses/kc-voip/github.com_tailscale_gliderssh/VERSION.txt",
+          "size": 69,
+          "sha256": "fe94cd7d8b14ae7f22a7381e8965ca2cabf49708fa125b32f177472037434b8d"
+        },
+        {
+          "path": "licenses/kc-voip/github.com_tailscale_go-winio/LICENSE",
+          "size": 1077,
+          "sha256": "cf248820bf1178370bb4f1670a59f8748d46bc96d0f64080cd631511c6046409"
+        },
+        {
+          "path": "licenses/kc-voip/github.com_tailscale_go-winio/VERSION.txt",
+          "size": 66,
+          "sha256": "be1768cc9a80c9b736aa8af8e39160c371ecb5921d397fadb04f909660d24ce6"
+        },
+        {
+          "path": "licenses/kc-voip/github.com_tailscale_tailcat/LICENSE",
+          "size": 1515,
+          "sha256": "a7ca6186a7963a0a60740f6047760eecd7a0234e8c38bd7e1e0bbcb324bda45b"
+        },
+        {
+          "path": "licenses/kc-voip/github.com_tailscale_tailcat/VERSION.txt",
+          "size": 37,
+          "sha256": "61206e9d30be34cee2f4c17cca6332031a5e28d4fb8911763cccc15e9fa4eaaa"
+        },
+        {
+          "path": "licenses/kc-voip/github.com_tailscale_wireguard-go/LICENSE",
+          "size": 1023,
+          "sha256": "91276db973f25602d1aa43491f59cbc84cb88e6f151e1d0cc82a755563ce0195"
+        },
+        {
+          "path": "licenses/kc-voip/github.com_tailscale_wireguard-go/VERSION.txt",
+          "size": 70,
+          "sha256": "3fb5f94cde73100d0d9df7e302fa0d3d589373fdc9b5241bd3e1d4a5d65bec28"
+        },
+        {
+          "path": "licenses/kc-voip/github.com_x448_float16/LICENSE",
+          "size": 1102,
+          "sha256": "a555f1194fdac34da70fb416968f7e2217b02352c26c1eac2fa45fcb4290ae8d"
+        },
+        {
+          "path": "licenses/kc-voip/github.com_x448_float16/VERSION.txt",
+          "size": 32,
+          "sha256": "fc7a054fbf490bfd7b0a000a8bf84f1e3b4ed328a383516d145344008f08b070"
+        },
+        {
+          "path": "licenses/kc-voip/go/LICENSE",
+          "size": 1453,
+          "sha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad"
+        },
+        {
+          "path": "licenses/kc-voip/go/PATENTS",
+          "size": 1303,
+          "sha256": "96f408bfae65bf137fc2525d3ecb030271c50c1e90799f87abf8846d8dd505cc"
+        },
+        {
+          "path": "licenses/kc-voip/go/VERSION.txt",
+          "size": 13,
+          "sha256": "0ea04aedba3e0540ac6a1fef1c6521c8c0149d414b7d22e9122f8bc7c8445e69"
+        },
+        {
+          "path": "licenses/kc-voip/go4.org_mem/LICENSE",
+          "size": 11358,
+          "sha256": "c6596eb7be8581c18be736c846fb9173b69eccf6ef94c5135893ec56bd92ba08"
+        },
+        {
+          "path": "licenses/kc-voip/go4.org_mem/VERSION.txt",
+          "size": 48,
+          "sha256": "7dd3cac276ea13238d50c85633322565aa3ad8d03fc26e6462e32979c723e8ec"
+        },
+        {
+          "path": "licenses/kc-voip/go4.org_netipx/LICENSE",
+          "size": 1487,
+          "sha256": "1bfc4f32f4ec8ca8fce54bd2d97784f003786753a69a78ca74ffae1574037fb9"
+        },
+        {
+          "path": "licenses/kc-voip/go4.org_netipx/VERSION.txt",
+          "size": 51,
+          "sha256": "49a66e442d58606f58ffdfd6c298f5ea87e187a730194d31e6a2f085103d6621"
+        },
+        {
+          "path": "licenses/kc-voip/golang.org_x_crypto/LICENSE",
+          "size": 1453,
+          "sha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad"
+        },
+        {
+          "path": "licenses/kc-voip/golang.org_x_crypto/PATENTS",
+          "size": 1303,
+          "sha256": "96f408bfae65bf137fc2525d3ecb030271c50c1e90799f87abf8846d8dd505cc"
+        },
+        {
+          "path": "licenses/kc-voip/golang.org_x_crypto/VERSION.txt",
+          "size": 29,
+          "sha256": "fc67dcf4ad91157265e375f6c3505d421de389c2a64af28666e8527a82eefb91"
+        },
+        {
+          "path": "licenses/kc-voip/golang.org_x_exp/LICENSE",
+          "size": 1453,
+          "sha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad"
+        },
+        {
+          "path": "licenses/kc-voip/golang.org_x_exp/PATENTS",
+          "size": 1303,
+          "sha256": "96f408bfae65bf137fc2525d3ecb030271c50c1e90799f87abf8846d8dd505cc"
+        },
+        {
+          "path": "licenses/kc-voip/golang.org_x_exp/VERSION.txt",
+          "size": 53,
+          "sha256": "d978a538b93718859cf4f35fa569efafe39a69da3bde74b6fed5840e87dc2801"
+        },
+        {
+          "path": "licenses/kc-voip/golang.org_x_net/LICENSE",
+          "size": 1453,
+          "sha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad"
+        },
+        {
+          "path": "licenses/kc-voip/golang.org_x_net/PATENTS",
+          "size": 1303,
+          "sha256": "96f408bfae65bf137fc2525d3ecb030271c50c1e90799f87abf8846d8dd505cc"
+        },
+        {
+          "path": "licenses/kc-voip/golang.org_x_net/VERSION.txt",
+          "size": 26,
+          "sha256": "c9da3dc592f921ffa695bbef3f215de46ab267f54a18b56eed591363d9a2e2dc"
+        },
+        {
+          "path": "licenses/kc-voip/golang.org_x_sys/LICENSE",
+          "size": 1453,
+          "sha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad"
+        },
+        {
+          "path": "licenses/kc-voip/golang.org_x_sys/PATENTS",
+          "size": 1303,
+          "sha256": "96f408bfae65bf137fc2525d3ecb030271c50c1e90799f87abf8846d8dd505cc"
+        },
+        {
+          "path": "licenses/kc-voip/golang.org_x_sys/VERSION.txt",
+          "size": 26,
+          "sha256": "863ee955f94b0f70fabad2e38d8710218b8a50e14ae881db4b236551ca12650f"
+        },
+        {
+          "path": "licenses/kc-voip/golang.org_x_term/LICENSE",
+          "size": 1453,
+          "sha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad"
+        },
+        {
+          "path": "licenses/kc-voip/golang.org_x_term/PATENTS",
+          "size": 1303,
+          "sha256": "96f408bfae65bf137fc2525d3ecb030271c50c1e90799f87abf8846d8dd505cc"
+        },
+        {
+          "path": "licenses/kc-voip/golang.org_x_term/VERSION.txt",
+          "size": 27,
+          "sha256": "be8a87308165a52671580447bad1116d49877644470f0b8e4422df94bfa12dfe"
+        },
+        {
+          "path": "licenses/kc-voip/golang.org_x_text/LICENSE",
+          "size": 1453,
+          "sha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad"
+        },
+        {
+          "path": "licenses/kc-voip/golang.org_x_text/PATENTS",
+          "size": 1303,
+          "sha256": "96f408bfae65bf137fc2525d3ecb030271c50c1e90799f87abf8846d8dd505cc"
+        },
+        {
+          "path": "licenses/kc-voip/golang.org_x_text/VERSION.txt",
+          "size": 27,
+          "sha256": "3b16e0f16309e5f36fa6aebb51189551343988557dfc78284856a539ea244455"
+        },
+        {
+          "path": "licenses/kc-voip/golang.org_x_time/LICENSE",
+          "size": 1453,
+          "sha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad"
+        },
+        {
+          "path": "licenses/kc-voip/golang.org_x_time/PATENTS",
+          "size": 1303,
+          "sha256": "96f408bfae65bf137fc2525d3ecb030271c50c1e90799f87abf8846d8dd505cc"
+        },
+        {
+          "path": "licenses/kc-voip/golang.org_x_time/VERSION.txt",
+          "size": 27,
+          "sha256": "078cb5bb564c12f0dc7d36c227283aca26cd7f60c0157865fce543ebe9a2049c"
+        },
+        {
+          "path": "licenses/kc-voip/golang.zx2c4.com_wintun/LICENSE",
+          "size": 1023,
+          "sha256": "91276db973f25602d1aa43491f59cbc84cb88e6f151e1d0cc82a755563ce0195"
+        },
+        {
+          "path": "licenses/kc-voip/golang.zx2c4.com_wintun/VERSION.txt",
+          "size": 60,
+          "sha256": "f2731ccfc51692ac498000d9495bd9102f5085bf39030926ccee6dc3f6e2a193"
+        },
+        {
+          "path": "licenses/kc-voip/golang.zx2c4.com_wireguard_windows/COPYING",
+          "size": 1084,
+          "sha256": "76ab82fe34e6ad03d064b0fdf4ba892e28fc20f740aeda49b5ac8d58c727a20f"
+        },
+        {
+          "path": "licenses/kc-voip/golang.zx2c4.com_wireguard_windows/VERSION.txt",
+          "size": 43,
+          "sha256": "2b3890a7ded24586dd231137411202c0fe8e397891cf374ddd039423cabf0150"
+        },
+        {
+          "path": "licenses/kc-voip/gvisor.dev_gvisor/LICENSE",
+          "size": 14110,
+          "sha256": "0fbab5c58efbdf6d31e8085214f2dd821659c03d73cff3ed2b08e98826ea1cd9"
+        },
+        {
+          "path": "licenses/kc-voip/gvisor.dev_gvisor/VERSION.txt",
+          "size": 54,
+          "sha256": "0552d8e194f99424273af17c830e9c2fc6d1524240b2ca9bcfd7b284ab46cea9"
+        },
+        {
+          "path": "licenses/kc-voip/tailscale.com/LICENSE",
+          "size": 1515,
+          "sha256": "a7ca6186a7963a0a60740f6047760eecd7a0234e8c38bd7e1e0bbcb324bda45b"
+        },
+        {
+          "path": "licenses/kc-voip/tailscale.com/PATENTS",
+          "size": 1377,
+          "sha256": "debc5ca73d082a6c7de743fecdba6f75deafdf9200acfbddeb8ca32d66e6e128"
+        },
+        {
+          "path": "licenses/kc-voip/tailscale.com/VERSION.txt",
+          "size": 58,
+          "sha256": "269eca6c5910a01682ed6cac368c87b7ee920c6c41583a4065919c852ed07a02"
         },
         {
           "path": "licenses/LICENSE-APACHE",
@@ -36,21 +381,366 @@
       ]
     },
     "stable": {
-      "version": "0.5.0",
-      "published": "2026-11-12T09:22:40Z",
-      "notes": "**Full Changelog**: https://github.com/JavacrafterDevelopment/KittyConnect/compare/v0.4.0...v0.5.0",
-      "page": "https://github.com/JavacrafterDevelopment/KittyConnect/releases/tag/v0.5.0",
+      "version": "0.6.0",
+      "published": "2026-11-12T22:33:12Z",
+      "notes": "## What's Changed\n* VOIP: voice and screen share over UDP via a TailCat-library helper by @JavacrafterDevelopment in https://github.com/JavacrafterDevelopment/KittyConnect/pull/1\n\n## New Contributors\n* @JavacrafterDevelopment made their first contribution in https://github.com/JavacrafterDevelopment/KittyConnect/pull/1\n\n**Full Changelog**: https://github.com/JavacrafterDevelopment/KittyConnect/compare/v0.5.0...v0.6.0",
+      "page": "https://github.com/JavacrafterDevelopment/KittyConnect/releases/tag/v0.6.0",
       "package": {
-        "url": "https://github.com/JavacrafterDevelopment/KittyConnect/releases/download/v0.5.0/KittyConnect-windows-x64.zip",
-        "size": 8764036,
-        "sha256": "32b69395156cc52048d0f395f138596e1487265fe0e4ef887a5043f71615e23f"
+        "url": "https://github.com/JavacrafterDevelopment/KittyConnect/releases/download/v0.6.0/KittyConnect-windows-x64.zip",
+        "size": 15263059,
+        "sha256": "fcab6143729124866112212e92f0cc2eaef3d678fb2a0391f2364aebe1187373"
       },
       "exe": "KittyConnect.exe",
       "files": [
         {
           "path": "KittyConnect.exe",
-          "size": 21630976,
-          "sha256": "ea9dbbcf48508dea77cf04c893982c0cf4cbfec1fd783d5cf94ef85e2568a323"
+          "size": 37843456,
+          "sha256": "4a451895dd840cf0eb47b89ee52c7017c073fb7bcc20921f8c58b2500de9f800"
+        },
+        {
+          "path": "licenses/kc-voip/github.com_anmitsu_go-shlex/LICENSE",
+          "size": 1068,
+          "sha256": "8ff2b7cdb75693173319e65a691da7b9a065cf3fd643264fe8b6ec9e362627f4"
+        },
+        {
+          "path": "licenses/kc-voip/github.com_anmitsu_go-shlex/VERSION.txt",
+          "size": 64,
+          "sha256": "e8458ccbf6c61c7a78fbde864c46a441651d1d6c1d3708f20a1ebde930acacb8"
+        },
+        {
+          "path": "licenses/kc-voip/github.com_dblohm7_wingoes/LICENSE",
+          "size": 1522,
+          "sha256": "d92e8b4d5e41d2effe12a1df45143765c2256bb915553a4515a16ffd9603c06a"
+        },
+        {
+          "path": "licenses/kc-voip/github.com_dblohm7_wingoes/VERSION.txt",
+          "size": 63,
+          "sha256": "56439e23544266c63df7cf7c9b4277b2cd755bde6517c8e859bf0a5f4cc25c6d"
+        },
+        {
+          "path": "licenses/kc-voip/github.com_fxamacker_cbor_v2/LICENSE",
+          "size": 1076,
+          "sha256": "78cad457d5ea7318230f3d969d4cdf29cef45524a1fc8ca3a97646da1ad7a841"
+        },
+        {
+          "path": "licenses/kc-voip/github.com_fxamacker_cbor_v2/VERSION.txt",
+          "size": 37,
+          "sha256": "cdaf46ac8be86437eb6ce15b06cbe9fd2639a391d911b790869646e36cff6488"
+        },
+        {
+          "path": "licenses/kc-voip/github.com_gaissmai_bart/LICENSE",
+          "size": 1072,
+          "sha256": "12d27746d111da33969df0ecaa9b799e22c42db7d0b6a5164f383ec934233a41"
+        },
+        {
+          "path": "licenses/kc-voip/github.com_gaissmai_bart/VERSION.txt",
+          "size": 34,
+          "sha256": "c8bb2c37f2792dfceb6ef835db3fe26c1dd2b46126f2b9b4ef973fdcbb136c88"
+        },
+        {
+          "path": "licenses/kc-voip/github.com_go-json-experiment_json/LICENSE",
+          "size": 1479,
+          "sha256": "14a34c4db2d21bf9cf80d028b802cd22fed9bf597a6c2db7ce30ee6ffd04967a"
+        },
+        {
+          "path": "licenses/kc-voip/github.com_go-json-experiment_json/VERSION.txt",
+          "size": 71,
+          "sha256": "0f5436fccb75e52c32b6f5b263a6909ac8ff0f5aa38c90be89f84acb51822caf"
+        },
+        {
+          "path": "licenses/kc-voip/github.com_golang_groupcache/LICENSE",
+          "size": 10273,
+          "sha256": "73ba74dfaa520b49a401b5d21459a8523a146f3b7518a833eea5efa85130bf68"
+        },
+        {
+          "path": "licenses/kc-voip/github.com_golang_groupcache/VERSION.txt",
+          "size": 65,
+          "sha256": "833b5f789abd3dae265ec54d5faedd254352f2e8d35ac7cb6fca058221211a1c"
+        },
+        {
+          "path": "licenses/kc-voip/github.com_google_btree/LICENSE",
+          "size": 11358,
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+        },
+        {
+          "path": "licenses/kc-voip/github.com_google_btree/VERSION.txt",
+          "size": 32,
+          "sha256": "f806b65dfb6cb2e434657521512eec1971a1d43bf8f8a9ffd14de308794c1f40"
+        },
+        {
+          "path": "licenses/kc-voip/github.com_klauspost_compress/LICENSE",
+          "size": 16733,
+          "sha256": "0d9e582ee4bff57bf1189c9e514e6da7ce277f9cd3bc2d488b22fbb39a6d87cf"
+        },
+        {
+          "path": "licenses/kc-voip/github.com_klauspost_compress/VERSION.txt",
+          "size": 39,
+          "sha256": "e58a8d4318841984c4dd731d81316ba05e8a801c6e6c9e32d5c4bbaf44c4a538"
+        },
+        {
+          "path": "licenses/kc-voip/github.com_kr_fs/LICENSE",
+          "size": 1479,
+          "sha256": "dd26a7abddd02e2d0aba97805b31f248ef7835d9e10da289b22e3b8ab78b324d"
+        },
+        {
+          "path": "licenses/kc-voip/github.com_kr_fs/VERSION.txt",
+          "size": 25,
+          "sha256": "03920accfca6e66e003f6c14ca2161d63a0e090c508c93866d7b24cc164398f7"
+        },
+        {
+          "path": "licenses/kc-voip/github.com_pkg_sftp/LICENSE",
+          "size": 1289,
+          "sha256": "f5b5087b8e596d015cfea7db26527fe67a196c18ca37415c288dd2534ff74c37"
+        },
+        {
+          "path": "licenses/kc-voip/github.com_pkg_sftp/VERSION.txt",
+          "size": 29,
+          "sha256": "d81c6071553aa0b0fb261302b9ba648c48add40b756c60d00259680340949745"
+        },
+        {
+          "path": "licenses/kc-voip/github.com_tailscale_certstore/LICENSE.md",
+          "size": 1067,
+          "sha256": "e4a0c3d87230b78d441e4666fba1ab95211fd1e9be76bf445d664685ae0a9e48"
+        },
+        {
+          "path": "licenses/kc-voip/github.com_tailscale_certstore/VERSION.txt",
+          "size": 69,
+          "sha256": "5f2fa28d3dfc1b4fe0fea702c76d2d737ce5b121c1fc9944d15e70bd5d3b65bc"
+        },
+        {
+          "path": "licenses/kc-voip/github.com_tailscale_gliderssh/LICENSE",
+          "size": 1476,
+          "sha256": "ac32cbd9c0f04259c839d9ae01f039c1ee777a8add1a89fdafc6006237f66650"
+        },
+        {
+          "path": "licenses/kc-voip/github.com_tailscale_gliderssh/VERSION.txt",
+          "size": 69,
+          "sha256": "fe94cd7d8b14ae7f22a7381e8965ca2cabf49708fa125b32f177472037434b8d"
+        },
+        {
+          "path": "licenses/kc-voip/github.com_tailscale_go-winio/LICENSE",
+          "size": 1077,
+          "sha256": "cf248820bf1178370bb4f1670a59f8748d46bc96d0f64080cd631511c6046409"
+        },
+        {
+          "path": "licenses/kc-voip/github.com_tailscale_go-winio/VERSION.txt",
+          "size": 66,
+          "sha256": "be1768cc9a80c9b736aa8af8e39160c371ecb5921d397fadb04f909660d24ce6"
+        },
+        {
+          "path": "licenses/kc-voip/github.com_tailscale_tailcat/LICENSE",
+          "size": 1515,
+          "sha256": "a7ca6186a7963a0a60740f6047760eecd7a0234e8c38bd7e1e0bbcb324bda45b"
+        },
+        {
+          "path": "licenses/kc-voip/github.com_tailscale_tailcat/VERSION.txt",
+          "size": 37,
+          "sha256": "61206e9d30be34cee2f4c17cca6332031a5e28d4fb8911763cccc15e9fa4eaaa"
+        },
+        {
+          "path": "licenses/kc-voip/github.com_tailscale_wireguard-go/LICENSE",
+          "size": 1023,
+          "sha256": "91276db973f25602d1aa43491f59cbc84cb88e6f151e1d0cc82a755563ce0195"
+        },
+        {
+          "path": "licenses/kc-voip/github.com_tailscale_wireguard-go/VERSION.txt",
+          "size": 70,
+          "sha256": "3fb5f94cde73100d0d9df7e302fa0d3d589373fdc9b5241bd3e1d4a5d65bec28"
+        },
+        {
+          "path": "licenses/kc-voip/github.com_x448_float16/LICENSE",
+          "size": 1102,
+          "sha256": "a555f1194fdac34da70fb416968f7e2217b02352c26c1eac2fa45fcb4290ae8d"
+        },
+        {
+          "path": "licenses/kc-voip/github.com_x448_float16/VERSION.txt",
+          "size": 32,
+          "sha256": "fc7a054fbf490bfd7b0a000a8bf84f1e3b4ed328a383516d145344008f08b070"
+        },
+        {
+          "path": "licenses/kc-voip/go/LICENSE",
+          "size": 1453,
+          "sha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad"
+        },
+        {
+          "path": "licenses/kc-voip/go/PATENTS",
+          "size": 1303,
+          "sha256": "96f408bfae65bf137fc2525d3ecb030271c50c1e90799f87abf8846d8dd505cc"
+        },
+        {
+          "path": "licenses/kc-voip/go/VERSION.txt",
+          "size": 13,
+          "sha256": "0ea04aedba3e0540ac6a1fef1c6521c8c0149d414b7d22e9122f8bc7c8445e69"
+        },
+        {
+          "path": "licenses/kc-voip/go4.org_mem/LICENSE",
+          "size": 11358,
+          "sha256": "c6596eb7be8581c18be736c846fb9173b69eccf6ef94c5135893ec56bd92ba08"
+        },
+        {
+          "path": "licenses/kc-voip/go4.org_mem/VERSION.txt",
+          "size": 48,
+          "sha256": "7dd3cac276ea13238d50c85633322565aa3ad8d03fc26e6462e32979c723e8ec"
+        },
+        {
+          "path": "licenses/kc-voip/go4.org_netipx/LICENSE",
+          "size": 1487,
+          "sha256": "1bfc4f32f4ec8ca8fce54bd2d97784f003786753a69a78ca74ffae1574037fb9"
+        },
+        {
+          "path": "licenses/kc-voip/go4.org_netipx/VERSION.txt",
+          "size": 51,
+          "sha256": "49a66e442d58606f58ffdfd6c298f5ea87e187a730194d31e6a2f085103d6621"
+        },
+        {
+          "path": "licenses/kc-voip/golang.org_x_crypto/LICENSE",
+          "size": 1453,
+          "sha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad"
+        },
+        {
+          "path": "licenses/kc-voip/golang.org_x_crypto/PATENTS",
+          "size": 1303,
+          "sha256": "96f408bfae65bf137fc2525d3ecb030271c50c1e90799f87abf8846d8dd505cc"
+        },
+        {
+          "path": "licenses/kc-voip/golang.org_x_crypto/VERSION.txt",
+          "size": 29,
+          "sha256": "fc67dcf4ad91157265e375f6c3505d421de389c2a64af28666e8527a82eefb91"
+        },
+        {
+          "path": "licenses/kc-voip/golang.org_x_exp/LICENSE",
+          "size": 1453,
+          "sha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad"
+        },
+        {
+          "path": "licenses/kc-voip/golang.org_x_exp/PATENTS",
+          "size": 1303,
+          "sha256": "96f408bfae65bf137fc2525d3ecb030271c50c1e90799f87abf8846d8dd505cc"
+        },
+        {
+          "path": "licenses/kc-voip/golang.org_x_exp/VERSION.txt",
+          "size": 53,
+          "sha256": "d978a538b93718859cf4f35fa569efafe39a69da3bde74b6fed5840e87dc2801"
+        },
+        {
+          "path": "licenses/kc-voip/golang.org_x_net/LICENSE",
+          "size": 1453,
+          "sha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad"
+        },
+        {
+          "path": "licenses/kc-voip/golang.org_x_net/PATENTS",
+          "size": 1303,
+          "sha256": "96f408bfae65bf137fc2525d3ecb030271c50c1e90799f87abf8846d8dd505cc"
+        },
+        {
+          "path": "licenses/kc-voip/golang.org_x_net/VERSION.txt",
+          "size": 26,
+          "sha256": "c9da3dc592f921ffa695bbef3f215de46ab267f54a18b56eed591363d9a2e2dc"
+        },
+        {
+          "path": "licenses/kc-voip/golang.org_x_sys/LICENSE",
+          "size": 1453,
+          "sha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad"
+        },
+        {
+          "path": "licenses/kc-voip/golang.org_x_sys/PATENTS",
+          "size": 1303,
+          "sha256": "96f408bfae65bf137fc2525d3ecb030271c50c1e90799f87abf8846d8dd505cc"
+        },
+        {
+          "path": "licenses/kc-voip/golang.org_x_sys/VERSION.txt",
+          "size": 26,
+          "sha256": "863ee955f94b0f70fabad2e38d8710218b8a50e14ae881db4b236551ca12650f"
+        },
+        {
+          "path": "licenses/kc-voip/golang.org_x_term/LICENSE",
+          "size": 1453,
+          "sha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad"
+        },
+        {
+          "path": "licenses/kc-voip/golang.org_x_term/PATENTS",
+          "size": 1303,
+          "sha256": "96f408bfae65bf137fc2525d3ecb030271c50c1e90799f87abf8846d8dd505cc"
+        },
+        {
+          "path": "licenses/kc-voip/golang.org_x_term/VERSION.txt",
+          "size": 27,
+          "sha256": "be8a87308165a52671580447bad1116d49877644470f0b8e4422df94bfa12dfe"
+        },
+        {
+          "path": "licenses/kc-voip/golang.org_x_text/LICENSE",
+          "size": 1453,
+          "sha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad"
+        },
+        {
+          "path": "licenses/kc-voip/golang.org_x_text/PATENTS",
+          "size": 1303,
+          "sha256": "96f408bfae65bf137fc2525d3ecb030271c50c1e90799f87abf8846d8dd505cc"
+        },
+        {
+          "path": "licenses/kc-voip/golang.org_x_text/VERSION.txt",
+          "size": 27,
+          "sha256": "3b16e0f16309e5f36fa6aebb51189551343988557dfc78284856a539ea244455"
+        },
+        {
+          "path": "licenses/kc-voip/golang.org_x_time/LICENSE",
+          "size": 1453,
+          "sha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad"
+        },
+        {
+          "path": "licenses/kc-voip/golang.org_x_time/PATENTS",
+          "size": 1303,
+          "sha256": "96f408bfae65bf137fc2525d3ecb030271c50c1e90799f87abf8846d8dd505cc"
+        },
+        {
+          "path": "licenses/kc-voip/golang.org_x_time/VERSION.txt",
+          "size": 27,
+          "sha256": "078cb5bb564c12f0dc7d36c227283aca26cd7f60c0157865fce543ebe9a2049c"
+        },
+        {
+          "path": "licenses/kc-voip/golang.zx2c4.com_wintun/LICENSE",
+          "size": 1023,
+          "sha256": "91276db973f25602d1aa43491f59cbc84cb88e6f151e1d0cc82a755563ce0195"
+        },
+        {
+          "path": "licenses/kc-voip/golang.zx2c4.com_wintun/VERSION.txt",
+          "size": 60,
+          "sha256": "f2731ccfc51692ac498000d9495bd9102f5085bf39030926ccee6dc3f6e2a193"
+        },
+        {
+          "path": "licenses/kc-voip/golang.zx2c4.com_wireguard_windows/COPYING",
+          "size": 1084,
+          "sha256": "76ab82fe34e6ad03d064b0fdf4ba892e28fc20f740aeda49b5ac8d58c727a20f"
+        },
+        {
+          "path": "licenses/kc-voip/golang.zx2c4.com_wireguard_windows/VERSION.txt",
+          "size": 43,
+          "sha256": "2b3890a7ded24586dd231137411202c0fe8e397891cf374ddd039423cabf0150"
+        },
+        {
+          "path": "licenses/kc-voip/gvisor.dev_gvisor/LICENSE",
+          "size": 14110,
+          "sha256": "0fbab5c58efbdf6d31e8085214f2dd821659c03d73cff3ed2b08e98826ea1cd9"
+        },
+        {
+          "path": "licenses/kc-voip/gvisor.dev_gvisor/VERSION.txt",
+          "size": 54,
+          "sha256": "0552d8e194f99424273af17c830e9c2fc6d1524240b2ca9bcfd7b284ab46cea9"
+        },
+        {
+          "path": "licenses/kc-voip/tailscale.com/LICENSE",
+          "size": 1515,
+          "sha256": "a7ca6186a7963a0a60740f6047760eecd7a0234e8c38bd7e1e0bbcb324bda45b"
+        },
+        {
+          "path": "licenses/kc-voip/tailscale.com/PATENTS",
+          "size": 1377,
+          "sha256": "debc5ca73d082a6c7de743fecdba6f75deafdf9200acfbddeb8ca32d66e6e128"
+        },
+        {
+          "path": "licenses/kc-voip/tailscale.com/VERSION.txt",
+          "size": 58,
+          "sha256": "269eca6c5910a01682ed6cac368c87b7ee920c6c41583a4065919c852ed07a02"
         },
         {
           "path": "licenses/LICENSE-APACHE",
