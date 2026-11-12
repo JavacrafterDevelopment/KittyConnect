@@ -2,7 +2,6 @@
 //! one PC and joined through a TailCat code. Names, messages and voice only
 //! ever travel inside the encrypted tunnel (or over loopback, for the host).
 
-pub mod adpcm;
 pub mod audio;
 pub mod client;
 pub mod server;
@@ -110,6 +109,8 @@ pub struct Voip {
     downloads: HashMap<u32, DownloadState>,
     previews: HashMap<u32, bool>,
     gains: HashMap<u16, f32>,
+    /// Voice settings from the gear menu; kept for the whole run.
+    audio: Arc<audio::Settings>,
 }
 
 impl Default for Voip {
@@ -150,6 +151,7 @@ impl Default for Voip {
             downloads: HashMap::new(),
             previews: HashMap::new(),
             gains: HashMap::new(),
+            audio: Arc::default(),
         }
     }
 }
@@ -211,7 +213,7 @@ impl Voip {
             Ok(p) => self.proc = Some(p),
             Err(e) => return self.error = e,
         }
-        self.conn = Some(client::connect(srv.port, name.clone(), Some(srv.host_token.clone()), self.gen, proxy.clone()));
+        self.conn = Some(client::connect(srv.port, name.clone(), Some(srv.host_token.clone()), self.audio.clone(), self.gen, proxy.clone()));
         self.server = Some(srv);
         self.my_name = name;
         self.mode = Mode::Hosting;
@@ -244,7 +246,7 @@ impl Voip {
             Ok(p) => self.proc = Some(p),
             Err(e) => return self.error = e,
         }
-        self.conn = Some(client::connect(local, name.clone(), None, self.gen, proxy.clone()));
+        self.conn = Some(client::connect(local, name.clone(), None, self.audio.clone(), self.gen, proxy.clone()));
         self.code = Some(code::voip(c.ports[0], &c.addr));
         self.my_name = name;
         self.mode = Mode::Joined;
@@ -421,6 +423,19 @@ impl Voip {
             self.previews.insert(aid, false);
             c.fetch(aid, client::Fetch { dir: preview_dir(self.gen), preview: true });
         }
+    }
+
+    /// From the gear menu: input volume, automatic or manual sensitivity,
+    /// noise suppression, output volume. Applies at once, in or out of voice.
+    pub fn set_audio(&self, v: &Value) {
+        let f = |k: &str, d: f64| v[k].as_f64().unwrap_or(d) as f32;
+        self.audio.set(
+            f("inputGain", 1.0),
+            v["autoSensitivity"].as_bool().unwrap_or(true),
+            f("thresholdDb", -50.0),
+            v["noiseSuppression"].as_bool().unwrap_or(true),
+            f("outputGain", 1.0),
+        );
     }
 
     // ------------------------------------------------- volume and the host

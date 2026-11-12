@@ -28,13 +28,23 @@ TailCat forwards **TCP** ports. Games that only use UDP won't work this way.
 - Type your name, then *Host a room* (you get a `kitty:voip:` code) or paste a
   code to *Join a room*.
 - Each room has a text channel and a voice channel. **Join voice**, then
-  **Mute** or **Deafen** as needed. Everyone in the room is listed with a
+  **Mute** or **Deafen** as needed. Voice is 48 kHz Opus at 64 kbit/s (what
+  Discord uses), with noise suppression (RNNoise), an 80 Hz high-pass, and
+  concealment of lost packets.
+- The **gear** in the voice panel: input volume (up to 400%), automatic input
+  sensitivity or a manual level with a live meter, noise suppression, and
+  output volume. Yours only, remembered on this PC. If someone keeps cutting
+  out, have them raise input volume or turn off automatic sensitivity and
+  drag the level left. Everyone in the room is listed with a
   speaking light and how they're connected. Use headphones: there's no echo
   cancellation.
 - When the host ends the room, everyone sees it closed.
 - **Share screen**: pick a resolution (it starts at your screen's own, e.g.
   2560×1440, with 1440p/1080p/720p/480p below it) and a frame rate (15, 30 or
-  60; 30 by default), then **Go live**. Others press **Watch** on your name.
+  60; 30 by default) and a quality: **Text and detail** (about three times
+  the bitrate, tuned for sharp edges, for code and documents), **Balanced**,
+  **Smooth motion** (games, video) or **Data saver**. Then **Go live**. Others press **Watch** on your name, and **Full screen** (or double-click
+  the picture; Esc to leave).
   Like Discord, it's encoded as H.264 on your GPU where available (VP8
   otherwise), at roughly 2.5 Mbit/s for 720p30 and 4.5 Mbit/s for 1080p30, with
   a key frame every 2 seconds, so new viewers and dropped frames recover quickly.
@@ -81,8 +91,8 @@ runtime into a `WebView2\` folder beside the exe.
   are cleaned so they can't escape the save folder.
 - **VOIP**: the host runs a room server on `127.0.0.1` exposed with
   `tailcat serve`; members connect through `tailcat forward`, and the host over
-  loopback. Names, chat and voice (16 kHz IMA ADPCM, about 64 kbit/s per
-  speaker, sent only while you talk) are all frames on that one connection.
+  loopback. Names, chat and voice (48 kHz Opus, 64 kbit/s per speaker,
+  sent only while you talk) are all frames on that one connection.
   Voice is relayed by the room, not mixed; each member mixes what they hear.
   Screen video (WebCodecs, in the page) and attachments are frames on the same
   connection; video goes only to members watching that share.

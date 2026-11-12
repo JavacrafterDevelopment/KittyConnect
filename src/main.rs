@@ -670,6 +670,11 @@ impl App {
             }
             "voip.volume" => self.voip.set_volume(msg["id"].as_u64().unwrap_or(0) as u16, msg["gain"].as_f64().unwrap_or(1.0) as f32),
             "voip.mod" => self.voip.moderate(&s("action"), msg["id"].as_u64().unwrap_or(0) as u16),
+            "voip.audio" => self.voip.set_audio(&msg["settings"]),
+            "window.fullscreen" => {
+                let on = msg["on"].as_bool().unwrap_or(false);
+                window.set_fullscreen(on.then_some(tao::window::Fullscreen::Borderless(None)));
+            }
             "page" => self.page = s("page"),
 
             // ------------------------------------------------------- misc

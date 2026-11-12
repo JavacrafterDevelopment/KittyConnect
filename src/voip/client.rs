@@ -17,7 +17,7 @@ use tao::event_loop::EventLoopProxy;
 
 use super::audio::Mixer;
 use super::wire::{self, Out};
-use super::{adpcm, VoipEvent};
+use super::VoipEvent;
 use crate::UserEvent;
 
 /// Where an attachment being fetched should go: the user's folder (a download)
@@ -113,16 +113,23 @@ fn emit(proxy: &EventLoopProxy<UserEvent>, gen: u64, ev: VoipEvent) {
 
 /// Connects to the room on 127.0.0.1:`port`, retrying while the tunnel comes
 /// up (the first connection through TailCat can take a few seconds).
-pub fn connect(port: u16, name: String, host_token: Option<String>, gen: u64, proxy: EventLoopProxy<UserEvent>) -> Conn {
+pub fn connect(
+    port: u16,
+    name: String,
+    host_token: Option<String>,
+    settings: Arc<super::audio::Settings>,
+    gen: u64,
+    proxy: EventLoopProxy<UserEvent>,
+) -> Conn {
     let (tx, rx) = sync_channel::<Out>(512);
-    let mixer = Arc::new(Mixer::default());
+    let mixer = Arc::new(Mixer::with_settings(settings));
     let alive = Arc::new(AtomicBool::new(true));
     let fetches: Arc<Mutex<HashMap<u32, Fetch>>> = Arc::default();
     let (m, a, fx) = (mixer.clone(), alive.clone(), fetches.clone());
     std::thread::spawn(move || {
         let deadline = Instant::now() + Duration::from_secs(75);
         let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
-        let hello = json!({ "t": "hello", "v": 1, "name": name, "host": host_token });
+        let hello = json!({ "t": "hello", "v": 2, "name": name, "host": host_token });
         let (mut stream, welcome) = loop {
             if !a.load(Ordering::Relaxed) {
                 return;
@@ -162,9 +169,8 @@ pub fn connect(port: u16, name: String, host_token: Option<String>, gen: u64, pr
             match wire::read(&mut stream) {
                 Ok((wire::AUDIO, body)) if body.len() > 10 => {
                     let from = u16::from_be_bytes([body[0], body[1]]);
-                    if let Some(samples) = adpcm::decode(&body[6..]) {
-                        m.push(from, &samples);
-                    }
+                    let seq = u32::from_be_bytes([body[2], body[3], body[4], body[5]]);
+                    m.push_packet(from, seq, &body[6..]);
                 }
                 Ok((wire::VIDEO, body)) if body.len() > 11 => {
                     let from = u16::from_be_bytes([body[0], body[1]]);
@@ -289,8 +295,8 @@ mod tests {
     fn room_end_to_end() {
         let room = RoomServer::start("Test room", std::env::temp_dir().join("kc-room-test-a")).unwrap();
         let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, room.port));
-        let (mut a, wa) = try_join(addr, &json!({ "t": "hello", "name": "Ann", "host": room.host_token })).unwrap();
-        let (mut b, wb) = try_join(addr, &json!({ "t": "hello", "name": "Ann" })).unwrap();
+        let (mut a, wa) = try_join(addr, &json!({ "t": "hello", "v": 2, "name": "Ann", "host": room.host_token })).unwrap();
+        let (mut b, wb) = try_join(addr, &json!({ "t": "hello", "v": 2, "name": "Ann" })).unwrap();
         assert_eq!(wa["room"], "Test room");
         assert_eq!(wb["name"], "Ann 2", "duplicate names get a number");
 
@@ -318,7 +324,7 @@ mod tests {
         a.write_all_frame(&json!({ "t": "voice", "on": true })).unwrap();
         b.write_all_frame(&json!({ "t": "voice", "on": true })).unwrap();
         std::thread::sleep(Duration::from_millis(200));
-        let frame = adpcm::Encoder::default().encode(&[500i16; 320]);
+        let frame = vec![0x48u8; 120]; // stands in for an Opus packet
         {
             use std::io::Write;
             a.write_all(&wire::audio(&7u32.to_be_bytes(), &frame)).unwrap();
@@ -357,15 +363,26 @@ mod tests {
         s.write_all(&bytes).unwrap();
     }
 
+    /// An older KittyConnect (ADPCM voice) is turned away with a reason, not let in to garble the call.
+    #[test]
+    fn old_clients_are_told_to_update() {
+        let room = RoomServer::start("Test", std::env::temp_dir().join("kc-room-test-old")).unwrap();
+        let mut s = TcpStream::connect(SocketAddr::from((Ipv4Addr::LOCALHOST, room.port))).unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        s.write_all_frame(&json!({ "t": "hello", "v": 1, "name": "Old" })).unwrap();
+        let bye = next_json(&mut s, "closed");
+        assert!(bye["reason"].as_str().unwrap().contains("0.4 or newer"));
+    }
+
     /// Attachments, screen video to watchers only, and the host's mute and kick.
     #[test]
     fn room_files_screen_and_host_controls() {
         let dir = std::env::temp_dir().join(format!("kc-room-test-{}", std::process::id()));
         let room = RoomServer::start("Test", dir.clone()).unwrap();
         let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, room.port));
-        let (mut host, wh) = try_join(addr, &json!({ "t": "hello", "name": "Hana", "host": room.host_token })).unwrap();
-        let (mut ben, wb) = try_join(addr, &json!({ "t": "hello", "name": "Ben" })).unwrap();
-        let (mut cy, _) = try_join(addr, &json!({ "t": "hello", "name": "Cy" })).unwrap();
+        let (mut host, wh) = try_join(addr, &json!({ "t": "hello", "v": 2, "name": "Hana", "host": room.host_token })).unwrap();
+        let (mut ben, wb) = try_join(addr, &json!({ "t": "hello", "v": 2, "name": "Ben" })).unwrap();
+        let (mut cy, _) = try_join(addr, &json!({ "t": "hello", "v": 2, "name": "Cy" })).unwrap();
         assert_eq!(wh["host"], true);
         assert_eq!(wb["host"], false);
         let ben_id = wb["you"].as_u64().unwrap();

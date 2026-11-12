@@ -31,6 +31,8 @@ const MAX_TEXT: usize = 2000;
 /// Members ping every 30 seconds; one that's silent this long is gone.
 const IDLE: Duration = Duration::from_secs(100);
 const QUEUE: usize = 512;
+/// The room protocol version members must speak (2: Opus voice).
+pub const PROTOCOL: u64 = 2;
 /// Largest single attachment, and all attachments in one room together.
 pub const MAX_ATTACHMENT: u64 = 100 * 1024 * 1024;
 const MAX_ROOM_FILES: u64 = 1024 * 1024 * 1024;
@@ -214,6 +216,12 @@ fn serve_member(stream: TcpStream, room: &Arc<Mutex<Room>>, host_token: &str) {
     let Ok((wire::JSON, body)) = wire::read(&mut reader) else { return };
     let Ok(hello) = serde_json::from_slice::<Value>(&body) else { return };
     if hello["t"] != "hello" {
+        return;
+    }
+    // Voice changed from ADPCM to Opus in protocol 2; the two can't hear each other.
+    if hello["v"].as_u64().unwrap_or(1) < PROTOCOL {
+        let bye = json!({ "t": "closed", "reason": "This room needs KittyConnect 0.4 or newer. Update KittyConnect (the Launcher can do it) and join again." });
+        let _ = reader.write_all(&wire::json(&bye));
         return;
     }
     let Ok(writer_stream) = reader.try_clone() else { return };

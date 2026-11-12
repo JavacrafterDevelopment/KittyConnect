@@ -331,9 +331,14 @@
                 <button class="btn small" id="stage-full">Full screen</button>
                 <button class="btn small danger" id="stage-stop">Stop watching</button>
               </div>
-              <div class="stage-view" id="stage-view">
+              <div class="stage-view" id="stage-view" title="Double-click for full screen">
                 <canvas id="stage-canvas"></canvas>
                 <div class="stage-wait" id="stage-wait">Waiting for the picture…</div>
+                <div class="stage-bar">
+                  <span id="stage-bar-title"></span>
+                  <span class="grow"></span>
+                  <button class="btn small" id="stage-exit">Exit full screen (Esc)</button>
+                </div>
               </div>
             </div>
 
@@ -357,7 +362,15 @@
               <div class="card voicecard">
                 <div class="card-head">
                   <h3>Voice</h3>
-                  <span class="meta" id="voip-voice-count"></span>
+                  <span class="row">
+                    <span class="meta" id="voip-voice-count"></span>
+                    <button class="iconbtn" id="vs-open" title="Voice settings">
+                      <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                        <path d="M13.2 8H15.0M2.8 8H1.0M10.6 12.5l.9 1.56M5.4 3.5l-.9-1.56M10.6 3.5l.9-1.56M5.4 12.5l-.9 1.56" stroke="currentColor" stroke-width="2.1" stroke-linecap="butt"/>
+                        <circle cx="8" cy="8" r="4.2" stroke="currentColor" stroke-width="2.4"/>
+                      </svg>
+                    </button>
+                  </span>
                 </div>
                 <div class="voicectl">
                   <button class="btn primary" id="voip-voice-join">Join voice</button>
@@ -380,6 +393,14 @@
                   </button>
                 </div>
                 <div class="sharebox hide" id="ss-box">
+                  <label class="share-opt"><span class="field-label">Quality</span>
+                    <select class="input" id="ss-quality">
+                      <option value="text">Text and detail (sharpest, most data)</option>
+                      <option value="balanced" selected>Balanced</option>
+                      <option value="motion">Smooth motion (games, video)</option>
+                      <option value="saver">Data saver (slow connections)</option>
+                    </select>
+                  </label>
                   <div class="share-opts">
                     <label class="share-opt"><span class="field-label">Resolution</span><select class="input" id="ss-res"></select></label>
                     <label class="share-opt"><span class="field-label">Frame rate</span>
@@ -432,6 +453,57 @@
   <!-- Right-click a person in a room: their volume for you, mute for you, and
        (for the host) mute for everyone or disconnect. -->
   <div class="ctxmenu hide" id="ctxmenu" role="menu"></div>
+
+  <!-- Voice settings, from the gear in the voice panel. Yours only. -->
+  <div class="modal hide" id="vs-modal" role="dialog" aria-labelledby="vs-title">
+    <div class="modal-card">
+      <div class="card-head">
+        <h3 id="vs-title">Voice settings</h3>
+        <button class="iconbtn" id="vs-close" title="Close">
+          <svg width="11" height="11" viewBox="0 0 10 10"><path d="M2 2l6 6M8 2L2 8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+        </button>
+      </div>
+
+      <div class="vs-row">
+        <div class="ctx-label"><span class="set-title">Input volume</span><span id="vs-in-val">100%</span></div>
+        <input type="range" class="ctx-range" id="vs-in" min="0" max="400" step="5" value="100">
+        <span class="set-desc">Turn this up if others say you're quiet or keep cutting out.</span>
+      </div>
+
+      <div class="vs-row">
+        <div class="set-row">
+          <label class="set-text" for="vs-auto">
+            <span class="set-title">Automatically determine input sensitivity</span>
+            <span class="set-desc">Sends your voice when it hears speech, and not keyboard or fan noise.</span>
+          </label>
+          <input type="checkbox" id="vs-auto" class="switch" checked>
+        </div>
+        <div class="sens">
+          <div class="sens-meter" id="vs-meter-wrap">
+            <span class="sens-level" id="vs-level"></span>
+            <span class="sens-mark" id="vs-mark"></span>
+          </div>
+          <input type="range" class="ctx-range" id="vs-thresh" min="-100" max="0" step="1" value="-50">
+          <span class="set-desc" id="vs-sens-desc"></span>
+        </div>
+      </div>
+
+      <div class="vs-row">
+        <div class="set-row">
+          <label class="set-text" for="vs-ns">
+            <span class="set-title">Noise suppression</span>
+            <span class="set-desc">Removes background noise like fans, typing and traffic.</span>
+          </label>
+          <input type="checkbox" id="vs-ns" class="switch" checked>
+        </div>
+      </div>
+
+      <div class="vs-row last">
+        <div class="ctx-label"><span class="set-title">Output volume</span><span id="vs-out-val">100%</span></div>
+        <input type="range" class="ctx-range" id="vs-out" min="0" max="200" step="5" value="100">
+      </div>
+    </div>
+  </div>
 
   <!-- The webview fills the window, so these strips hand resizing back to it. -->
   <div class="grips">

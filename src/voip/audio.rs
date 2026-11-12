@@ -1,10 +1,22 @@
-//! Microphone in, speakers out. Voice travels as 16 kHz mono in 20 ms frames
-//! (320 samples), ADPCM-encoded. Everything here runs on the audio thread and
-//! the device callbacks; the network side only sees encoded frames.
+//! Microphone in, speakers out, the way Discord does it: 48 kHz Opus.
+//!
+//! Send path, every 10 ms block of microphone audio:
+//!   device rate → 48 kHz (windowed-sinc resampler, no aliasing)
+//!   → 80 Hz high-pass (rumble, desk knocks, DC)
+//!   → input volume (the user's setting)
+//!   → noise suppression (RNNoise, which also says whether it's speech)
+//!   → voice gate: automatic (speech detected) or a manual dB threshold,
+//!     held open 400 ms after speech and faded, never hard-cut
+//!   → soft limiter → Opus 64 kbit/s, 20 ms frames, in-band FEC
+//!
+//! Receive path: one Opus decoder per person, which rebuilds a lost frame from
+//! the next one's FEC or conceals it, a small jitter buffer, per-person
+//! volume, then the mix is resampled to the speakers' rate.
 //!
 //! There's no echo cancellation: use headphones, or the mic picks up the call.
 
 use std::collections::{HashMap, VecDeque};
+use std::num::NonZeroU32;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{channel, SyncSender};
 use std::sync::{Arc, Mutex};
@@ -12,86 +24,305 @@ use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, SampleFormat, SizedSample};
+use opus1::{Application, Bitrate, Channels, InbandFec, OpusDecoder, OpusEncoder, SampleRate};
 
-use super::adpcm;
 use super::wire::{self, Out};
 
-pub const RATE: u32 = 16_000;
-pub const FRAME: usize = 320;
-/// Below this RMS the mic is treated as silent and nothing is sent.
-const GATE: f32 = 0.012;
-/// Keep sending this many frames after speech stops, so word endings aren't cut.
-const HANGOVER: u32 = 15;
-/// Wait for this much of a speaker's audio before playing, to ride out jitter.
-const PRIME: usize = 960;
-/// More queued than this and the oldest is dropped, to keep delay down.
-const MAX_QUEUE: usize = 6400;
-const TRIM_TO: usize = 1600;
+pub const RATE: u32 = 48_000;
+/// One Opus packet: 20 ms.
+pub const FRAME: usize = 960;
+/// RNNoise works on 10 ms blocks.
+const BLOCK: usize = nnnoiseless::DenoiseState::FRAME_SIZE;
+const BITRATE: u32 = 64_000;
+/// Keep sending this many 10 ms blocks after speech stops.
+const HANGOVER: u32 = 40;
+/// Wait for this much of a speaker's audio before playing (60 ms), to ride out jitter.
+const PRIME: usize = 2880;
+/// More queued than 400 ms and the oldest is dropped, back to 100 ms.
+const MAX_QUEUE: usize = 19_200;
+const TRIM_TO: usize = 4800;
+/// Conceal at most this many missing frames before going quiet.
+const MAX_PLC: u32 = 3;
 
-#[derive(Default)]
-struct Jitter {
-    buf: VecDeque<i16>,
-    primed: bool,
+fn f32_atomic(v: f32) -> AtomicU32 {
+    AtomicU32::new(v.to_bits())
 }
 
-/// Everyone else's voice, queued per speaker and mixed for the speakers.
-#[derive(Default)]
+/// The voice settings from the gear menu. Shared with the audio callbacks, so
+/// a change applies at once.
+pub struct Settings {
+    /// Microphone volume, 1.0 = as recorded, up to 4.0.
+    input_gain: AtomicU32,
+    /// Let speech detection decide when you're talking.
+    auto_sensitivity: AtomicBool,
+    /// With automatic off: send when the level is above this, in dBFS.
+    threshold_db: AtomicU32,
+    noise_suppression: AtomicBool,
+    /// Everyone else's volume, 1.0 = normal, up to 2.0.
+    output_gain: AtomicU32,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Settings {
+            input_gain: f32_atomic(1.0),
+            auto_sensitivity: AtomicBool::new(true),
+            threshold_db: f32_atomic(-50.0),
+            noise_suppression: AtomicBool::new(true),
+            output_gain: f32_atomic(1.0),
+        }
+    }
+}
+
+impl Settings {
+    pub fn set(&self, input_gain: f32, auto: bool, threshold_db: f32, noise_suppression: bool, output_gain: f32) {
+        self.input_gain.store(input_gain.clamp(0.0, 4.0).to_bits(), Ordering::Relaxed);
+        self.auto_sensitivity.store(auto, Ordering::Relaxed);
+        self.threshold_db.store(threshold_db.clamp(-100.0, 0.0).to_bits(), Ordering::Relaxed);
+        self.noise_suppression.store(noise_suppression, Ordering::Relaxed);
+        self.output_gain.store(output_gain.clamp(0.0, 2.0).to_bits(), Ordering::Relaxed);
+    }
+
+    fn get(a: &AtomicU32) -> f32 {
+        f32::from_bits(a.load(Ordering::Relaxed))
+    }
+}
+
+// --------------------------------------------------------------- resampler
+
+/// A windowed-sinc resampler (Blackman window, 16 taps a side). When going
+/// down in rate it low-passes at the new Nyquist, so nothing folds back as
+/// the metallic aliasing a straight interpolation gives.
+pub struct Resampler {
+    step: f64,
+    cutoff: f64,
+    pos: f64,
+    buf: Vec<f32>,
+}
+
+const TAPS: usize = 16;
+
+impl Resampler {
+    pub fn new(from: u32, to: u32) -> Resampler {
+        let step = from as f64 / to as f64;
+        Resampler { step, cutoff: (1.0 / step).min(1.0) * 0.95, pos: TAPS as f64, buf: vec![0.0; TAPS] }
+    }
+
+    pub fn passthrough(&self) -> bool {
+        (self.step - 1.0).abs() < 1e-9
+    }
+
+    pub fn process(&mut self, input: &[f32], out: &mut Vec<f32>) {
+        if self.passthrough() {
+            out.extend_from_slice(input);
+            return;
+        }
+        self.buf.extend_from_slice(input);
+        while self.pos + (TAPS as f64) < self.buf.len() as f64 {
+            let center = self.pos.floor() as isize;
+            let frac = self.pos - center as f64;
+            let mut acc = 0.0f64;
+            let mut norm = 0.0f64;
+            for k in -(TAPS as isize) + 1..=TAPS as isize {
+                let x = k as f64 - frac;
+                let w = blackman(x / TAPS as f64);
+                let s = sinc(x * self.cutoff) * self.cutoff * w;
+                acc += self.buf[(center + k) as usize] as f64 * s;
+                norm += s;
+            }
+            out.push((acc / norm.max(1e-9)) as f32);
+            self.pos += self.step;
+        }
+        // Keep the history the next call needs.
+        let keep_from = (self.pos.floor() as usize).saturating_sub(TAPS);
+        self.buf.drain(..keep_from);
+        self.pos -= keep_from as f64;
+    }
+}
+
+fn sinc(x: f64) -> f64 {
+    if x.abs() < 1e-9 {
+        1.0
+    } else {
+        let px = std::f64::consts::PI * x;
+        px.sin() / px
+    }
+}
+
+fn blackman(x: f64) -> f64 {
+    // x in [-1, 1]
+    if x.abs() >= 1.0 {
+        return 0.0;
+    }
+    let t = std::f64::consts::PI * (x + 1.0);
+    0.42 - 0.5 * t.cos() + 0.08 * (2.0 * t).cos()
+}
+
+/// A second-order high-pass (RBJ biquad) at 80 Hz.
+struct HighPass {
+    b: [f32; 3],
+    a: [f32; 2],
+    x: [f32; 2],
+    y: [f32; 2],
+}
+
+impl HighPass {
+    fn new(rate: f32, freq: f32) -> HighPass {
+        let w = 2.0 * std::f32::consts::PI * freq / rate;
+        let (sin, cos) = w.sin_cos();
+        let alpha = sin / (2.0 * std::f32::consts::FRAC_1_SQRT_2);
+        let a0 = 1.0 + alpha;
+        HighPass {
+            b: [(1.0 + cos) / 2.0 / a0, -(1.0 + cos) / a0, (1.0 + cos) / 2.0 / a0],
+            a: [-2.0 * cos / a0, (1.0 - alpha) / a0],
+            x: [0.0; 2],
+            y: [0.0; 2],
+        }
+    }
+
+    fn run(&mut self, s: f32) -> f32 {
+        let y = self.b[0] * s + self.b[1] * self.x[0] + self.b[2] * self.x[1] - self.a[0] * self.y[0] - self.a[1] * self.y[1];
+        self.x = [s, self.x[0]];
+        self.y = [y, self.y[0]];
+        y
+    }
+}
+
+fn db(rms: f32) -> f32 {
+    (20.0 * rms.max(1e-5).log10()).max(-100.0)
+}
+
+/// Rounds off peaks instead of clipping them.
+fn soft_limit(s: f32) -> f32 {
+    if s.abs() < 0.9 {
+        s
+    } else {
+        s.signum() * (0.9 + 0.1 * ((s.abs() - 0.9) / 0.1).tanh())
+    }
+}
+
+// ------------------------------------------------------------------- mixer
+
+struct Voice {
+    decoder: OpusDecoder,
+    last_seq: Option<u32>,
+    buf: VecDeque<f32>,
+    primed: bool,
+    plc: u32,
+}
+
+/// Everyone else's voice: decoded per person, queued, and mixed for the speakers.
 pub struct Mixer {
-    streams: Mutex<HashMap<u16, Jitter>>,
+    voices: Mutex<HashMap<u16, Voice>>,
     loud: Mutex<HashMap<u16, Instant>>,
-    /// Per-person volume set from the right-click menu (1.0 = normal, 0 = muted
-    /// for me). Only affects what this PC plays.
+    /// Per-person volume from the right-click menu (only affects this PC).
     gains: Mutex<HashMap<u16, f32>>,
     deaf: AtomicBool,
+    pub settings: Arc<Settings>,
+}
+
+impl Default for Mixer {
+    fn default() -> Self {
+        Mixer {
+            voices: Mutex::default(),
+            loud: Mutex::default(),
+            gains: Mutex::default(),
+            deaf: AtomicBool::new(false),
+            settings: Arc::new(Settings::default()),
+        }
+    }
 }
 
 impl Mixer {
+    pub fn with_settings(settings: Arc<Settings>) -> Mixer {
+        Mixer { settings, ..Mixer::default() }
+    }
+
     pub fn set_gain(&self, member: u16, gain: f32) {
         self.gains.lock().unwrap().insert(member, gain.clamp(0.0, 2.0));
     }
 
-    pub fn push(&self, from: u16, samples: &[i16]) {
-        let rms = (samples.iter().map(|s| (*s as f32 / 32768.0).powi(2)).sum::<f32>() / samples.len().max(1) as f32).sqrt();
-        if rms > GATE {
-            self.loud.lock().unwrap().insert(from, Instant::now());
+    /// One Opus packet from `from`. A short gap in the sequence is filled from
+    /// this packet's FEC copy and concealment, as Discord's clients do.
+    pub fn push_packet(&self, from: u16, seq: u32, packet: &[u8]) {
+        let mut voices = self.voices.lock().unwrap();
+        let v = match voices.entry(from) {
+            std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
+            std::collections::hash_map::Entry::Vacant(e) => {
+                let Ok(decoder) = OpusDecoder::new(SampleRate::Hz48000, Channels::Mono) else { return };
+                e.insert(Voice { decoder, last_seq: None, buf: VecDeque::new(), primed: false, plc: 0 })
+            }
+        };
+        let mut pcm = [0f32; FRAME];
+        if let Some(last) = v.last_seq {
+            if seq <= last && last - seq < 1000 {
+                return; // late or duplicate
+            }
+            let missing = seq.wrapping_sub(last).wrapping_sub(1);
+            if (1..=3).contains(&missing) {
+                for _ in 1..missing {
+                    if v.decoder.decode(&[], FRAME, &mut pcm).is_ok() {
+                        v.buf.extend(pcm.iter());
+                    }
+                }
+                if v.decoder.decode_fec(packet, FRAME, &mut pcm).is_ok() {
+                    v.buf.extend(pcm.iter());
+                }
+            }
         }
-        let mut streams = self.streams.lock().unwrap();
-        let j = streams.entry(from).or_default();
-        j.buf.extend(samples);
-        if j.buf.len() > MAX_QUEUE {
-            let extra = j.buf.len() - TRIM_TO;
-            j.buf.drain(..extra);
+        v.last_seq = Some(seq);
+        v.plc = 0;
+        if let Ok(n) = v.decoder.decode(packet, FRAME, &mut pcm) {
+            let rms = (pcm[..n].iter().map(|s| s * s).sum::<f32>() / n.max(1) as f32).sqrt();
+            if rms > 0.01 {
+                self.loud.lock().unwrap().insert(from, Instant::now());
+            }
+            v.buf.extend(pcm[..n].iter());
+        }
+        if v.buf.len() > MAX_QUEUE {
+            let extra = v.buf.len() - TRIM_TO;
+            v.buf.drain(..extra);
         }
     }
 
-    /// Fills `out` with the mix at 16 kHz.
-    fn pull(&self, out: &mut [i16]) {
-        let mut acc = vec![0i32; out.len()];
-        {
-            let gains = self.gains.lock().unwrap().clone();
-            let mut streams = self.streams.lock().unwrap();
-            for (id, j) in streams.iter_mut() {
-                if !j.primed && j.buf.len() >= PRIME {
-                    j.primed = true;
+    /// Fills `out` with the mix at 48 kHz.
+    fn pull(&self, out: &mut [f32]) {
+        out.fill(0.0);
+        if self.deaf.load(Ordering::Relaxed) {
+            return;
+        }
+        let gains = self.gains.lock().unwrap().clone();
+        let master = Settings::get(&self.settings.output_gain);
+        let mut voices = self.voices.lock().unwrap();
+        for (id, v) in voices.iter_mut() {
+            if !v.primed && v.buf.len() >= PRIME {
+                v.primed = true;
+            }
+            if !v.primed {
+                continue;
+            }
+            // Ran dry mid-sentence: conceal a little, then go quiet.
+            while v.buf.len() < out.len() && v.plc < MAX_PLC {
+                let mut pcm = [0f32; FRAME];
+                if v.decoder.decode(&[], FRAME, &mut pcm).is_err() {
+                    break;
                 }
-                if !j.primed {
-                    continue;
-                }
-                let gain = gains.get(id).copied().unwrap_or(1.0);
-                for a in acc.iter_mut() {
-                    match j.buf.pop_front() {
-                        Some(s) => *a += (s as f32 * gain) as i32,
-                        None => {
-                            j.primed = false;
-                            break;
-                        }
+                v.buf.extend(pcm.iter());
+                v.plc += 1;
+            }
+            let gain = gains.get(id).copied().unwrap_or(1.0) * master;
+            for o in out.iter_mut() {
+                match v.buf.pop_front() {
+                    Some(s) => *o += s * gain,
+                    None => {
+                        v.primed = false;
+                        break;
                     }
                 }
             }
         }
-        let deaf = self.deaf.load(Ordering::Relaxed);
-        for (o, a) in out.iter_mut().zip(acc) {
-            *o = if deaf { 0 } else { a.clamp(-32768, 32767) as i16 };
+        for o in out.iter_mut() {
+            *o = soft_limit(*o);
         }
     }
 
@@ -108,16 +339,18 @@ impl Mixer {
     }
 
     pub fn clear(&self) {
-        self.streams.lock().unwrap().clear();
+        self.voices.lock().unwrap().clear();
         self.loud.lock().unwrap().clear();
     }
 }
+
+// ------------------------------------------------------------------ engine
 
 /// The running microphone and speaker streams. Dropping it stops both.
 pub struct Engine {
     stop: Arc<AtomicBool>,
     pub muted: Arc<AtomicBool>,
-    /// The mic's current level, 0..1, as f32 bits.
+    /// The mic's level in dBFS (-100..0), after input volume, as f32 bits.
     pub level: Arc<AtomicU32>,
     /// True while the gate is open and we're sending.
     pub talking: Arc<AtomicBool>,
@@ -132,13 +365,13 @@ impl Drop for Engine {
 }
 
 impl Engine {
-    /// Opens the default microphone and speakers. Frames from the mic go to
+    /// Opens the default microphone and speakers. Packets from the mic go to
     /// `out` (the room connection). A missing mic is not fatal: you can still
     /// listen. A missing output device is.
     pub fn start(mixer: Arc<Mixer>, out: SyncSender<Out>, muted: bool) -> Result<Engine, String> {
         let stop = Arc::new(AtomicBool::new(false));
         let muted = Arc::new(AtomicBool::new(muted));
-        let level = Arc::new(AtomicU32::new(0));
+        let level = Arc::new(f32_atomic(-100.0));
         let talking = Arc::new(AtomicBool::new(false));
         let (ready_tx, ready_rx) = channel::<Result<(String, String), String>>();
 
@@ -149,6 +382,7 @@ impl Engine {
                 let _ = ready_tx.send(Err("No speakers or headphones found.".into()));
                 return;
             };
+            let settings = mixer.settings.clone();
             let output = match build_output(&speaker, mixer) {
                 Ok(o) => o,
                 Err(e) => {
@@ -157,7 +391,7 @@ impl Engine {
                 }
             };
             let mic = host.default_input_device();
-            let input = mic.as_ref().map(|d| build_input(d, out, m, l, t));
+            let input = mic.as_ref().map(|d| Capture::new(out, m, l, t, settings).and_then(|c| build_input(d, c)));
             let mic_name = match (&mic, &input) {
                 (Some(d), Some(Ok(_))) => d.name().unwrap_or_else(|_| "Microphone".into()),
                 (Some(_), Some(Err(e))) => format!("Microphone unavailable ({e})"),
@@ -186,95 +420,139 @@ impl Engine {
     }
 }
 
-/// Downmixes to mono and resamples to 16 kHz, then cuts 20 ms frames.
+/// The send path, from device samples to Opus packets.
 struct Capture {
     channels: usize,
-    step: f64,
-    pos: f64,
-    src: Vec<f32>,
-    smooth: bool,
-    frame: Vec<i16>,
-    enc: adpcm::Encoder,
+    resampler: Resampler,
+    mono: Vec<f32>,
+    resampled: Vec<f32>,
+    block: Vec<f32>,
+    frame: Vec<f32>,
+    highpass: HighPass,
+    denoise: Box<nnnoiseless::DenoiseState<'static>>,
+    denoised: Vec<f32>,
+    encoder: OpusEncoder,
+    packet: Vec<u8>,
     seq: u32,
     hang: u32,
+    /// The gate's current gain, eased towards 0 or 1 so it never clicks.
+    gate: f32,
     out: SyncSender<Out>,
     muted: Arc<AtomicBool>,
     level: Arc<AtomicU32>,
     talking: Arc<AtomicBool>,
+    settings: Arc<Settings>,
 }
 
 impl Capture {
-    fn feed(&mut self, data: &[f32]) {
-        for chunk in data.chunks(self.channels) {
-            self.src.push(chunk.iter().sum::<f32>() / chunk.len() as f32);
-        }
-        if self.smooth && self.src.len() >= 3 {
-            // A gentle low-pass before decimating, against aliasing.
-            for i in (2..self.src.len()).rev() {
-                self.src[i] = (self.src[i] + self.src[i - 1] + self.src[i - 2]) / 3.0;
-            }
-        }
-        while self.pos + 1.0 < self.src.len() as f64 {
-            let i = self.pos as usize;
-            let f = (self.pos - i as f64) as f32;
-            let v = self.src[i] + (self.src[i + 1] - self.src[i]) * f;
-            self.frame.push((v.clamp(-1.0, 1.0) * 32767.0) as i16);
-            self.pos += self.step;
-            if self.frame.len() == FRAME {
-                self.finish_frame();
-            }
-        }
-        let used = (self.pos as usize).min(self.src.len().saturating_sub(1));
-        self.src.drain(..used);
-        self.pos -= used as f64;
+    fn new(
+        out: SyncSender<Out>,
+        muted: Arc<AtomicBool>,
+        level: Arc<AtomicU32>,
+        talking: Arc<AtomicBool>,
+        settings: Arc<Settings>,
+    ) -> Result<Capture, String> {
+        let mut encoder = OpusEncoder::new(SampleRate::Hz48000, Channels::Mono, Application::Voip).map_err(|e| format!("{e:?}"))?;
+        encoder.set_bitrate(Bitrate::BitsPerSecond(NonZeroU32::new(BITRATE).unwrap()));
+        encoder.set_inband_fec(InbandFec::On);
+        let _ = encoder.set_packet_loss_perc(10);
+        let _ = encoder.set_complexity(9);
+        Ok(Capture {
+            channels: 1,
+            resampler: Resampler::new(RATE, RATE),
+            mono: Vec::new(),
+            resampled: Vec::new(),
+            block: Vec::with_capacity(BLOCK),
+            frame: Vec::with_capacity(FRAME),
+            highpass: HighPass::new(RATE as f32, 80.0),
+            denoise: nnnoiseless::DenoiseState::new(),
+            denoised: vec![0.0; BLOCK],
+            encoder,
+            packet: vec![0u8; 1500],
+            seq: 0,
+            hang: 0,
+            gate: 0.0,
+            out,
+            muted,
+            level,
+            talking,
+            settings,
+        })
     }
 
-    fn finish_frame(&mut self) {
-        let rms = (self.frame.iter().map(|s| (*s as f32 / 32768.0).powi(2)).sum::<f32>() / FRAME as f32).sqrt();
-        let shown = (rms * 4.0).min(1.0);
-        let prev = f32::from_bits(self.level.load(Ordering::Relaxed));
-        self.level.store((shown.max(prev * 0.8)).to_bits(), Ordering::Relaxed);
+    fn feed(&mut self, data: &[f32]) {
+        self.mono.clear();
+        for chunk in data.chunks(self.channels) {
+            self.mono.push(chunk.iter().sum::<f32>() / chunk.len() as f32);
+        }
+        self.resampled.clear();
+        let mono = std::mem::take(&mut self.mono);
+        self.resampler.process(&mono, &mut self.resampled);
+        self.mono = mono;
+        for i in 0..self.resampled.len() {
+            self.block.push(self.resampled[i]);
+            if self.block.len() == BLOCK {
+                self.finish_block();
+            }
+        }
+    }
 
-        if rms > GATE {
+    /// One 10 ms block: filter, gain, suppress, gate, and every second block an Opus packet.
+    fn finish_block(&mut self) {
+        let gain = Settings::get(&self.settings.input_gain);
+        for s in self.block.iter_mut() {
+            *s = self.highpass.run(*s) * gain;
+        }
+        let rms = (self.block.iter().map(|s| s * s).sum::<f32>() / BLOCK as f32).sqrt();
+        let level = db(rms);
+        // The meter rises at once and falls 1.5 dB per block, so it's readable.
+        let prev = f32::from_bits(self.level.load(Ordering::Relaxed));
+        self.level.store(level.max(prev - 1.5).to_bits(), Ordering::Relaxed);
+
+        // RNNoise wants samples on the 16-bit scale.
+        let scaled: Vec<f32> = self.block.iter().map(|s| s * 32768.0).collect();
+        let vad = self.denoise.process_frame(&mut self.denoised, &scaled);
+        let ns = self.settings.noise_suppression.load(Ordering::Relaxed);
+
+        let speaking = if self.settings.auto_sensitivity.load(Ordering::Relaxed) {
+            vad > 0.5 && level > -65.0
+        } else {
+            level > Settings::get(&self.settings.threshold_db)
+        };
+        if speaking {
             self.hang = HANGOVER;
         } else {
             self.hang = self.hang.saturating_sub(1);
         }
         let open = self.hang > 0 && !self.muted.load(Ordering::Relaxed);
         self.talking.store(open, Ordering::Relaxed);
-        if open {
-            let encoded = self.enc.encode(&self.frame);
-            let _ = self.out.try_send(Out::Frame(wire::audio(&self.seq.to_be_bytes(), &encoded)));
-            self.seq = self.seq.wrapping_add(1);
+
+        // Ease the gate: about 5 ms to open, 60 ms to close.
+        let target = if open { 1.0 } else { 0.0 };
+        let rate = if open { 1.0 / 240.0 } else { 1.0 / 2880.0 };
+        for i in 0..BLOCK {
+            let s = if ns { self.denoised[i] / 32768.0 } else { self.block[i] };
+            self.gate += (target - self.gate).clamp(-rate, rate);
+            self.frame.push(soft_limit(s * self.gate));
         }
-        self.frame.clear();
+        self.block.clear();
+
+        if self.frame.len() == FRAME {
+            if self.gate > 0.0 || open {
+                if let Ok(n) = self.encoder.encode(&self.frame, FRAME, &mut self.packet) {
+                    let _ = self.out.try_send(Out::Frame(wire::audio(&self.seq.to_be_bytes(), &self.packet[..n])));
+                    self.seq = self.seq.wrapping_add(1);
+                }
+            }
+            self.frame.clear();
+        }
     }
 }
 
-fn build_input(
-    device: &cpal::Device,
-    out: SyncSender<Out>,
-    muted: Arc<AtomicBool>,
-    level: Arc<AtomicU32>,
-    talking: Arc<AtomicBool>,
-) -> Result<cpal::Stream, String> {
+fn build_input(device: &cpal::Device, mut cap: Capture) -> Result<cpal::Stream, String> {
     let config = device.default_input_config().map_err(|e| e.to_string())?;
-    let rate = config.sample_rate().0;
-    let cap = Capture {
-        channels: config.channels().max(1) as usize,
-        step: rate as f64 / RATE as f64,
-        pos: 0.0,
-        src: Vec::new(),
-        smooth: rate > 2 * RATE,
-        frame: Vec::with_capacity(FRAME),
-        enc: adpcm::Encoder::default(),
-        seq: 0,
-        hang: 0,
-        out,
-        muted,
-        level,
-        talking,
-    };
+    cap.channels = config.channels().max(1) as usize;
+    cap.resampler = Resampler::new(config.sample_rate().0, RATE);
     let stream_config: cpal::StreamConfig = config.clone().into();
     match config.sample_format() {
         SampleFormat::F32 => input_stream::<f32>(device, &stream_config, cap),
@@ -305,33 +583,25 @@ where
         .map_err(|e| e.to_string())
 }
 
-/// Resamples the 16 kHz mix up to the device rate and copies it to every channel.
+/// The 48 kHz mix, resampled to the device rate and copied to every channel.
 struct Playback {
     mixer: Arc<Mixer>,
     channels: usize,
-    step: f64,
-    frac: f64,
-    prev: f32,
-    next: f32,
-    chunk: Vec<i16>,
-    at: usize,
+    resampler: Resampler,
+    chunk: Vec<f32>,
+    ready: VecDeque<f32>,
+    scratch: Vec<f32>,
 }
 
 impl Playback {
     fn next_sample(&mut self) -> f32 {
-        while self.frac >= 1.0 {
-            self.frac -= 1.0;
-            self.prev = self.next;
-            if self.at >= self.chunk.len() {
-                self.mixer.pull(&mut self.chunk);
-                self.at = 0;
-            }
-            self.next = self.chunk[self.at] as f32 / 32768.0;
-            self.at += 1;
+        while self.ready.is_empty() {
+            self.mixer.pull(&mut self.chunk);
+            self.scratch.clear();
+            self.resampler.process(&self.chunk, &mut self.scratch);
+            self.ready.extend(self.scratch.iter());
         }
-        let v = self.prev + (self.next - self.prev) * self.frac as f32;
-        self.frac += self.step;
-        v
+        self.ready.pop_front().unwrap_or(0.0)
     }
 }
 
@@ -340,12 +610,10 @@ fn build_output(device: &cpal::Device, mixer: Arc<Mixer>) -> Result<cpal::Stream
     let pb = Playback {
         mixer,
         channels: config.channels().max(1) as usize,
-        step: RATE as f64 / config.sample_rate().0 as f64,
-        frac: 1.0,
-        prev: 0.0,
-        next: 0.0,
-        chunk: vec![0; 160],
-        at: 160,
+        resampler: Resampler::new(RATE, config.sample_rate().0),
+        chunk: vec![0.0; 480],
+        ready: VecDeque::new(),
+        scratch: Vec::new(),
     };
     let stream_config: cpal::StreamConfig = config.clone().into();
     match config.sample_format() {
@@ -383,62 +651,96 @@ where
 mod tests {
     use super::*;
 
-    #[test]
-    fn capture_cuts_16k_frames_from_48k_stereo() {
-        let (tx, rx) = std::sync::mpsc::sync_channel(64);
-        let mut cap = Capture {
-            channels: 2,
-            step: 3.0,
-            pos: 0.0,
-            src: Vec::new(),
-            smooth: true,
-            frame: Vec::new(),
-            enc: adpcm::Encoder::default(),
-            seq: 0,
-            hang: 0,
-            out: tx,
-            muted: Arc::new(AtomicBool::new(false)),
-            level: Arc::new(AtomicU32::new(0)),
-            talking: Arc::new(AtomicBool::new(false)),
-        };
-        // 100 ms of a loud 440 Hz tone, 48 kHz stereo.
-        let data: Vec<f32> = (0..4800).flat_map(|i| {
-            let v = (i as f32 * 440.0 * std::f32::consts::TAU / 48_000.0).sin() * 0.5;
-            [v, v]
-        }).collect();
-        cap.feed(&data);
-        let frames: Vec<_> = rx.try_iter().collect();
-        // 100 ms at 16 kHz is 1600 samples: five 20 ms frames (the last may still be filling).
-        assert!(frames.len() >= 4, "got {} frames", frames.len());
-        assert!(cap.level.load(Ordering::Relaxed) > 0);
+    fn capture(settings: Arc<Settings>) -> (Capture, std::sync::mpsc::Receiver<Out>) {
+        let (tx, rx) = std::sync::mpsc::sync_channel(256);
+        let cap = Capture::new(
+            tx,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(f32_atomic(-100.0)),
+            Arc::new(AtomicBool::new(false)),
+            settings,
+        )
+        .unwrap();
+        (cap, rx)
+    }
+
+    fn tone(rate: u32, ms: u32, freq: f32, amp: f32) -> Vec<f32> {
+        (0..rate * ms / 1000).map(|i| (i as f32 * freq * std::f32::consts::TAU / rate as f32).sin() * amp).collect()
     }
 
     #[test]
-    fn silence_sends_nothing() {
-        let (tx, rx) = std::sync::mpsc::sync_channel(64);
-        let mut cap = Capture {
-            channels: 1, step: 1.0, pos: 0.0, src: Vec::new(), smooth: false, frame: Vec::new(),
-            enc: adpcm::Encoder::default(), seq: 0, hang: 0, out: tx,
-            muted: Arc::new(AtomicBool::new(false)), level: Arc::new(AtomicU32::new(0)), talking: Arc::new(AtomicBool::new(false)),
-        };
-        cap.feed(&vec![0.0; 3200]);
-        assert_eq!(rx.try_iter().count(), 0);
+    fn resampler_keeps_a_tone_and_its_level() {
+        let mut r = Resampler::new(44_100, 48_000);
+        let mut out = Vec::new();
+        r.process(&tone(44_100, 200, 1000.0, 0.5), &mut out);
+        assert!((out.len() as i32 - 9600).abs() < 40, "{} samples", out.len());
+        let rms = (out[1000..8000].iter().map(|s| s * s).sum::<f32>() / 7000.0).sqrt();
+        assert!((rms - 0.5 / 2f32.sqrt()).abs() < 0.02, "rms {rms}");
     }
 
     #[test]
-    fn mixer_waits_to_prime_then_plays() {
+    fn resampler_removes_what_cannot_fit() {
+        // 20 kHz can't exist at 16 kHz; a plain interpolator would fold it to 4 kHz.
+        let mut r = Resampler::new(48_000, 16_000);
+        let mut out = Vec::new();
+        r.process(&tone(48_000, 200, 20_000.0, 0.5), &mut out);
+        let rms = (out[200..3000].iter().map(|s| s * s).sum::<f32>() / 2800.0).sqrt();
+        assert!(rms < 0.02, "aliasing left {rms}");
+    }
+
+    /// Manual threshold: a tone above it is sent as Opus, silence isn't.
+    #[test]
+    fn manual_gate_sends_speech_level_only() {
+        let s = Arc::new(Settings::default());
+        s.set(1.0, false, -40.0, false, 1.0);
+        let (mut cap, rx) = capture(s.clone());
+        cap.feed(&vec![0.0; 9600]);
+        assert_eq!(rx.try_iter().count(), 0, "silence sends nothing");
+        cap.feed(&tone(48_000, 200, 300.0, 0.3));
+        let packets: Vec<_> = rx.try_iter().collect();
+        assert!(packets.len() >= 9, "got {}", packets.len());
+        // A quiet mic below the threshold isn't sent; raising input volume fixes that.
+        let (mut quiet, rx2) = capture(s.clone());
+        quiet.feed(&tone(48_000, 200, 300.0, 0.004));
+        assert_eq!(rx2.try_iter().count(), 0);
+        s.set(4.0, false, -45.0, false, 1.0);
+        quiet.feed(&tone(48_000, 200, 300.0, 0.004));
+        assert!(rx2.try_iter().count() > 0, "input volume lifts a quiet mic over the threshold");
+    }
+
+    /// Opus out of the capture decodes in the mixer; a lost packet is concealed.
+    #[test]
+    fn opus_round_trip_with_a_lost_packet() {
+        let s = Arc::new(Settings::default());
+        s.set(1.0, false, -60.0, false, 1.0);
+        let (mut cap, rx) = capture(s);
+        cap.feed(&tone(48_000, 300, 440.0, 0.3));
+        let packets: Vec<Vec<u8>> = rx
+            .try_iter()
+            .map(|o| match o {
+                Out::Frame(f) => f[5 + 4..].to_vec(),
+                Out::Close => vec![],
+            })
+            .collect();
+        assert!(packets.len() >= 12);
+        assert!(packets.iter().all(|p| p.len() < 400), "64 kbit/s is about 160 bytes a packet");
         let m = Mixer::default();
-        m.push(7, &[1000; 480]);
-        let mut out = [0i16; 160];
+        for (seq, p) in packets.iter().enumerate() {
+            if seq == 5 {
+                continue; // lost on the way
+            }
+            m.push_packet(4, seq as u32, p);
+        }
+        let mut out = vec![0f32; FRAME * packets.len()];
         m.pull(&mut out);
-        assert!(out.iter().all(|s| *s == 0), "should wait for PRIME");
-        m.push(7, &[1000; 480]);
-        m.pull(&mut out);
-        assert!(out.iter().all(|s| *s == 1000));
-        assert_eq!(m.speaking(), vec![7]);
+        let rms = (out[FRAME * 3..FRAME * 10].iter().map(|s| s * s).sum::<f32>() / (FRAME * 7) as f32).sqrt();
+        assert!(rms > 0.1, "decoded level {rms}");
+        assert_eq!(m.speaking(), vec![4]);
         // Their volume at 50% for me.
-        m.set_gain(7, 0.5);
-        m.pull(&mut out);
-        assert!(out.iter().all(|s| *s == 500));
+        m.set_gain(4, 0.0);
+        m.push_packet(4, 100, &packets[2]);
+        let mut quiet = vec![0f32; FRAME];
+        m.pull(&mut quiet);
+        assert!(quiet.iter().all(|s| s.abs() < 1e-6));
     }
 }

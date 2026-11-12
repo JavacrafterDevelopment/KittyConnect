@@ -998,3 +998,73 @@ select.input { padding: 7px 9px; }
 .ctx-sep { height: 1px; background: var(--rule); margin: 4px 2px; }
 .ctx-head { padding: 2px 8px; font-size: 10px; letter-spacing: .09em; text-transform: uppercase; color: var(--ink-ghost); }
 .ctx-note { padding: 2px 8px 8px; font-size: 11.5px; color: var(--ink-faint); line-height: 1.5; }
+
+/* ------------------------------------------------------------ voice settings */
+
+.meter-bar { background: #C9CED6; }
+.meter-bar.on { background: linear-gradient(90deg, var(--ok), #9CC46F); }
+
+.modal {
+  position: fixed;
+  inset: 0;
+  z-index: 96;
+  display: grid;
+  place-items: center;
+  background: rgba(20, 28, 40, .35);
+  animation: page-in .15s ease both;
+}
+.modal-card {
+  width: min(460px, calc(100vw - 32px));
+  max-height: calc(100vh - 60px);
+  overflow-y: auto;
+  background: var(--card);
+  border: 1px solid var(--rule-strong);
+  border-radius: 15px;
+  box-shadow: 0 20px 60px rgba(20, 28, 40, .3);
+  padding: 4px 20px 12px;
+}
+.vs-row { display: flex; flex-direction: column; gap: 8px; padding: 14px 0; border-bottom: 1px solid var(--rule); }
+.vs-row.last { border-bottom: 0; }
+.vs-row .set-row { padding: 0; }
+.sens { display: flex; flex-direction: column; gap: 6px; }
+.sens-meter {
+  position: relative;
+  height: 10px;
+  border-radius: 999px;
+  background: var(--paper-deep);
+  overflow: hidden;
+}
+.sens-level { position: absolute; left: 0; top: 0; bottom: 0; width: 0; background: #C9CED6; transition: width .1s linear; }
+.sens-level.on { background: linear-gradient(90deg, var(--ok), #9CC46F); }
+.sens-mark { position: absolute; top: -2px; bottom: -2px; width: 3px; margin-left: -1px; background: var(--blue-deep); border-radius: 2px; }
+.ctx-range:disabled { opacity: .45; }
+
+/* ------------------------------------------------------- stream full screen */
+
+.stage-bar { display: none; }
+:root.theater .stage-view {
+  position: fixed;
+  inset: 0;
+  z-index: 98;
+  max-height: none;
+  aspect-ratio: auto;
+  border-radius: 0;
+  background: #000;
+}
+:root.theater .stage-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  padding: 10px 14px;
+  color: #E7EAF0;
+  font-size: 13px;
+  background: linear-gradient(180deg, rgba(0, 0, 0, .65), transparent);
+  opacity: 0;
+  transition: opacity .2s ease;
+}
+:root.theater .stage-view:hover .stage-bar { opacity: 1; }
+:root.theater .grips { display: none; }

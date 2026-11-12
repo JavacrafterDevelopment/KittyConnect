@@ -617,12 +617,63 @@ function liveSpeaking(v) {
 function voipLive(msg) {
   if (msg.speaking) lastSpeaking = msg.speaking;
   if (msg.talking != null) meTalking = msg.talking;
-  if (msg.level != null) $('voip-meter').style.width = `${Math.round(msg.level * 100)}%`;
+  if (msg.level != null) showLevel(msg.level, msg.talking);
   const speaking = new Set(liveSpeaking(voipState && { me: msg.me }));
   document.querySelectorAll('#page-voip [data-member]').forEach((el) => {
     el.querySelector('.avatar').classList.toggle('speaking', speaking.has(Number(el.dataset.member)));
   });
 }
+
+/* ------------------------------------------------------- voice settings */
+
+/* Yours only, remembered on this PC, and applied at once (in a call or not). */
+const VS_DEFAULT = { inputGain: 1, autoSensitivity: true, thresholdDb: -50, noiseSuppression: true, outputGain: 1 };
+let vs = { ...VS_DEFAULT };
+try { vs = { ...VS_DEFAULT, ...JSON.parse(localStorage.getItem('kc-audio') || '{}') }; } catch (_) { /* defaults */ }
+
+function vsRender() {
+  $('vs-in').value = Math.round(vs.inputGain * 100);
+  $('vs-in-val').textContent = `${Math.round(vs.inputGain * 100)}%`;
+  $('vs-out').value = Math.round(vs.outputGain * 100);
+  $('vs-out-val').textContent = `${Math.round(vs.outputGain * 100)}%`;
+  $('vs-auto').checked = vs.autoSensitivity;
+  $('vs-ns').checked = vs.noiseSuppression;
+  $('vs-thresh').value = vs.thresholdDb;
+  $('vs-thresh').disabled = vs.autoSensitivity;
+  $('vs-mark').style.left = `${vs.thresholdDb + 100}%`;
+  $('vs-mark').classList.toggle('hide', vs.autoSensitivity);
+  $('vs-sens-desc').textContent = vs.autoSensitivity
+    ? 'Automatic. Turn it off to set the level yourself.'
+    : `Sends when your mic is above ${vs.thresholdDb} dB. Drag left if you cut out, right if noise gets through.`;
+}
+
+function vsSave() {
+  try { localStorage.setItem('kc-audio', JSON.stringify(vs)); } catch (_) { /* no storage */ }
+  post({ cmd: 'voip.audio', settings: vs });
+  vsRender();
+}
+
+$('vs-in').addEventListener('input', () => { vs.inputGain = Number($('vs-in').value) / 100; vsSave(); });
+$('vs-out').addEventListener('input', () => { vs.outputGain = Number($('vs-out').value) / 100; vsSave(); });
+$('vs-auto').addEventListener('change', () => { vs.autoSensitivity = $('vs-auto').checked; vsSave(); });
+$('vs-ns').addEventListener('change', () => { vs.noiseSuppression = $('vs-ns').checked; vsSave(); });
+$('vs-thresh').addEventListener('input', () => { vs.thresholdDb = Number($('vs-thresh').value); vsSave(); });
+$('vs-open').addEventListener('click', () => { vsRender(); hide($('vs-modal'), false); });
+$('vs-close').addEventListener('click', () => hide($('vs-modal'), true));
+$('vs-modal').addEventListener('mousedown', (e) => { if (e.target === $('vs-modal')) hide($('vs-modal'), true); });
+window.addEventListener('keydown', (e) => { if (e.key === 'Escape') hide($('vs-modal'), true); });
+
+/* The mic level (dBFS, -100..0) on both meters. Green while you're being sent. */
+function showLevel(db, talking) {
+  const pctW = `${Math.max(0, Math.min(100, db + 100))}%`;
+  $('voip-meter').style.width = pctW;
+  $('vs-level').style.width = pctW;
+  $('vs-level').classList.toggle('on', !!talking);
+  $('voip-meter').classList.toggle('on', !!talking);
+}
+
+// The saved settings go to the app as soon as the page starts.
+post({ cmd: 'voip.audio', settings: vs });
 
 /* -------------------------------------------------------- attachments */
 
@@ -694,9 +745,24 @@ function outSize(srcW, srcH, choice) {
   return { w: w - (w % 2), h: h - (h % 2) };
 }
 
-// Roughly what Discord streams at: ~2.5 Mbit/s for 720p30, ~4.5 for 1080p30.
+/* Compression presets. Bits per pixel per frame sets the bitrate: Balanced is
+   roughly what Discord streams at (~2.5 Mbit/s for 720p30, ~4.5 for 1080p30).
+   Text and detail spends about three times that and tells the encoder to keep
+   edges sharp rather than motion smooth, so small text stays readable. */
+const QUALITY = {
+  text:     { bpp: 0.22, max: 25e6, hint: 'text',   label: 'sharp text' },
+  balanced: { bpp: 0.08, max: 12e6, hint: 'detail', label: 'balanced' },
+  motion:   { bpp: 0.08, max: 12e6, hint: 'motion', label: 'smooth motion' },
+  saver:    { bpp: 0.035, max: 4e6, hint: 'detail', label: 'data saver' },
+};
+
+function preset() {
+  return QUALITY[$('ss-quality').value] || QUALITY.balanced;
+}
+
 function bitrateFor(w, h, fps) {
-  return Math.round(Math.min(10e6, Math.max(600e3, w * h * fps * 0.07)));
+  const p = preset();
+  return Math.round(Math.min(p.max, Math.max(400e3, w * h * fps * p.bpp)));
 }
 
 function estimate() {
@@ -704,10 +770,14 @@ function estimate() {
   const { w, h } = outSize(n.w, n.h, $('ss-res').value || 'native');
   const fps = Number($('ss-fps').value);
   const mbps = (bitrateFor(w, h, fps) / 1e6).toFixed(1);
-  $('ss-est').textContent = `${w}×${h} at ${fps} fps, about ${mbps} Mbit/s. On a relay, a lower setting stays smoother.`;
+  const tip = preset() === QUALITY.text
+    ? ' For reading code or documents, 15 to 30 fps at full resolution works best.'
+    : ' On a relay, a lower setting stays smoother.';
+  $('ss-est').textContent = `${w}×${h} at ${fps} fps, about ${mbps} Mbit/s.${tip}`;
 }
 $('ss-res').addEventListener('change', estimate);
 $('ss-fps').addEventListener('change', estimate);
+$('ss-quality').addEventListener('change', estimate);
 
 async function pickConfig(w, h, fps) {
   const bitrate = bitrateFor(w, h, fps);
@@ -771,6 +841,8 @@ async function startShare() {
   ss.frames = 0;
   ss.forceKey = true;
   ss.info = { w, h, fps, codec: config.codec };
+  // Tells the capture and encoder what to protect: sharp edges or smooth motion.
+  try { track.contentHint = preset().hint; } catch (_) { /* older runtime */ }
   ss.encoder = new VideoEncoder({
     output: (chunk) => {
       const buf = new Uint8Array(chunk.byteLength);
@@ -792,6 +864,7 @@ async function startShare() {
   // size, and never lets the encoder fall behind.
   const canvas = new OffscreenCanvas(w, h);
   const ctx = canvas.getContext('2d');
+  ctx.imageSmoothingQuality = 'high'; // a sharper downscale keeps text legible
   ss.reader = new MediaStreamTrackProcessor({ track }).readable.getReader();
   const interval = 1e6 / fps;
   let last = -Infinity;
@@ -856,6 +929,7 @@ $('ss-stop').addEventListener('click', () => stopShare());
 const view = { id: null, decoder: null, codec: null, waitKey: true, frames: 0, bytes: 0, tick: 0 };
 
 function closeViewer() {
+  if (document.documentElement.classList.contains('theater')) setTheater(false);
   try { view.decoder && view.decoder.state !== 'closed' && view.decoder.close(); } catch (_) { /* gone */ }
   view.decoder = null;
   view.id = null;
@@ -936,10 +1010,19 @@ document.getElementById('page-voip').addEventListener('click', (e) => {
   post({ cmd: 'voip.watch', id });
 });
 $('stage-stop').addEventListener('click', () => post({ cmd: 'voip.watch', id: null }));
-$('stage-full').addEventListener('click', () => {
-  const el = $('stage-view');
-  if (document.fullscreenElement) document.exitFullscreen();
-  else if (el.requestFullscreen) el.requestFullscreen();
+/* Full screen: the stream fills the window and the window goes borderless
+   full screen. Double-click the picture or press the button; Esc or
+   double-click again comes back. */
+function setTheater(on) {
+  document.documentElement.classList.toggle('theater', on);
+  $('stage-bar-title').textContent = $('stage-title').textContent;
+  post({ cmd: 'window.fullscreen', on });
+}
+$('stage-full').addEventListener('click', () => setTheater(true));
+$('stage-exit').addEventListener('click', () => setTheater(false));
+$('stage-view').addEventListener('dblclick', () => setTheater(!document.documentElement.classList.contains('theater')));
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && document.documentElement.classList.contains('theater')) setTheater(false);
 });
 
 /* ---------------------------------------------------- right-click menu */
@@ -1158,5 +1241,5 @@ if (window.ipc) {
       { key: 4, st: 'live', error: '', lan: false, maps: [{ local: 7777, remote: 7777 }], link: { path: 'relay', rtt: 91, checkedAgo: 40 }, log: [] },
     ],
   });
-  voipLive({ speaking: [2], me: 1, level: 0.45, talking: false });
+  voipLive({ speaking: [2], me: 1, level: -24, talking: true });
 }
