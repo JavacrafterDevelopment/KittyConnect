@@ -12,7 +12,8 @@ sent over Discord, and run `KittyConnect.exe`.
 **File Share**
 - *Send files*: drop files or folders in, press **Start sharing**, then **Copy for Discord**.
 - *Receive files*: paste the code, press **Connect**, then download what you want.
-  Files go to `Received\` beside the exe unless you pick another folder.
+  Files go to your Downloads folder unless you pick another one (folders keep
+  their layout inside it).
 
 **Ports**
 - *Open a port*: enter the port your server listens on (e.g. `25565`) and press

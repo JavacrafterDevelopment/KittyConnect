@@ -41,7 +41,7 @@
   --blue-soft:    #7D93B8;
 
   --status-btm:   #FBF9F6;
-  --focus-ring:   rgba(168, 132, 63, .2);
+  --focus-ring:   rgba(42, 98, 201, .2);
   --shadow-drop:  rgba(74, 53, 36, .16);
 
   --serif: Georgia, "Palatino Linotype", "Book Antiqua", "Iowan Old Style", serif;
@@ -282,7 +282,7 @@ code {
   transition: border-color .15s ease;
 }
 
-.card.live { border-color: var(--gilt); }
+.card.live { border-color: var(--blue-light); }
 
 .card-head {
   display: flex;
@@ -349,7 +349,7 @@ code {
 }
 
 .input.mono { font-family: var(--mono); font-size: 12px; }
-.input:focus { border-color: var(--gilt); box-shadow: 0 0 0 3px var(--focus-ring); }
+.input:focus { border-color: var(--blue); box-shadow: 0 0 0 3px var(--focus-ring); }
 .input:disabled { background: var(--paper-deep); color: var(--ink-faint); }
 .input.small { width: 92px; padding: 5px 8px; font-variant-numeric: tabular-nums; }
 
@@ -367,7 +367,7 @@ code {
   transition: background .12s ease, border-color .12s ease, color .12s ease;
 }
 
-.tag:hover { border-color: var(--walnut); background: var(--walnut-wash); color: var(--walnut-deep); }
+.tag:hover { border-color: var(--blue); background: var(--blue-wash); color: var(--blue-deep); }
 
 /* --------------------------------------------------------------- dropzone */
 
@@ -386,7 +386,7 @@ code {
 
 .drop-title { font-family: var(--serif); font-size: 15px; color: var(--ink-soft); }
 .drop-or { font-size: 11px; color: var(--ink-ghost); }
-.drop.hot { border-color: var(--gilt); background: var(--gilt-wash); color: var(--gilt); }
+.drop.hot { border-color: var(--blue); background: var(--blue-wash); color: var(--blue); }
 
 /* --------------------------------------------------------------- file lists */
 
@@ -426,7 +426,7 @@ code {
   font-weight: 700;
   letter-spacing: .03em;
   color: var(--on-accent);
-  background: linear-gradient(160deg, var(--walnut) 0%, var(--walnut-deep) 100%);
+  background: linear-gradient(160deg, var(--blue-light) 0%, var(--blue) 100%);
   text-transform: uppercase;
   overflow: hidden;
 }
@@ -462,7 +462,7 @@ code {
   height: 100%;
   width: 0;
   border-radius: 999px;
-  background: linear-gradient(90deg, var(--walnut), var(--gilt));
+  background: linear-gradient(90deg, var(--blue), var(--blue-light));
   transition: width .2s ease;
 }
 
@@ -481,9 +481,9 @@ code {
   flex-direction: column;
   gap: 9px;
   padding: 14px 15px 13px;
-  border: 1px solid var(--gilt);
+  border: 1px solid #C9D9F2;
   border-radius: 12px;
-  background: linear-gradient(180deg, #FFFCF5 0%, var(--gilt-wash) 100%);
+  background: linear-gradient(180deg, #FFFFFF 0%, var(--blue-wash) 100%);
   animation: page-in .25s ease both;
 }
 
@@ -493,14 +493,14 @@ code {
   font-size: 10.5px;
   letter-spacing: .09em;
   text-transform: uppercase;
-  color: var(--walnut);
+  color: var(--blue);
 }
 
 .code {
   display: block;
   font-size: 11.5px;
   line-height: 1.5;
-  color: var(--walnut-deep);
+  color: var(--blue-deep);
   background: var(--paper);
   border: 1px solid var(--rule-strong);
   border-radius: 8px;
@@ -600,7 +600,7 @@ code {
   transition: transform .16s ease, background .16s ease;
 }
 
-.switch:checked { background: var(--walnut); border-color: var(--walnut); }
+.switch:checked { background: var(--blue); border-color: var(--blue); }
 .switch:checked::after { transform: translateX(17px); background: var(--on-accent); }
 .switch:focus-visible { outline: 0; box-shadow: 0 0 0 3px var(--focus-ring); }
 .switch:disabled { opacity: .5; }
@@ -623,11 +623,11 @@ code {
 }
 
 .btn:hover:not(:disabled) { background: var(--card-hover); border-color: var(--ink-ghost); }
-.btn:active:not(:disabled) { background: var(--walnut-wash); }
+.btn:active:not(:disabled) { background: var(--blue-wash); }
 .btn:disabled { opacity: .5; }
 
-.btn.primary { background: var(--walnut); border-color: var(--walnut); color: var(--on-accent); }
-.btn.primary:hover:not(:disabled) { background: var(--walnut-deep); border-color: var(--walnut-deep); }
+.btn.primary { background: var(--blue); border-color: var(--blue); color: #FFFFFF; }
+.btn.primary:hover:not(:disabled) { background: var(--blue-deep); border-color: var(--blue-deep); }
 
 .btn.danger { background: var(--danger); border-color: var(--danger); color: #FFF6EC; }
 .btn.danger:hover:not(:disabled) { filter: brightness(1.08); background: var(--danger); border-color: var(--danger); }
@@ -653,7 +653,7 @@ code {
   text-overflow: ellipsis;
 }
 
-.link:hover { color: var(--walnut-deep); border-bottom-color: var(--gilt); }
+.link:hover { color: var(--blue-deep); border-bottom-color: var(--blue-light); }
 
 /* -------------------------------------------------------------- log drawer */
 

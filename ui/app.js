@@ -488,7 +488,7 @@ if (window.ipc) {
       log: ['# Selected bootstrap relay region 302, San Francisco', `# 🐈 Server listening with new address: ${addr}`],
     },
     recv: {
-      st: 'live', error: '', inbox: 'D:\\KittyConnect\\Received',
+      st: 'live', error: '', inbox: 'C:\\Users\\you\\Downloads',
       files: [
         { id: 7, name: 'song.mp3', size: 8388608, st: 'done', done: 8388608, total: 8388608, error: '' },
         { id: 8, name: 'clips/funny.mp4', size: 94371840, st: 'downloading', done: 40000000, total: 94371840, error: '' },
