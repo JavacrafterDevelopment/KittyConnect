@@ -2,21 +2,21 @@
   "schema": 1,
   "channels": {
     "beta": {
-      "version": "0.4.0",
-      "published": "2026-11-12T03:22:32Z",
-      "notes": "**Full Changelog**: https://github.com/JavacrafterDevelopment/KittyConnect/compare/v0.3.0...v0.4.0",
-      "page": "https://github.com/JavacrafterDevelopment/KittyConnect/releases/tag/v0.4.0",
+      "version": "0.5.0",
+      "published": "2026-11-12T09:22:40Z",
+      "notes": "**Full Changelog**: https://github.com/JavacrafterDevelopment/KittyConnect/compare/v0.4.0...v0.5.0",
+      "page": "https://github.com/JavacrafterDevelopment/KittyConnect/releases/tag/v0.5.0",
       "package": {
-        "url": "https://github.com/JavacrafterDevelopment/KittyConnect/releases/download/v0.4.0/KittyConnect-windows-x64.zip",
-        "size": 8757333,
-        "sha256": "303326ea2190463160fae1878ff895d26a34b36fec212b86df17b2c583e69985"
+        "url": "https://github.com/JavacrafterDevelopment/KittyConnect/releases/download/v0.5.0/KittyConnect-windows-x64.zip",
+        "size": 8764036,
+        "sha256": "32b69395156cc52048d0f395f138596e1487265fe0e4ef887a5043f71615e23f"
       },
       "exe": "KittyConnect.exe",
       "files": [
         {
           "path": "KittyConnect.exe",
-          "size": 21619200,
-          "sha256": "41ba0bd2707e480a0a11ada39e6a8842abba02334704f06d8e49b6983dde812d"
+          "size": 21630976,
+          "sha256": "ea9dbbcf48508dea77cf04c893982c0cf4cbfec1fd783d5cf94ef85e2568a323"
         },
         {
           "path": "licenses/LICENSE-APACHE",
@@ -36,21 +36,21 @@
       ]
     },
     "stable": {
-      "version": "0.4.0",
-      "published": "2026-11-12T03:22:32Z",
-      "notes": "**Full Changelog**: https://github.com/JavacrafterDevelopment/KittyConnect/compare/v0.3.0...v0.4.0",
-      "page": "https://github.com/JavacrafterDevelopment/KittyConnect/releases/tag/v0.4.0",
+      "version": "0.5.0",
+      "published": "2026-11-12T09:22:40Z",
+      "notes": "**Full Changelog**: https://github.com/JavacrafterDevelopment/KittyConnect/compare/v0.4.0...v0.5.0",
+      "page": "https://github.com/JavacrafterDevelopment/KittyConnect/releases/tag/v0.5.0",
       "package": {
-        "url": "https://github.com/JavacrafterDevelopment/KittyConnect/releases/download/v0.4.0/KittyConnect-windows-x64.zip",
-        "size": 8757333,
-        "sha256": "303326ea2190463160fae1878ff895d26a34b36fec212b86df17b2c583e69985"
+        "url": "https://github.com/JavacrafterDevelopment/KittyConnect/releases/download/v0.5.0/KittyConnect-windows-x64.zip",
+        "size": 8764036,
+        "sha256": "32b69395156cc52048d0f395f138596e1487265fe0e4ef887a5043f71615e23f"
       },
       "exe": "KittyConnect.exe",
       "files": [
         {
           "path": "KittyConnect.exe",
-          "size": 21619200,
-          "sha256": "41ba0bd2707e480a0a11ada39e6a8842abba02334704f06d8e49b6983dde812d"
+          "size": 21630976,
+          "sha256": "ea9dbbcf48508dea77cf04c893982c0cf4cbfec1fd783d5cf94ef85e2568a323"
         },
         {
           "path": "licenses/LICENSE-APACHE",
