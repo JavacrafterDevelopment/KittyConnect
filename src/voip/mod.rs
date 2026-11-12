@@ -1,9 +1,12 @@
 //! VOIP: a temporary room with a text channel and a voice channel, hosted on
-//! one PC and joined through a TailCat code. Names, messages and voice only
-//! ever travel inside the encrypted tunnel (or over loopback, for the host).
+//! one PC and joined through a TailCat code. Names, messages, voice and video
+//! only ever travel inside the encrypted tunnel (or over loopback, for the
+//! host). Rooms run on `kc-voip`, the TailCat-library helper that carries UDP
+//! as well as TCP: chat and attachments use TCP, voice and screen video UDP.
 
 pub mod audio;
 pub mod client;
+pub mod media;
 pub mod server;
 pub mod wire;
 
@@ -25,8 +28,12 @@ pub enum VoipEvent {
     Speaking(Vec<u16>),
     Level { level: f32, talking: bool },
     Failed(String),
-    /// A piece of someone's screen share, for the page to decode.
+    /// A whole frame of someone's screen share, for the page to decode.
     Video { from: u16, key: bool, ts: u64, data: Vec<u8> },
+    /// How voice and video are connected: "connecting", "ok", "lost" or "failed".
+    Media(&'static str),
+    /// A watcher's report on our screen share.
+    VideoReport { watcher: u16, report: media::Report },
     Upload { tid: u32, name: String, sent: u64, size: u64, error: Option<String> },
     Fetching { aid: u32, got: u64, size: u64 },
     Fetched { aid: u32, result: Result<std::path::PathBuf, String>, preview: bool },
@@ -105,6 +112,13 @@ pub struct Voip {
     sharing: Option<Value>,
     /// Our outgoing video fell behind; when we last asked the page for a key frame.
     video_gap: Option<Instant>,
+    /// Numbers our screen share's frames; carries on across shares, so a
+    /// watcher never mistakes a new share for an old one.
+    frame_no: u32,
+    /// Our screen share's bitrate, following what watchers report.
+    rate: Option<media::RateControl>,
+    /// How voice and video are connected (see [`VoipEvent::Media`]).
+    media: &'static str,
     watching: Option<u16>,
     next_tid: u32,
     uploads: Vec<UploadState>,
@@ -148,6 +162,9 @@ impl Default for Voip {
             room_notice: String::new(),
             sharing: None,
             video_gap: None,
+            frame_no: 0,
+            rate: None,
+            media: "off",
             watching: None,
             next_tid: 1,
             uploads: Vec::new(),
@@ -189,6 +206,8 @@ impl Voip {
         self.room_notice.clear();
         self.sharing = None;
         self.video_gap = None;
+        self.rate = None;
+        self.media = "off";
         self.watching = None;
         self.uploads.clear();
         self.downloads.clear();
@@ -222,6 +241,7 @@ impl Voip {
         self.my_name = name;
         self.mode = Mode::Hosting;
         self.st = "starting";
+        self.media = "connecting";
     }
 
     /// Joins someone else's room through TailCat.
@@ -241,7 +261,9 @@ impl Voip {
             Ok(_) => return self.error = "That's a port code. Ask for the room code (it starts with kitty:voip:).".into(),
             Err(e) => return self.error = e,
         };
-        let local = match crate::free_port() {
+        // The local end of the tunnel takes TCP and UDP on the same port: find
+        // one free for both, then let it go for kc-voip to listen on.
+        let local = match server::bind_pair().and_then(|(t, _udp)| t.local_addr().map(|a| a.port()).map_err(|e| e.to_string())) {
             Ok(p) => p,
             Err(e) => return self.error = e,
         };
@@ -255,6 +277,7 @@ impl Voip {
         self.my_name = name;
         self.mode = Mode::Joined;
         self.st = "starting";
+        self.media = "connecting";
     }
 
     pub fn leave(&mut self) {
@@ -291,7 +314,11 @@ impl Voip {
             return;
         }
         self.voice_error.clear();
-        match audio::Engine::start(conn.mixer.clone(), conn.tx.clone(), self.muted) {
+        let Some(out) = conn.media.clone() else {
+            self.voice_error = "Voice couldn't open its connection.".into();
+            return;
+        };
+        match audio::Engine::start(conn.mixer.clone(), out, self.muted) {
             Ok(engine) => {
                 conn.mixer.set_deaf(self.deaf);
                 self.devices = format!("{} · {}", engine.mic_name, engine.speaker_name);
@@ -353,24 +380,32 @@ impl Voip {
         match info {
             Some(i) => {
                 c.send(json!({ "t": "screen", "on": true, "w": i["w"], "h": i["h"], "fps": i["fps"], "codec": i["codec"] }));
+                // The chosen quality's bitrate is the most it will ever use.
+                let max = i["bitrate"].as_u64().unwrap_or(4_500_000).clamp(300_000, 50_000_000) as u32;
+                if let Some(m) = &c.media {
+                    m.set_rate(media::Sender::pace_for(max));
+                }
+                self.rate = Some(media::RateControl::new(max));
+                self.video_gap = None;
                 self.sharing = Some(i);
             }
             None => {
                 c.send(json!({ "t": "screen", "on": false }));
                 self.sharing = None;
+                self.rate = None;
             }
         }
     }
 
-    /// One encoded chunk from the page's encoder, straight to the room on the
-    /// video connection. When that's backed up the chunk is dropped rather
-    /// than queued (so the stream stays live), later chunks are skipped until
+    /// One encoded frame from the page's encoder, cut into datagrams and paced
+    /// out to the room. When the link is backed up the frame is dropped rather
+    /// than queued (so the stream stays live), later frames are skipped until
     /// a key frame, and true is returned: the page should make one now.
     pub fn video(&mut self, key: bool, ts: u64, data: &[u8]) -> bool {
-        if self.sharing.is_none() {
+        if self.sharing.is_none() || data.len() > media::MAX_PIECES * media::PIECE {
             return false;
         }
-        let Some(c) = &self.conn else { return false };
+        let Some(m) = self.conn.as_ref().and_then(|c| c.media.clone()) else { return false };
         if let Some(asked) = self.video_gap {
             if !key {
                 // Ask again if the key frame we asked for didn't make it either.
@@ -381,10 +416,10 @@ impl Voip {
                 return again;
             }
         }
-        let mut head = [0u8; 9];
-        head[0] = key as u8;
-        head[1..].copy_from_slice(&ts.to_be_bytes());
-        if c.video_tx().try_send(wire::Out::Frame(wire::binary(wire::VIDEO, &head, data))).is_ok() {
+        // A frame's number is only used once it's queued, so watchers never
+        // wait for one that was never sent.
+        if m.video(key, media::video_pieces(self.frame_no, key, ts, data)) {
+            self.frame_no = self.frame_no.wrapping_add(1);
             self.video_gap = None;
             return false;
         }
@@ -398,6 +433,7 @@ impl Voip {
     pub fn watch(&mut self, id: Option<u16>) {
         self.watching = id;
         if let Some(c) = &self.conn {
+            c.link.watch(id);
             c.send(json!({ "t": "watch", "id": id }));
         }
     }
@@ -534,6 +570,9 @@ impl Voip {
                         if let Some(w) = self.watching {
                             if !self.members.iter().any(|x| x["id"] == w && !x["screen"].is_null()) {
                                 self.watching = None;
+                                if let Some(c) = &self.conn {
+                                    c.link.watch(None);
+                                }
                             }
                         }
                     }
@@ -584,6 +623,22 @@ impl Voip {
                     "type": "video", "from": from, "key": key, "ts": ts,
                     "data": base64::engine::general_purpose::STANDARD.encode(&data),
                 }))
+            }
+            VoipEvent::Media(state) => {
+                self.media = state;
+                None
+            }
+            VoipEvent::VideoReport { watcher, report } => {
+                let (Some(rc), true) = (self.rate.as_mut(), self.sharing.is_some()) else { return Some(Value::Null) };
+                match rc.report(watcher, report, Instant::now()) {
+                    Some(bitrate) => {
+                        if let Some(m) = self.conn.as_ref().and_then(|c| c.media.as_ref()) {
+                            m.set_rate(media::Sender::pace_for(bitrate));
+                        }
+                        Some(json!({ "type": "videoRate", "bitrate": bitrate }))
+                    }
+                    None => Some(Value::Null),
+                }
             }
             VoipEvent::Upload { tid, name, sent, size, error } => {
                 if let Some(u) = self.uploads.iter_mut().find(|u| u.tid == tid) {
@@ -705,6 +760,7 @@ impl Voip {
             "muted": self.muted,
             "deaf": self.deaf,
             "voiceError": self.voice_error,
+            "media": self.media,
             "devices": self.devices,
             "link": self.link.json(),
             "log": self.log.json(),

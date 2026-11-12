@@ -9,16 +9,20 @@
 //!     held open 400 ms after speech and faded, never hard-cut
 //!   → soft limiter → Opus 64 kbit/s, 20 ms frames, in-band FEC
 //!
-//! Receive path: one Opus decoder per person, which rebuilds a lost frame from
-//! the next one's FEC or conceals it, a small jitter buffer, per-person
-//! volume, then the mix is resampled to the speakers' rate.
+//! Packets go out as UDP datagrams (see `media`), so a lost one costs only
+//! itself.
+//!
+//! Receive path: a small jitter buffer per person that puts packets back in
+//! order (UDP can reorder), then one Opus decoder per person, which rebuilds a
+//! lost frame from the next one's FEC or conceals it, per-person volume, then
+//! the mix is resampled to the speakers' rate.
 //!
 //! There's no echo cancellation: use headphones, or the mic picks up the call.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::num::NonZeroU32;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::mpsc::{channel, SyncSender};
+use std::sync::mpsc::channel;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -26,7 +30,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, SampleFormat, SizedSample};
 use opus1::{Application, Bitrate, Channels, InbandFec, OpusDecoder, OpusEncoder, SampleRate};
 
-use super::wire::{self, Out};
+use super::media;
 
 pub const RATE: u32 = 48_000;
 /// One Opus packet: 20 ms.
@@ -36,11 +40,14 @@ const BLOCK: usize = nnnoiseless::DenoiseState::FRAME_SIZE;
 const BITRATE: u32 = 64_000;
 /// Keep sending this many 10 ms blocks after speech stops.
 const HANGOVER: u32 = 40;
-/// Wait for this much of a speaker's audio before playing (60 ms), to ride out jitter.
-const PRIME: usize = 2880;
-/// More queued than 400 ms and the oldest is dropped, back to 100 ms.
-const MAX_QUEUE: usize = 19_200;
-const TRIM_TO: usize = 4800;
+/// Wait for this many of a speaker's packets (60 ms) before playing, to ride out jitter.
+const PRIME: usize = 3;
+/// More waiting than 400 ms and the oldest are dropped, back to 100 ms.
+const MAX_PENDING: usize = 20;
+const TRIM_TO: usize = 5;
+/// A jump in sequence numbers bigger than this isn't concealed; playback
+/// just carries on from the new packet.
+const MAX_GAP: u32 = 10;
 /// Conceal at most this many missing frames before going quiet.
 const MAX_PLC: u32 = 3;
 
@@ -205,16 +212,19 @@ fn soft_limit(s: f32) -> f32 {
 
 struct Voice {
     decoder: OpusDecoder,
-    last_seq: Option<u32>,
+    /// Packets waiting to be played, by sequence number.
+    pending: BTreeMap<u32, Vec<u8>>,
+    /// The next sequence number to play, once playing.
+    next: Option<u32>,
+    /// Decoded audio ready for the speakers.
     buf: VecDeque<f32>,
-    primed: bool,
     plc: u32,
+    loud: Option<Instant>,
 }
 
-/// Everyone else's voice: decoded per person, queued, and mixed for the speakers.
+/// Everyone else's voice: queued per person, decoded in order, and mixed for the speakers.
 pub struct Mixer {
     voices: Mutex<HashMap<u16, Voice>>,
-    loud: Mutex<HashMap<u16, Instant>>,
     /// Per-person volume from the right-click menu (only affects this PC).
     gains: Mutex<HashMap<u16, f32>>,
     deaf: AtomicBool,
@@ -225,11 +235,56 @@ impl Default for Mixer {
     fn default() -> Self {
         Mixer {
             voices: Mutex::default(),
-            loud: Mutex::default(),
             gains: Mutex::default(),
             deaf: AtomicBool::new(false),
             settings: Arc::new(Settings::default()),
         }
+    }
+}
+
+impl Voice {
+    /// Decodes the next packet into `buf`: the packet itself, or if it's
+    /// missing, a rebuild from the following packet's FEC copy, or
+    /// concealment. False once there's nothing left to play.
+    fn decode_next(&mut self) -> bool {
+        let Some(n) = self.next else { return false };
+        let mut pcm = [0f32; FRAME];
+        if let Some(p) = self.pending.remove(&n) {
+            self.plc = 0;
+            if let Ok(k) = self.decoder.decode(&p, FRAME, &mut pcm) {
+                let rms = (pcm[..k].iter().map(|s| s * s).sum::<f32>() / k.max(1) as f32).sqrt();
+                if rms > 0.01 {
+                    self.loud = Some(Instant::now());
+                }
+                self.buf.extend(pcm[..k].iter());
+            }
+        } else if let Some((&later, _)) = self.pending.iter().next() {
+            // Lost in the middle of a sentence.
+            if later.wrapping_sub(n) > MAX_GAP {
+                self.next = Some(later);
+                return true;
+            }
+            let fec = if later == n.wrapping_add(1) { self.pending.get(&later).cloned() } else { None };
+            let ok = match fec {
+                Some(p) => self.decoder.decode_fec(&p, FRAME, &mut pcm).is_ok(),
+                None => self.decoder.decode(&[], FRAME, &mut pcm).is_ok(),
+            };
+            if ok {
+                self.buf.extend(pcm.iter());
+            }
+        } else {
+            // Ran dry: conceal a little, then go quiet until they speak again.
+            if self.plc >= MAX_PLC {
+                self.next = None;
+                return false;
+            }
+            self.plc += 1;
+            if self.decoder.decode(&[], FRAME, &mut pcm).is_ok() {
+                self.buf.extend(pcm.iter());
+            }
+        }
+        self.next = Some(n.wrapping_add(1));
+        true
     }
 }
 
@@ -242,46 +297,32 @@ impl Mixer {
         self.gains.lock().unwrap().insert(member, gain.clamp(0.0, 2.0));
     }
 
-    /// One Opus packet from `from`. A short gap in the sequence is filled from
-    /// this packet's FEC copy and concealment, as Discord's clients do.
+    /// One Opus packet from `from`. Packets are held briefly and played in
+    /// sequence order, so one that arrives out of order is still used.
     pub fn push_packet(&self, from: u16, seq: u32, packet: &[u8]) {
         let mut voices = self.voices.lock().unwrap();
         let v = match voices.entry(from) {
             std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
             std::collections::hash_map::Entry::Vacant(e) => {
                 let Ok(decoder) = OpusDecoder::new(SampleRate::Hz48000, Channels::Mono) else { return };
-                e.insert(Voice { decoder, last_seq: None, buf: VecDeque::new(), primed: false, plc: 0 })
+                e.insert(Voice { decoder, pending: BTreeMap::new(), next: None, buf: VecDeque::new(), plc: 0, loud: None })
             }
         };
-        let mut pcm = [0f32; FRAME];
-        if let Some(last) = v.last_seq {
-            if seq <= last && last - seq < 1000 {
-                return; // late or duplicate
-            }
-            let missing = seq.wrapping_sub(last).wrapping_sub(1);
-            if (1..=3).contains(&missing) {
-                for _ in 1..missing {
-                    if v.decoder.decode(&[], FRAME, &mut pcm).is_ok() {
-                        v.buf.extend(pcm.iter());
-                    }
-                }
-                if v.decoder.decode_fec(packet, FRAME, &mut pcm).is_ok() {
-                    v.buf.extend(pcm.iter());
-                }
+        if let Some(n) = v.next {
+            if (seq.wrapping_sub(n) as i32) < 0 {
+                return; // too late: that moment has been played
             }
         }
-        v.last_seq = Some(seq);
-        v.plc = 0;
-        if let Ok(n) = v.decoder.decode(packet, FRAME, &mut pcm) {
-            let rms = (pcm[..n].iter().map(|s| s * s).sum::<f32>() / n.max(1) as f32).sqrt();
-            if rms > 0.01 {
-                self.loud.lock().unwrap().insert(from, Instant::now());
+        v.pending.insert(seq, packet.to_vec());
+        // Too far behind (a stall, then a burst): skip ahead.
+        while v.pending.len() > MAX_PENDING {
+            let keep: Vec<u32> = v.pending.keys().rev().take(TRIM_TO).copied().collect();
+            let first = *keep.last().unwrap();
+            v.pending.retain(|s, _| *s >= first);
+            if v.next.is_some() {
+                v.next = Some(first);
+                v.buf.clear();
             }
-            v.buf.extend(pcm[..n].iter());
-        }
-        if v.buf.len() > MAX_QUEUE {
-            let extra = v.buf.len() - TRIM_TO;
-            v.buf.drain(..extra);
         }
     }
 
@@ -295,29 +336,23 @@ impl Mixer {
         let master = Settings::get(&self.settings.output_gain);
         let mut voices = self.voices.lock().unwrap();
         for (id, v) in voices.iter_mut() {
-            if !v.primed && v.buf.len() >= PRIME {
-                v.primed = true;
+            if v.next.is_none() {
+                if v.pending.len() < PRIME {
+                    continue;
+                }
+                v.next = v.pending.keys().next().copied();
+                v.plc = 0;
             }
-            if !v.primed {
-                continue;
-            }
-            // Ran dry mid-sentence: conceal a little, then go quiet.
-            while v.buf.len() < out.len() && v.plc < MAX_PLC {
-                let mut pcm = [0f32; FRAME];
-                if v.decoder.decode(&[], FRAME, &mut pcm).is_err() {
+            while v.buf.len() < out.len() {
+                if !v.decode_next() {
                     break;
                 }
-                v.buf.extend(pcm.iter());
-                v.plc += 1;
             }
             let gain = gains.get(id).copied().unwrap_or(1.0) * master;
             for o in out.iter_mut() {
                 match v.buf.pop_front() {
                     Some(s) => *o += s * gain,
-                    None => {
-                        v.primed = false;
-                        break;
-                    }
+                    None => break,
                 }
             }
         }
@@ -328,8 +363,9 @@ impl Mixer {
 
     /// Members heard in the last third of a second.
     pub fn speaking(&self) -> Vec<u16> {
-        let loud = self.loud.lock().unwrap();
-        let mut ids: Vec<u16> = loud.iter().filter(|(_, t)| t.elapsed() < Duration::from_millis(350)).map(|(id, _)| *id).collect();
+        let voices = self.voices.lock().unwrap();
+        let mut ids: Vec<u16> =
+            voices.iter().filter(|(_, v)| v.loud.is_some_and(|t| t.elapsed() < Duration::from_millis(350))).map(|(id, _)| *id).collect();
         ids.sort_unstable();
         ids
     }
@@ -340,7 +376,6 @@ impl Mixer {
 
     pub fn clear(&self) {
         self.voices.lock().unwrap().clear();
-        self.loud.lock().unwrap().clear();
     }
 }
 
@@ -365,10 +400,10 @@ impl Drop for Engine {
 }
 
 impl Engine {
-    /// Opens the default microphone and speakers. Packets from the mic go to
-    /// `out` (the room connection). A missing mic is not fatal: you can still
+    /// Opens the default microphone and speakers. Packets from the mic go out
+    /// on `out` (the room's UDP). A missing mic is not fatal: you can still
     /// listen. A missing output device is.
-    pub fn start(mixer: Arc<Mixer>, out: SyncSender<Out>, muted: bool) -> Result<Engine, String> {
+    pub fn start(mixer: Arc<Mixer>, out: media::Sender, muted: bool) -> Result<Engine, String> {
         let stop = Arc::new(AtomicBool::new(false));
         let muted = Arc::new(AtomicBool::new(muted));
         let level = Arc::new(f32_atomic(-100.0));
@@ -391,7 +426,8 @@ impl Engine {
                 }
             };
             let mic = host.default_input_device();
-            let input = mic.as_ref().map(|d| Capture::new(out, m, l, t, settings).and_then(|c| build_input(d, c)));
+            let sink: Sink = Box::new(move |d| out.urgent(d));
+            let input = mic.as_ref().map(|d| Capture::new(sink, m, l, t, settings).and_then(|c| build_input(d, c)));
             let mic_name = match (&mic, &input) {
                 (Some(d), Some(Ok(_))) => d.name().unwrap_or_else(|_| "Microphone".into()),
                 (Some(_), Some(Err(e))) => format!("Microphone unavailable ({e})"),
@@ -420,6 +456,9 @@ impl Engine {
     }
 }
 
+/// Where finished voice datagrams go.
+type Sink = Box<dyn Fn(Vec<u8>) + Send>;
+
 /// The send path, from device samples to Opus packets.
 struct Capture {
     channels: usize,
@@ -437,7 +476,7 @@ struct Capture {
     hang: u32,
     /// The gate's current gain, eased towards 0 or 1 so it never clicks.
     gate: f32,
-    out: SyncSender<Out>,
+    out: Sink,
     muted: Arc<AtomicBool>,
     level: Arc<AtomicU32>,
     talking: Arc<AtomicBool>,
@@ -446,7 +485,7 @@ struct Capture {
 
 impl Capture {
     fn new(
-        out: SyncSender<Out>,
+        out: Sink,
         muted: Arc<AtomicBool>,
         level: Arc<AtomicU32>,
         talking: Arc<AtomicBool>,
@@ -540,7 +579,7 @@ impl Capture {
         if self.frame.len() == FRAME {
             if self.gate > 0.0 || open {
                 if let Ok(n) = self.encoder.encode(&self.frame, FRAME, &mut self.packet) {
-                    let _ = self.out.try_send(Out::Frame(wire::audio(&self.seq.to_be_bytes(), &self.packet[..n])));
+                    (self.out)(media::voice(self.seq, &self.packet[..n]));
                     self.seq = self.seq.wrapping_add(1);
                 }
             }
@@ -651,10 +690,12 @@ where
 mod tests {
     use super::*;
 
-    fn capture(settings: Arc<Settings>) -> (Capture, std::sync::mpsc::Receiver<Out>) {
+    fn capture(settings: Arc<Settings>) -> (Capture, std::sync::mpsc::Receiver<Vec<u8>>) {
         let (tx, rx) = std::sync::mpsc::sync_channel(256);
         let cap = Capture::new(
-            tx,
+            Box::new(move |d| {
+                let _ = tx.try_send(d);
+            }),
             Arc::new(AtomicBool::new(false)),
             Arc::new(f32_atomic(-100.0)),
             Arc::new(AtomicBool::new(false)),
@@ -717,9 +758,9 @@ mod tests {
         cap.feed(&tone(48_000, 300, 440.0, 0.3));
         let packets: Vec<Vec<u8>> = rx
             .try_iter()
-            .map(|o| match o {
-                Out::Frame(f) => f[5 + 4..].to_vec(),
-                Out::Close => vec![],
+            .map(|d| {
+                assert_eq!(d[0], media::VOICE);
+                d[1 + 4..].to_vec()
             })
             .collect();
         assert!(packets.len() >= 12);
@@ -742,5 +783,38 @@ mod tests {
         let mut quiet = vec![0f32; FRAME];
         m.pull(&mut quiet);
         assert!(quiet.iter().all(|s| s.abs() < 1e-6));
+    }
+
+    /// UDP can deliver packets out of order; the jitter buffer puts them back,
+    /// so a swapped pair plays exactly as if it had arrived in order.
+    #[test]
+    fn reordered_packets_play_in_order() {
+        let s = Arc::new(Settings::default());
+        s.set(1.0, false, -60.0, false, 1.0);
+        let (mut cap, rx) = capture(s);
+        cap.feed(&tone(48_000, 300, 440.0, 0.3));
+        let packets: Vec<Vec<u8>> = rx.try_iter().map(|d| d[5..].to_vec()).collect();
+        let play = |order: &[usize]| {
+            let m = Mixer::default();
+            for &i in order {
+                m.push_packet(1, i as u32, &packets[i]);
+            }
+            let mut out = vec![0f32; FRAME * 10];
+            m.pull(&mut out);
+            out
+        };
+        let in_order: Vec<usize> = (0..12).collect();
+        let mut swapped = in_order.clone();
+        swapped.swap(4, 5);
+        assert_eq!(play(&in_order), play(&swapped));
+        // And a packet older than what's already played is let go.
+        let m = Mixer::default();
+        for i in 0..6 {
+            m.push_packet(1, i, &packets[i as usize]);
+        }
+        let mut out = vec![0f32; FRAME * 6];
+        m.pull(&mut out);
+        m.push_packet(1, 2, &packets[2]);
+        assert!(m.voices.lock().unwrap()[&1].pending.is_empty(), "too late to play");
     }
 }

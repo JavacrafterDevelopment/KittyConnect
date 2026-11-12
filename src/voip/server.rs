@@ -1,13 +1,18 @@
 //! The room a VOIP host runs: one text channel, one voice channel, screen
 //! shares, file attachments, and the list of who's here. It listens on
-//! 127.0.0.1 only; friends reach it through `tailcat serve`, so every byte
-//! between members crosses the encrypted tunnel. The host joins their own room
-//! over loopback, which never leaves the PC.
+//! 127.0.0.1 only, TCP and UDP on the same port; friends reach it through
+//! `kc-voip serve` (TailCat), so every byte between members crosses the
+//! encrypted tunnel. The host joins their own room over loopback, which never
+//! leaves the PC.
 //!
-//! Voice is relayed, not mixed: each speaker's frames go to everyone else in
+//! TCP carries names, chat, control and attachments (see `wire`). Voice and
+//! screen video are UDP datagrams only (see `media`), from members who have
+//! registered their UDP address with the key from their welcome.
+//!
+//! Voice is relayed, not mixed: each speaker's packets go to everyone else in
 //! voice, and each member mixes what they receive. Screen video goes only to
-//! the members watching that share, on their video connection, and attachments
-//! on their files connection, so neither can hold up voice (see `wire`).
+//! the members watching that share, and the room keeps the last second of it
+//! to resend pieces a watcher missed.
 //!
 //! The host (the member who presented the host token) can mute anyone for
 //! everyone, and disconnect them. Everyone is told when that happens.
@@ -15,7 +20,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::fs::File;
 use std::io::{ErrorKind, Read, Write};
-use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
+use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{sync_channel, SyncSender, TrySendError};
@@ -24,6 +29,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
 
+use super::media;
 use super::wire::{self, Out};
 
 const HISTORY: usize = 200;
@@ -32,17 +38,15 @@ const MAX_TEXT: usize = 2000;
 /// Members ping every 30 seconds; one that's silent this long is gone.
 const IDLE: Duration = Duration::from_secs(100);
 const QUEUE: usize = 512;
-/// Video frames waiting for one watcher: about a third of a second at 30 fps.
-/// Past that the watcher is falling behind, and frames are dropped (then
-/// skipped up to the next key frame) rather than queued, so the picture stays
-/// live instead of drifting seconds late.
-pub const VIDEO_QUEUE: usize = 10;
 /// Attachment chunks waiting for one member (2 MB).
 const FILES_QUEUE: usize = 64;
 /// A sharer is asked for a key frame at most this often because of drops.
 const KEY_RETRY: Duration = Duration::from_secs(1);
-/// The room protocol version members must speak (2: Opus voice).
-pub const PROTOCOL: u64 = 2;
+/// The room protocol version members must speak (3: voice and video over UDP).
+pub const PROTOCOL: u64 = 3;
+/// How much of each screen share the room keeps, to resend missed pieces.
+const VIDEO_KEEP: Duration = Duration::from_secs(1);
+const VIDEO_KEEP_BYTES: usize = 8 * 1024 * 1024;
 /// Largest single attachment, and all attachments in one room together.
 pub const MAX_ATTACHMENT: u64 = 100 * 1024 * 1024;
 const MAX_ROOM_FILES: u64 = 1024 * 1024 * 1024;
@@ -67,33 +71,65 @@ struct Member {
     screen: Option<Value>,
     /// The member whose screen they're watching.
     watching: Option<u16>,
-    /// A video frame to them was dropped (or they just started watching):
-    /// skip frames until the next key frame, which their decoder can start from.
-    video_gap: bool,
     /// When this sharer was last asked for a key frame.
     key_asked: Option<Instant>,
-    /// Lets this member's side connections attach to them.
+    /// Lets this member's files connection and UDP address attach to them.
     key: String,
     tx: SyncSender<Out>,
-    video_tx: Side,
     files_tx: Side,
+    /// Where their UDP (voice and video) comes from, once registered.
+    udp: Option<SocketAddr>,
+    /// The last second of their screen share.
+    video: VideoBuffer,
 }
 
 impl Member {
-    fn video(&self) -> &SyncSender<Out> {
-        self.video_tx.as_ref().map(|s| &s.1).unwrap_or(&self.tx)
-    }
-
     fn files(&self) -> SyncSender<Out> {
         self.files_tx.as_ref().map(|s| s.1.clone()).unwrap_or_else(|| self.tx.clone())
     }
 
     /// Closes all their connections, after anything already queued.
     fn close(&self) {
-        for (_, t) in [&self.video_tx, &self.files_tx].into_iter().flatten() {
+        if let Some((_, t)) = &self.files_tx {
             let _ = t.try_send(Out::Close);
         }
         let _ = self.tx.try_send(Out::Close);
+    }
+}
+
+/// Recent pieces of one screen share, as sent to watchers, for resending.
+#[derive(Default)]
+struct VideoBuffer {
+    frames: VecDeque<SentFrame>,
+    bytes: usize,
+}
+
+struct SentFrame {
+    frame: u32,
+    at: Instant,
+    pieces: Vec<Option<Vec<u8>>>,
+}
+
+impl VideoBuffer {
+    fn keep(&mut self, frame: u32, idx: u16, count: u16, datagram: &[u8]) {
+        let now = Instant::now();
+        if !self.frames.iter().any(|f| f.frame == frame) {
+            self.frames.push_back(SentFrame { frame, at: now, pieces: vec![None; count as usize] });
+        }
+        let f = self.frames.iter_mut().rev().find(|f| f.frame == frame).unwrap();
+        if let Some(slot) = f.pieces.get_mut(idx as usize).filter(|p| p.is_none()) {
+            *slot = Some(datagram.to_vec());
+            self.bytes += datagram.len();
+        }
+        while self.frames.front().is_some_and(|f| now.duration_since(f.at) > VIDEO_KEEP) || self.bytes > VIDEO_KEEP_BYTES {
+            let Some(old) = self.frames.pop_front() else { break };
+            self.bytes -= old.pieces.iter().flatten().map(Vec::len).sum::<usize>();
+        }
+    }
+
+    fn clear(&mut self) {
+        self.frames.clear();
+        self.bytes = 0;
     }
 }
 
@@ -151,9 +187,23 @@ pub fn is_image(name: &str) -> bool {
     [".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"].iter().any(|e| n.ends_with(e))
 }
 
+/// A TCP listener and a UDP socket on the same 127.0.0.1 port.
+pub fn bind_pair() -> Result<(TcpListener, UdpSocket), String> {
+    let mut last = String::new();
+    for _ in 0..20 {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).map_err(|e| format!("Couldn't open the room: {e}"))?;
+        let port = listener.local_addr().map_err(|e| e.to_string())?.port();
+        match UdpSocket::bind((Ipv4Addr::LOCALHOST, port)) {
+            Ok(udp) => return Ok((listener, udp)),
+            Err(e) => last = e.to_string(),
+        }
+    }
+    Err(format!("Couldn't open the room for voice: {last}"))
+}
+
 impl RoomServer {
     pub fn start(name: &str, files_dir: PathBuf) -> Result<RoomServer, String> {
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).map_err(|e| format!("Couldn't open the room: {e}"))?;
+        let (listener, udp) = bind_pair()?;
         let port = listener.local_addr().map_err(|e| e.to_string())?.port();
         let dir = files_dir.join(format!("room-{port}"));
         let _ = std::fs::remove_dir_all(&dir);
@@ -172,6 +222,8 @@ impl RoomServer {
         }));
         let stop = Arc::new(AtomicBool::new(false));
         let host_token = token();
+        let (ur, us) = (room.clone(), stop.clone());
+        std::thread::spawn(move || serve_udp(udp, &ur, &us));
         let (r, s, t) = (room.clone(), stop.clone(), host_token.clone());
         std::thread::spawn(move || {
             for stream in listener.incoming() {
@@ -251,26 +303,108 @@ fn ask_key(room: &mut Room, sharer: u16, now: bool) {
     send(&s.tx, wire::json(&json!({ "t": "keyframe" })));
 }
 
-/// One chunk of a member's screen share, to each member watching it. A
-/// watcher whose queue is full loses the frame and then waits for the next
-/// key frame, rather than getting a picture that can't be decoded.
-fn relay_video(room: &mut Room, me: usize, body: &[u8]) {
-    if room.members[me].screen.is_none() || body.len() < 10 {
+/// The room's UDP: voice and screen video, from registered members only.
+fn serve_udp(sock: UdpSocket, room: &Mutex<Room>, stop: &AtomicBool) {
+    sock.set_read_timeout(Some(Duration::from_millis(500))).ok();
+    let mut buf = vec![0u8; 65536];
+    while !stop.load(Ordering::Relaxed) {
+        // A timeout, or on Windows an ICMP "unreachable" from sending to a
+        // member who has gone, reported as an error; the socket is still fine.
+        let Ok((n, src)) = sock.recv_from(&mut buf) else { continue };
+        if n == 0 || n > 1500 {
+            continue;
+        }
+        let mut r = room.lock().unwrap();
+        datagram(&mut r, &sock, src, &buf[..n]);
+    }
+}
+
+fn datagram(r: &mut Room, sock: &UdpSocket, src: SocketAddr, d: &[u8]) {
+    if d[0] == media::REGISTER {
+        if d.len() < 4 {
+            return;
+        }
+        let id = media::u16_at(d, 1);
+        let key = &d[3..];
+        let Some(m) = r.members.iter_mut().find(|m| m.id == id && !m.key.is_empty() && m.key.as_bytes() == key) else { return };
+        m.udp = Some(src);
+        // An address belongs to one member at a time.
+        for o in r.members.iter_mut().filter(|o| o.id != id && o.udp == Some(src)) {
+            o.udp = None;
+        }
+        let _ = sock.send_to(&[media::REGISTERED], src);
         return;
     }
-    let id = room.members[me].id;
-    let key = body[0] & 1 == 1;
-    let frame = wire::binary(wire::VIDEO, &id.to_be_bytes(), body);
-    let mut behind = false;
-    for o in room.members.iter_mut().filter(|o| o.watching == Some(id)) {
-        if !(o.video_gap && !key) {
-            o.video_gap = o.video().try_send(Out::Frame(frame.clone())).is_err();
+    // Everything else only from a registered address.
+    let Some(me) = r.members.iter().position(|m| m.udp == Some(src)) else { return };
+    let id = r.members[me].id;
+    match d[0] {
+        media::VOICE if d.len() > 5 => {
+            let m = &r.members[me];
+            if !m.voice || m.muted || m.server_muted {
+                return;
+            }
+            let mut out = Vec::with_capacity(d.len() + 2);
+            out.push(media::VOICE);
+            out.extend_from_slice(&id.to_be_bytes());
+            out.extend_from_slice(&d[1..]);
+            for o in r.members.iter().filter(|o| o.id != id && o.voice && !o.deaf) {
+                if let Some(a) = o.udp {
+                    let _ = sock.send_to(&out, a);
+                }
+            }
         }
-        behind |= o.video_gap;
+        media::VIDEO => relay_video(r, sock, me, d),
+        media::NACK if d.len() >= 7 => {
+            let sharer = media::u16_at(d, 1);
+            let frame = media::u32_at(d, 3);
+            let Some(to) = r.members[me].udp.filter(|_| r.members[me].watching == Some(sharer)) else { return };
+            let Some(s) = r.members.iter().find(|m| m.id == sharer) else { return };
+            let Some(f) = s.video.frames.iter().find(|f| f.frame == frame) else { return };
+            let wanted: Vec<usize> = d[7..].chunks_exact(2).map(|c| u16::from_be_bytes([c[0], c[1]]) as usize).collect();
+            if wanted.is_empty() {
+                for p in f.pieces.iter().flatten() {
+                    let _ = sock.send_to(p, to);
+                }
+            } else {
+                for p in wanted.into_iter().filter_map(|i| f.pieces.get(i)).flatten() {
+                    let _ = sock.send_to(p, to);
+                }
+            }
+        }
+        media::REPORT if d.len() >= 11 => {
+            let sharer = media::u16_at(d, 1);
+            if r.members[me].watching != Some(sharer) {
+                return;
+            }
+            if let Some(a) = r.members.iter().find(|m| m.id == sharer && m.screen.is_some()).and_then(|m| m.udp) {
+                let mut out = d[..11].to_vec();
+                out[1..3].copy_from_slice(&id.to_be_bytes());
+                let _ = sock.send_to(&out, a);
+            }
+        }
+        _ => {}
     }
-    if behind {
-        ask_key(room, id, false);
+}
+
+/// One piece of a member's screen share: to each member watching it, and into
+/// the buffer for resending.
+fn relay_video(room: &mut Room, sock: &UdpSocket, me: usize, d: &[u8]) {
+    if room.members[me].screen.is_none() {
+        return;
     }
+    let Some((frame, idx, count)) = media::video_head(d) else { return };
+    let id = room.members[me].id;
+    let mut out = Vec::with_capacity(d.len() + 2);
+    out.push(media::VIDEO);
+    out.extend_from_slice(&id.to_be_bytes());
+    out.extend_from_slice(&d[1..]);
+    for o in room.members.iter().filter(|o| o.watching == Some(id)) {
+        if let Some(a) = o.udp {
+            let _ = sock.send_to(&out, a);
+        }
+    }
+    room.members[me].video.keep(frame, idx, count, &out);
 }
 
 /// An attachment on its way up from a member.
@@ -422,9 +556,9 @@ fn serve_member(stream: TcpStream, room: &Arc<Mutex<Room>>, host_token: &str) {
     if hello["t"] != "hello" {
         return;
     }
-    // Voice changed from ADPCM to Opus in protocol 2; the two can't hear each other.
+    // Voice and video moved to UDP in protocol 3; older versions send them on TCP.
     if hello["v"].as_u64().unwrap_or(1) < PROTOCOL {
-        let bye = json!({ "t": "closed", "reason": "This room needs KittyConnect 0.4 or newer. Update KittyConnect (the Launcher can do it) and join again." });
+        let bye = json!({ "t": "closed", "reason": "This room needs KittyConnect 0.6 or newer. Update KittyConnect (the Launcher can do it) and join again." });
         let _ = reader.write_all(&wire::json(&bye));
         return;
     }
@@ -460,14 +594,15 @@ fn serve_member(stream: TcpStream, room: &Arc<Mutex<Room>>, host_token: &str) {
             rtt: None,
             screen: None,
             watching: None,
-            video_gap: true,
             key_asked: None,
             key: key.clone(),
             tx: tx.clone(),
-            video_tx: None,
             files_tx: None,
+            udp: None,
+            video: VideoBuffer::default(),
         });
-        let welcome = json!({ "t": "welcome", "you": id, "name": name, "room": r.name, "history": r.history, "host": host, "key": key });
+        // "udp": voice and video go as UDP datagrams to this port.
+        let welcome = json!({ "t": "welcome", "you": id, "name": name, "room": r.name, "history": r.history, "host": host, "key": key, "udp": true, "v": PROTOCOL });
         send(&tx, wire::json(&welcome));
         let members = members_json(&r);
         broadcast(&r, &members);
@@ -488,22 +623,6 @@ fn serve_member(stream: TcpStream, room: &Arc<Mutex<Room>>, host_token: &str) {
 
         let mut r = room.lock().unwrap();
         let Some(me) = r.members.iter().position(|m| m.id == id) else { break };
-        if kind == wire::AUDIO {
-            let m = &r.members[me];
-            if !m.voice || m.muted || m.server_muted || body.len() < 8 {
-                continue;
-            }
-            let frame = wire::audio(&id.to_be_bytes(), &body);
-            for other in r.members.iter().filter(|o| o.id != id && o.voice && !o.deaf) {
-                send(&other.tx, frame.clone());
-            }
-            continue;
-        }
-        if kind == wire::VIDEO {
-            // From a member without a video connection.
-            relay_video(&mut r, me, &body);
-            continue;
-        }
         let Ok(msg) = serde_json::from_slice::<Value>(&body) else { continue };
         match msg["t"].as_str().unwrap_or("") {
             "chat" => {
@@ -564,6 +683,7 @@ fn serve_member(stream: TcpStream, room: &Arc<Mutex<Room>>, host_token: &str) {
                     }
                 } else {
                     r.members[me].screen = None;
+                    r.members[me].video.clear();
                     for o in r.members.iter_mut().filter(|o| o.watching == Some(id)) {
                         o.watching = None;
                     }
@@ -575,7 +695,6 @@ fn serve_member(stream: TcpStream, room: &Arc<Mutex<Room>>, host_token: &str) {
                 let target = msg["id"].as_u64().map(|v| v as u16).filter(|t| *t != id);
                 r.members[me].watching = target;
                 // A new viewer starts from a key frame.
-                r.members[me].video_gap = true;
                 if let Some(t) = target {
                     ask_key(&mut r, t, true);
                 }
@@ -654,34 +773,24 @@ fn serve_member(stream: TcpStream, room: &Arc<Mutex<Room>>, host_token: &str) {
     }
 }
 
-/// A member's video or files connection. It carries only that traffic, and
-/// lasts as long as the member does.
+/// A member's files connection: attachments up and down, so a download never
+/// queues in front of chat. It lasts as long as the member does.
 fn serve_side(mut reader: TcpStream, hello: &Value, room: &Arc<Mutex<Room>>) {
-    let video = match hello["kind"].as_str() {
-        Some("video") => true,
-        Some("files") => false,
-        _ => return,
-    };
+    if hello["kind"].as_str() != Some("files") {
+        return;
+    }
     let id = hello["id"].as_u64().unwrap_or(0) as u16;
     let key = hello["key"].as_str().unwrap_or("");
     let Ok(writer_stream) = reader.try_clone() else { return };
-    let (tx, rx) = sync_channel::<Out>(if video { VIDEO_QUEUE } else { FILES_QUEUE });
+    let (tx, rx) = sync_channel::<Out>(FILES_QUEUE);
     let serial = NEXT_SIDE.fetch_add(1, Ordering::Relaxed);
     {
         let mut r = room.lock().unwrap();
         let Some(m) = r.members.iter_mut().find(|m| m.id == id && !key.is_empty() && m.key == key) else { return };
         // Queued before the connection is handed out, so it's the first thing sent.
         send(&tx, wire::json(&json!({ "t": "channel.ok" })));
-        let slot = if video { &mut m.video_tx } else { &mut m.files_tx };
-        if let Some((_, old)) = slot.replace((serial, tx.clone())) {
+        if let Some((_, old)) = m.files_tx.replace((serial, tx.clone())) {
             let _ = old.try_send(Out::Close);
-        }
-        if video {
-            // Whatever they're watching now comes this way, from a key frame.
-            m.video_gap = true;
-            if let Some(t) = m.watching {
-                ask_key(&mut r, t, true);
-            }
         }
     }
     wire::writer(writer_stream, rx);
@@ -691,8 +800,8 @@ fn serve_side(mut reader: TcpStream, hello: &Value, room: &Arc<Mutex<Room>>) {
     loop {
         let (kind, body) = match wire::read(&mut reader) {
             Ok(f) => f,
-            // Quiet is normal here (no share, no files); the main connection
-            // decides when the member is gone.
+            // Quiet is normal here (no files); the main connection decides
+            // when the member is gone.
             Err(e) if matches!(e.kind(), ErrorKind::TimedOut | ErrorKind::WouldBlock) => {
                 if room.lock().unwrap().members.iter().any(|m| m.id == id) {
                     continue;
@@ -701,35 +810,25 @@ fn serve_side(mut reader: TcpStream, hello: &Value, room: &Arc<Mutex<Room>>) {
             }
             Err(_) => break,
         };
-        if kind == wire::FILE && !video {
+        if kind == wire::FILE {
             file_chunk(&mut uploads, &body, &tx);
             continue;
         }
         let mut r = room.lock().unwrap();
         let Some(me) = r.members.iter().position(|m| m.id == id) else { break };
-        match kind {
-            wire::VIDEO if video => relay_video(&mut r, me, &body),
-            wire::JSON if !video => {
-                if let Ok(msg) = serde_json::from_slice::<Value>(&body) {
-                    attachment(&mut r, me, &msg, &mut uploads, &tx);
-                }
-            }
-            _ => {}
+        if let Ok(msg) = serde_json::from_slice::<Value>(&body) {
+            attachment(&mut r, me, &msg, &mut uploads, &tx);
         }
     }
 
     let _ = reader.shutdown(Shutdown::Both);
     drop_uploads(room, uploads);
     let _ = tx.try_send(Out::Close);
-    // Back to the main connection, unless a newer side connection took over.
+    // Back to the main connection, unless a newer files connection took over.
     let mut r = room.lock().unwrap();
     if let Some(m) = r.members.iter_mut().find(|m| m.id == id) {
-        let slot = if video { &mut m.video_tx } else { &mut m.files_tx };
-        if slot.as_ref().is_some_and(|(s, _)| *s == serial) {
-            *slot = None;
-            if video {
-                m.video_gap = true;
-            }
+        if m.files_tx.as_ref().is_some_and(|(s, _)| *s == serial) {
+            m.files_tx = None;
         }
     }
 }
