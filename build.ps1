@@ -6,6 +6,8 @@
 # PC, a zip in Discord) and run KittyConnect.exe. Nothing is installed; TailCat
 # is built into the exe, and everything it writes stays in data\ beside it.
 #
+# Needs Rust and Go (Go builds the VOIP rooms' helper, voip-helper\).
+#
 # Also writes dist\KittyConnect-windows-x64.zip.
 
 $ErrorActionPreference = 'Stop'
@@ -25,6 +27,7 @@ if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
 
 $vendor = Join-Path $root 'vendor'
 Write-Host "  $(& (Join-Path $root 'tools\fetch-tailcat.ps1'))"
+Write-Host "  $(& (Join-Path $root 'tools\build-voip-helper.ps1'))"
 
 $hostTriple = ((& rustc -vV) | Select-String '^host: (.+)$').Matches[0].Groups[1].Value
 $gnu = $hostTriple -like '*-windows-gnu'
@@ -51,6 +54,9 @@ if (Test-Path $dist) { Remove-Item -Recurse -Force $dist }
 New-Item -ItemType Directory -Force $dist | Out-Null
 Copy-Item (Join-Path $root 'target\release\KittyConnect.exe') $dist
 Copy-Item (Join-Path $vendor 'TAILCAT-LICENSE') $dist
+# Everything compiled into the VOIP helper, and its licenses.
+New-Item -ItemType Directory -Force (Join-Path $dist 'licenses') | Out-Null
+Copy-Item -Recurse (Join-Path $vendor 'kc-voip-licenses') (Join-Path $dist 'licenses\kc-voip')
 
 if ($gnu) {
     # GNU builds load the WebView2 loader as a DLL, so it travels with the exe.

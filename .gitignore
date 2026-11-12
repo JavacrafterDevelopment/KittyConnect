@@ -5,3 +5,5 @@
 /vendor/tailcat.exe
 /vendor/tailcat.version
 /release
+/vendor/kc-voip.exe
+/vendor/kc-voip-licenses

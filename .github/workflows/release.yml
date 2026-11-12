@@ -6,7 +6,10 @@
 #
 # The MSVC build links the C runtime and the WebView2 loader statically, so the
 # folder is just KittyConnect.exe plus licenses. TailCat is fetched from its
-# official release (hash-pinned) and embedded in the exe. The release carries
+# official release (hash-pinned) and embedded in the exe, for Ports and File
+# Share; VOIP rooms use kc-voip.exe, built here from voip-helper/ on the same
+# TailCat version (the library, which can carry UDP) and embedded too. The
+# release carries
 # KittyConnect-windows-x64.zip: the program folder plus a manifest of every
 # file's SHA-256. The workflow also writes update.json to the `updates` branch,
 # which is how the Javacrafter Launcher finds and verifies KittyConnect updates.
@@ -42,6 +45,22 @@ jobs:
         shell: pwsh
         run: ./tools/fetch-tailcat.ps1
 
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: voip-helper/go.mod
+          cache-dependency-path: voip-helper/go.sum
+
+      - name: Test the VOIP helper
+        working-directory: voip-helper
+        shell: bash
+        run: |
+          go vet ./...
+          go test ./...
+
+      - name: Build the VOIP helper
+        shell: pwsh
+        run: ./tools/build-voip-helper.ps1
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
@@ -62,6 +81,7 @@ jobs:
           Copy-Item target/x86_64-pc-windows-msvc/release/KittyConnect.exe $dir
           Copy-Item LICENSE-MIT, LICENSE-APACHE "$dir/licenses/"
           Copy-Item vendor/TAILCAT-LICENSE "$dir/licenses/TailCat-LICENSE.txt"
+          Copy-Item -Recurse vendor/kc-voip-licenses "$dir/licenses/kc-voip"
 
       - name: Package
         shell: pwsh

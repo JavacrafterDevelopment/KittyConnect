@@ -1,9 +1,18 @@
-//! Runs the bundled TailCat binary.
+//! Runs TailCat.
 //!
-//! The official Windows build is embedded in KittyConnect.exe and unpacked into
-//! `data\bin\` on first use. Each run gets its config/home pointed at
-//! `data\tailcat-home\`, so TailCat never reads or writes keys in the user's
-//! profile, and every child is tied to a job object so it dies with us.
+//! Two TailCat programs are embedded in KittyConnect.exe and unpacked into
+//! `data\bin\` on first use:
+//!
+//! - the official `tailcat.exe` (hash-pinned), for Ports and File Share, so
+//!   those get TailCat's security updates by bumping its version;
+//! - `kc-voip.exe`, built from `voip-helper/` on the TailCat library (the same
+//!   TailCat version), for VOIP rooms only. It takes the same commands but
+//!   carries UDP as well as TCP, which voice and screen video need. When the
+//!   official tailcat can serve UDP itself, rooms can go back to it.
+//!
+//! Each gets its own home folder (`data\tailcat-home\`, `data\voip-home\`), so
+//! neither reads or writes keys in the user's profile or in the other's, and
+//! every child is tied to a job object so it dies with us.
 
 use std::io::{BufRead, BufReader, Read};
 use std::path::PathBuf;
@@ -15,8 +24,44 @@ use tao::event_loop::EventLoopProxy;
 use crate::portable::data_dir;
 use crate::UserEvent;
 
+/// The TailCat version of both programs. The VOIP helper's `go.mod` must name
+/// the same one (the build checks).
 pub const VERSION: &str = "0.7.0";
-static BINARY: &[u8] = include_bytes!("../vendor/tailcat.exe");
+static OFFICIAL: &[u8] = include_bytes!("../vendor/tailcat.exe");
+static VOIP: &[u8] = include_bytes!("../vendor/kc-voip.exe");
+
+/// Which of the two embedded programs to run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Binary {
+    /// The official tailcat.exe: TCP only.
+    Official,
+    /// KittyConnect's helper on the TailCat library: TCP and UDP.
+    Voip,
+}
+
+impl Binary {
+    fn bytes(self) -> &'static [u8] {
+        match self {
+            Binary::Official => OFFICIAL,
+            Binary::Voip => VOIP,
+        }
+    }
+
+    fn file_name(self) -> String {
+        match self {
+            Binary::Official => format!("tailcat-{VERSION}.exe"),
+            // Rebuilt with each KittyConnect version, so named by both.
+            Binary::Voip => format!("kc-voip-{}-tc{VERSION}.exe", env!("CARGO_PKG_VERSION")),
+        }
+    }
+
+    fn home_name(self) -> &'static str {
+        match self {
+            Binary::Official => "tailcat-home",
+            Binary::Voip => "voip-home",
+        }
+    }
+}
 
 /// Which part of the app a TailCat process belongs to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -27,6 +72,17 @@ pub enum Role {
     PortJoin,
     VoipHost,
     VoipJoin,
+}
+
+impl Role {
+    /// Rooms run the helper (they need UDP); everything else runs the
+    /// official tailcat.exe.
+    pub fn binary(self) -> Binary {
+        match self {
+            Role::VoipHost | Role::VoipJoin => Binary::Voip,
+            Role::ShareHost | Role::RecvForward | Role::PortHost | Role::PortJoin => Binary::Official,
+        }
+    }
 }
 
 pub enum TcEvent {
@@ -56,36 +112,39 @@ impl Drop for Proc {
     }
 }
 
-/// Unpacks the embedded binary if this version isn't there yet.
-fn exe_path() -> Result<PathBuf, String> {
+/// Unpacks an embedded program if this version isn't there yet.
+fn exe_path(bin: Binary) -> Result<PathBuf, String> {
+    let bytes = bin.bytes();
     let dir = data_dir().join("bin");
-    let exe = dir.join(format!("tailcat-{VERSION}.exe"));
-    if std::fs::metadata(&exe).map(|m| m.len() == BINARY.len() as u64).unwrap_or(false) {
+    let exe = dir.join(bin.file_name());
+    if std::fs::metadata(&exe).map(|m| m.len() == bytes.len() as u64).unwrap_or(false) {
         return Ok(exe);
     }
     std::fs::create_dir_all(&dir).map_err(|e| format!("Couldn't create {}: {e}", dir.display()))?;
-    let tmp = dir.join(format!("tailcat-{VERSION}.exe.part"));
-    std::fs::write(&tmp, BINARY).map_err(|e| format!("Couldn't unpack TailCat: {e}"))?;
+    let tmp = exe.with_extension("exe.part");
+    std::fs::write(&tmp, bytes).map_err(|e| format!("Couldn't unpack TailCat: {e}"))?;
     let _ = std::fs::remove_file(&exe);
     std::fs::rename(&tmp, &exe).map_err(|e| format!("Couldn't unpack TailCat: {e}"))?;
     Ok(exe)
 }
 
-/// Unpacks TailCat ahead of time so the first connection isn't slowed by it.
+/// Unpacks both programs ahead of time so the first connection isn't slowed by it.
 pub fn prepare() -> Result<(), String> {
-    exe_path().map(|_| ())
+    exe_path(Binary::Official)?;
+    exe_path(Binary::Voip).map(|_| ())
 }
 
-fn home() -> PathBuf {
-    let h = data_dir().join("tailcat-home");
+fn home(bin: Binary) -> PathBuf {
+    let h = data_dir().join(bin.home_name());
     let _ = std::fs::create_dir_all(h.join(".config"));
     h
 }
 
 pub fn spawn(role: Role, args: &[String], proxy: &EventLoopProxy<UserEvent>) -> Result<Proc, String> {
     static NEXT: AtomicU64 = AtomicU64::new(1);
-    let exe = exe_path()?;
-    let home = home();
+    let bin = role.binary();
+    let exe = exe_path(bin)?;
+    let home = home(bin);
 
     let mut cmd = Command::new(&exe);
     // --verbose (a root flag, so it goes first) is what makes TailCat log
@@ -325,6 +384,20 @@ mod job {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Rooms run the UDP-capable helper; Ports and File Share stay on the
+    /// official tailcat.exe, each with its own home folder.
+    #[test]
+    fn rooms_use_the_helper_and_the_rest_the_official_build() {
+        for r in [Role::VoipHost, Role::VoipJoin] {
+            assert_eq!(r.binary(), Binary::Voip);
+        }
+        for r in [Role::ShareHost, Role::RecvForward, Role::PortHost, Role::PortJoin] {
+            assert_eq!(r.binary(), Binary::Official);
+        }
+        assert_ne!(Binary::Voip.file_name(), Binary::Official.file_name());
+        assert_ne!(Binary::Voip.home_name(), Binary::Official.home_name());
+    }
 
     #[test]
     fn finds_address_in_banner() {

@@ -599,6 +599,13 @@ function renderVoip(v) {
   $('voip-devices').textContent = v.devices;
   $('voip-voice-error').textContent = v.voiceError;
   show($('voip-voice-error'), v.voiceError);
+  // Voice and screen share travel over UDP inside the tunnel; chat over TCP.
+  const mediaText = v.st !== 'live' ? '' : {
+    lost: 'Voice and screen share lost their connection to the room. Reconnecting… Chat still works.',
+    failed: 'Voice and screen share couldn\'t connect to the room. Chat still works. Try leaving and joining again.',
+  }[v.media] || '';
+  $('voip-media-state').textContent = mediaText;
+  show($('voip-media-state'), mediaText);
   const speaking = liveSpeaking(v);
   setHtml($('voip-invoice'), voiceMembers.length
     ? voiceMembers.map((m) => person(m, v, speaking)).join('')
@@ -722,7 +729,7 @@ $('voip-chat').addEventListener('click', (e) => {
    frame rate, with a key frame every two seconds so late joiners and dropped
    frames recover quickly. Chunks go to the room through the TailCat tunnel. */
 
-const ss = { stream: null, encoder: null, reader: null, running: false, forceKey: false, bytes: 0, frames: 0, info: null, tick: 0 };
+const ss = { stream: null, encoder: null, reader: null, running: false, forceKey: false, bytes: 0, frames: 0, info: null, tick: 0, config: null, rate: 0, maxRate: 0 };
 
 function nativeRes() {
   const r = window.devicePixelRatio || 1;
@@ -840,7 +847,12 @@ async function startShare() {
   ss.bytes = 0;
   ss.frames = 0;
   ss.forceKey = true;
-  ss.info = { w, h, fps, codec: config.codec };
+  ss.config = config;
+  // The chosen quality's bitrate is the most it will use; it's lowered while
+  // a watcher's connection can't keep up, and raised again when it can.
+  ss.maxRate = config.bitrate;
+  ss.rate = config.bitrate;
+  ss.info = { w, h, fps, codec: config.codec, bitrate: config.bitrate };
   // Tells the capture and encoder what to protect: sharp edges or smooth motion.
   try { track.contentHint = preset().hint; } catch (_) { /* older runtime */ }
   ss.encoder = new VideoEncoder({
@@ -871,7 +883,8 @@ async function startShare() {
   let sent = 0;
   ss.tick = setInterval(() => {
     const mbps = ((ss.bytes * 8) / 2 / 1e6).toFixed(1);
-    $('ss-stats').textContent = `${w}×${h} · ${Math.round(ss.frames / 2)} fps · ${mbps} Mbit/s · ${config.codec.startsWith('avc') ? 'H.264' : 'VP8'}`;
+    const fitted = ss.rate < ss.maxRate * 0.97 ? ' · lowered to fit a viewer\'s connection' : '';
+    $('ss-stats').textContent = `${w}×${h} · ${Math.round(ss.frames / 2)} fps · ${mbps} Mbit/s · ${config.codec.startsWith('avc') ? 'H.264' : 'VP8'}${fitted}`;
     ss.bytes = 0;
     ss.frames = 0;
   }, 2000);
@@ -1146,6 +1159,14 @@ window.onHost = (msg) => {
     case 'keyframe':
       ss.forceKey = true;
       break;
+    case 'videoRate':
+      // Watchers' connections decide the bitrate (see media.rs RateControl).
+      if (ss.encoder && ss.encoder.state === 'configured' && ss.config) {
+        ss.config = { ...ss.config, bitrate: msg.bitrate };
+        ss.rate = msg.bitrate;
+        try { ss.encoder.configure(ss.config); } catch (_) { /* keeps the old rate */ }
+      }
+      break;
     case 'paste': {
       const input = $(msg.target);
       if (input && !input.disabled) {
@@ -1211,7 +1232,7 @@ if (window.ipc) {
     },
     voip: {
       st: 'live', mode: 'host', error: '', notice: '', room: 'Friday raid', name: 'Sam', me: 1,
-      code: `kitty:voip:50211:${addr}`, inVoice: true, muted: false, deaf: false, voiceError: '',
+      code: `kitty:voip:50211:${addr}`, inVoice: true, muted: false, deaf: false, voiceError: '', media: 'ok',
       devices: 'Headset Microphone · Headset Earphone', speaking: [2],
       link: { path: 'unknown' },
       gen: 1, isHost: true, roomNotice: '', sharing: null, watching: null,
