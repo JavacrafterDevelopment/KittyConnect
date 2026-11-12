@@ -1,0 +1,111 @@
+# Publishes a release whenever a version tag is pushed:
+#
+#   1. bump `version` in Cargo.toml (e.g. 0.1.1) and commit
+#   2. tag that commit v0.1.1 and push (GitHub Desktop pushes annotated tags
+#      along with the commits; or: git push origin main v0.1.1)
+#
+# The MSVC build links the C runtime and the WebView2 loader statically, so the
+# folder is just KittyConnect.exe plus licenses. TailCat is fetched from its
+# official release (hash-pinned) and embedded in the exe. The release carries
+# KittyConnect-windows-x64.zip: the program folder plus a manifest of every
+# file's SHA-256. The workflow also writes update.json to the `updates` branch,
+# which is how the Javacrafter Launcher finds and verifies KittyConnect updates.
+
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+# One release at a time, so two tags pushed together can't race on update.json.
+concurrency: release
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the tag matches Cargo.toml
+        id: version
+        shell: pwsh
+        run: |
+          $tag = '${{ github.ref_name }}'.TrimStart('v')
+          $ver = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
+          if ($tag -ne $ver) { throw "Tag v$tag doesn't match Cargo.toml version $ver" }
+          "version=$ver" >> $env:GITHUB_OUTPUT
+
+      - name: Fetch TailCat
+        shell: pwsh
+        run: ./tools/fetch-tailcat.ps1
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test
+        run: cargo test --locked --target x86_64-pc-windows-msvc
+
+      - name: Build
+        run: cargo build --release --locked --target x86_64-pc-windows-msvc
+
+      - name: Assemble the folder
+        shell: pwsh
+        run: |
+          $dir = 'dist/KittyConnect'
+          New-Item -ItemType Directory -Force "$dir/licenses" | Out-Null
+          Copy-Item target/x86_64-pc-windows-msvc/release/KittyConnect.exe $dir
+          Copy-Item LICENSE-MIT, LICENSE-APACHE "$dir/licenses/"
+          Copy-Item vendor/TAILCAT-LICENSE "$dir/licenses/TailCat-LICENSE.txt"
+
+      - name: Package
+        shell: pwsh
+        run: ./tools/release-package.ps1 -Folder dist/KittyConnect -Name KittyConnect -Exe KittyConnect.exe -Version ${{ steps.version.outputs.version }} -Out release
+
+      - name: Publish release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = '${{ github.ref_name }}'
+          $pre = if ($tag -match '-') { '--prerelease' } else { $null }
+          gh release create $tag release/KittyConnect-windows-x64.zip `
+            --title "KittyConnect $($tag.TrimStart('v'))" --generate-notes $pre
+
+      # update.json lives on its own `updates` branch so releases never add commits
+      # to main. The launcher reads it from raw.githubusercontent.com.
+      - name: Publish update.json
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag  = '${{ github.ref_name }}'
+          $repo = '${{ github.repository }}'
+          $info = gh release view $tag --json body,isPrerelease | ConvertFrom-Json
+          # Read raw: ConvertFrom-Json would turn the timestamp into a local-format date.
+          $published = gh release view $tag --json publishedAt --jq .publishedAt
+
+          git config user.name  'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          if (git ls-remote --heads origin updates) {
+            git fetch --depth 1 origin updates
+            git worktree add updates-branch FETCH_HEAD
+          } else {
+            # First release with update.json: start the branch with nothing else on it.
+            git worktree add --detach updates-branch
+            git -C updates-branch checkout --orphan updates
+            git -C updates-branch rm -rf --quiet .
+          }
+
+          ./tools/publish-update.ps1 -Entry release/release-entry.json -Repo $repo -Tag $tag `
+            -UpdateJson updates-branch/update.json -Prerelease:$info.isPrerelease `
+            -Notes "$($info.body)" -Published $published
+
+          git -C updates-branch add update.json
+          git -C updates-branch commit -m "update.json for $tag"
+          git -C updates-branch push origin HEAD:refs/heads/updates

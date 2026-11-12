@@ -1,0 +1,17 @@
+# GNU toolchain only (the release workflow uses MSVC and ignores this).
+#
+# The `windows` crate imports DLL functions with raw-dylib. GNU ld mislinks those
+# import tables when the same DLL also comes from MinGW's own libraries, and the
+# exe crashes before main. Rust's bundled LLD links them correctly, using the
+# MinGW startup objects Rust ships, so no separate C toolchain is needed.
+#
+# Raw-dylib also needs a `dlltool` on PATH; build.ps1 provides one from rustup's
+# llvm-tools component.
+[target.x86_64-pc-windows-gnu]
+linker = "rust-lld"
+rustflags = ["-C", "linker-flavor=ld.lld", "-C", "link-self-contained=yes"]
+
+# MSVC: link the C runtime statically so the exe runs on a bare Windows install
+# with no Visual C++ redistributable.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

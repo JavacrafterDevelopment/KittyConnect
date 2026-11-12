@@ -1,0 +1,274 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>KittyConnect</title>
+  <style>/*{{CSS}}*/</style>
+  <script>/*{{BOOT}}*/</script>
+</head>
+<body>
+  <div id="app">
+
+    <!-- Masthead: wordmark and page tabs stacked, window buttons in the corner.
+         The band is the drag handle. -->
+    <header id="top">
+      <div id="brandcol">
+        <div id="brandrow">
+          <span id="wordmark">Kitty<span class="gilt">Connect</span></span>
+          <span class="meta">peer to peer, over TailCat</span>
+        </div>
+
+        <nav id="tabs">
+          <button class="chip on" data-page="files" title="Send and receive files">
+            <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <path d="M3.5 1.5h6l3 3v10h-9z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
+              <path d="M9.5 1.5v3h3" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
+            </svg>
+            File Share
+            <span class="badge" id="files-badge"></span>
+          </button>
+          <button class="chip" data-page="ports" title="Open ports and join them">
+            <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <rect x="1.5" y="4.5" width="13" height="7" rx="1.6" stroke="currentColor" stroke-width="1.5"/>
+              <path d="M4.5 8h1.5M7.3 8h1.5M10 8h1.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+            </svg>
+            Ports
+            <span class="badge" id="ports-badge"></span>
+          </button>
+        </nav>
+      </div>
+
+      <div id="winbtns">
+        <button class="winbtn" data-win="minimize" title="Minimise">
+          <svg width="10" height="10" viewBox="0 0 10 10"><path d="M1 5h8" stroke="currentColor" stroke-width="1.2"/></svg>
+        </button>
+        <button class="winbtn" data-win="maximize" title="Maximise">
+          <svg class="max" width="10" height="10" viewBox="0 0 10 10"><rect x="1.2" y="1.2" width="7.6" height="7.6" fill="none" stroke="currentColor" stroke-width="1.2"/></svg>
+          <svg class="restore" width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.1"><rect x="1" y="3" width="6" height="6"/><path d="M3 3V1h6v6H7"/></svg>
+        </button>
+        <button class="winbtn close" data-win="close" title="Close">
+          <svg width="10" height="10" viewBox="0 0 10 10"><path d="M1.4 1.4l7.2 7.2M8.6 1.4L1.4 8.6" stroke="currentColor" stroke-width="1.2"/></svg>
+        </button>
+      </div>
+    </header>
+
+    <main id="body">
+
+      <!-- ---------------------------------------------------------- file share -->
+      <section id="page-files" class="page on">
+        <div class="column wide">
+          <div class="lib-head">
+            <h1 class="page-title">File Share</h1>
+          </div>
+          <p class="lib-note">Files go straight from one PC to the other through an encrypted
+            <b>TailCat</b> tunnel. No account, no upload, no router setup. Share a code over
+            Discord and your friend pastes it in.</p>
+
+          <div class="panes">
+            <!-- Send -->
+            <div class="card pane" id="share-card">
+              <div class="card-head">
+                <h3>Send files</h3>
+                <span class="pill" id="share-pill"><span class="dot"></span><span class="pill-text">Off</span></span>
+              </div>
+
+              <div class="drop" id="share-drop">
+                <svg width="26" height="26" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                  <path d="M12 15V4M7.5 8.5 12 4l4.5 4.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+                  <path d="M4 14v4.5A1.5 1.5 0 0 0 5.5 20h13a1.5 1.5 0 0 0 1.5-1.5V14" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+                </svg>
+                <span class="drop-title">Drop files or folders here</span>
+                <span class="drop-or">or</span>
+                <div class="row">
+                  <button class="btn small" id="share-add-files">Add files</button>
+                  <button class="btn small" id="share-add-folder">Add folder</button>
+                </div>
+              </div>
+
+              <div class="filelist" id="share-files"></div>
+              <div class="list-foot" id="share-foot">
+                <span class="meta" id="share-summary"></span>
+                <span class="grow"></span>
+                <button class="btn small ghost" id="share-clear">Clear</button>
+              </div>
+
+              <div class="codebox" id="share-codebox">
+                <span class="code-label">Your share code</span>
+                <code class="code" id="share-code"></code>
+                <div class="row">
+                  <button class="btn small primary" data-copy="share-code" data-discord="1">
+                    <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M5.2 3.6C6.1 3.3 7 3.1 8 3.1s1.9.2 2.8.5M3.6 12.3C2.6 10.6 2.2 8.6 2.6 6.4 3.4 5 4.3 4.1 5.2 3.6M12.4 12.3c1-1.7 1.4-3.7 1-5.9-.8-1.4-1.7-2.3-2.6-2.8M3.6 12.3c.7.5 1.5.9 2.3 1.1l.6-1.2M12.4 12.3c-.7.5-1.5.9-2.3 1.1l-.6-1.2M5.8 11.4c1.4.6 3 .6 4.4 0" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/><circle cx="6" cy="8.3" r="1" fill="currentColor"/><circle cx="10" cy="8.3" r="1" fill="currentColor"/></svg>
+                    Copy for Discord
+                  </button>
+                  <button class="btn small" data-copy="share-code">Copy code</button>
+                </div>
+                <span class="code-hint">Anyone with this code can download these files while sharing is on.
+                  Stopping kills the code for good.</span>
+              </div>
+
+              <div class="activity" id="share-activity"></div>
+              <p class="err" id="share-error"></p>
+
+              <div class="actions">
+                <button class="btn primary" id="share-start">Start sharing</button>
+                <button class="btn danger" id="share-stop">Stop sharing</button>
+                <span class="grow"></span>
+                <span class="meta" id="share-sent"></span>
+              </div>
+              <div class="logbox" data-log="share"></div>
+            </div>
+
+            <!-- Receive -->
+            <div class="card pane" id="recv-card">
+              <div class="card-head">
+                <h3>Receive files</h3>
+                <span class="pill" id="recv-pill"><span class="dot"></span><span class="pill-text">Off</span></span>
+              </div>
+
+              <label class="field-label" for="recv-code">Paste the code your friend sent</label>
+              <div class="codein">
+                <input id="recv-code" class="input mono" spellcheck="false" autocomplete="off" placeholder="kitty:file:…">
+                <button class="btn small" data-paste="recv-code">Paste</button>
+              </div>
+              <div class="actions tight">
+                <button class="btn primary" id="recv-connect">Connect</button>
+                <button class="btn danger" id="recv-stop">Disconnect</button>
+                <span class="grow"></span>
+                <button class="btn small ghost" id="recv-refresh">Refresh list</button>
+              </div>
+              <p class="err" id="recv-error"></p>
+
+              <div class="saveto">
+                <span class="field-label">Save to</span>
+                <a class="link path" id="recv-inbox" title="Open this folder"></a>
+                <span class="grow"></span>
+                <button class="btn small ghost" id="recv-pick">Change</button>
+              </div>
+
+              <div class="filelist remote" id="recv-files"></div>
+              <div class="list-foot" id="recv-foot">
+                <span class="meta" id="recv-summary"></span>
+                <span class="grow"></span>
+                <button class="btn small primary" id="recv-all">Download all</button>
+              </div>
+              <div class="logbox" data-log="recv"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- --------------------------------------------------------------- ports -->
+      <section id="page-ports" class="page">
+        <div class="column wide">
+          <div class="lib-head">
+            <h1 class="page-title">Ports</h1>
+          </div>
+          <p class="lib-note">Let a friend reach a server on your PC (a game server, a web app) as if
+            it were on their own machine, with no port forwarding on your router. TailCat carries
+            <b>TCP</b> ports; games that only use UDP won't work this way.</p>
+
+          <div class="panes">
+            <!-- Host -->
+            <div class="card pane" id="host-card">
+              <div class="card-head">
+                <h3>Open a port</h3>
+              </div>
+
+              <label class="field-label" for="host-ports">Port numbers on this PC</label>
+              <input id="host-ports" class="input" spellcheck="false" autocomplete="off" placeholder="25565, 8080">
+              <div class="presets">
+                <span class="meta">Common:</span>
+                <button class="tag" data-preset="25565">Minecraft 25565</button>
+                <button class="tag" data-preset="8080">Web 8080</button>
+                <button class="tag" data-preset="3000">Dev 3000</button>
+                <button class="tag" data-preset="7777">Terraria 7777</button>
+                <button class="tag" data-preset="27015">Source 27015</button>
+              </div>
+
+              <p class="err" id="host-error"></p>
+
+              <div class="actions">
+                <button class="btn primary" id="host-start">Open port</button>
+                <span class="meta">It appears under Open ports below, with its code.</span>
+              </div>
+            </div>
+
+            <!-- Join -->
+            <div class="card pane" id="join-card">
+              <div class="card-head">
+                <h3>Join a port</h3>
+              </div>
+
+              <label class="field-label" for="join-code">Paste the TailCat code your friend sent</label>
+              <div class="codein">
+                <input id="join-code" class="input mono" spellcheck="false" autocomplete="off" placeholder="tc…">
+                <button class="btn small" data-paste="join-code">Paste</button>
+              </div>
+
+              <label class="field-label" for="join-ports">Their port numbers</label>
+              <input id="join-ports" class="input" spellcheck="false" autocomplete="off" placeholder="25565">
+
+              <div class="maps" id="join-maps"></div>
+
+              <div class="set-row last">
+                <label class="set-text" for="join-lan">
+                  <span class="set-title">Share with my network</span>
+                  <span class="set-desc">Let other devices on your Wi-Fi (a console, a laptop) use the
+                    ports too. Off means only this PC.</span>
+                </label>
+                <input type="checkbox" id="join-lan" class="switch">
+              </div>
+
+              <p class="err" id="join-error"></p>
+
+              <div class="actions">
+                <button class="btn primary" id="join-start">Connect</button>
+                <span class="meta">It appears under Joined ports below.</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Everything open right now, each with its own code, log and Stop. -->
+          <div class="lib-section">
+            <div class="lib-head">
+              <h2 class="section-title">Open ports</h2>
+              <span class="meta" id="host-count"></span>
+            </div>
+            <div class="sessions" id="host-list"></div>
+          </div>
+
+          <div class="lib-section">
+            <div class="lib-head">
+              <h2 class="section-title">Joined ports</h2>
+              <span class="meta" id="join-count"></span>
+            </div>
+            <div class="sessions" id="join-list"></div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer id="status">
+      <span id="lamp"></span>
+      <span id="statusText">Starting up</span>
+      <span class="grow"></span>
+      <a class="link" id="data-link" title="Open the data folder">Portable · data\</a>
+      <span id="version"></span>
+    </footer>
+  </div>
+
+  <!-- The webview fills the window, so these strips hand resizing back to it. -->
+  <div class="grips">
+    <div class="grip n"  data-dir="n"></div>
+    <div class="grip s"  data-dir="s"></div>
+    <div class="grip w"  data-dir="w"></div>
+    <div class="grip e"  data-dir="e"></div>
+    <div class="grip nw" data-dir="nw"></div>
+    <div class="grip ne" data-dir="ne"></div>
+    <div class="grip sw" data-dir="sw"></div>
+    <div class="grip se" data-dir="se"></div>
+  </div>
+
+  <script>/*{{JS}}*/</script>
+</body>
+</html>
