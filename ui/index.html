@@ -321,6 +321,22 @@
               </div>
             </div>
 
+            <!-- Someone's screen, while you watch it. -->
+            <div class="card stage hide" id="voip-stage">
+              <div class="stage-head">
+                <span class="live-dot"></span>
+                <span class="stage-title" id="stage-title"></span>
+                <span class="meta" id="stage-stats"></span>
+                <span class="grow"></span>
+                <button class="btn small" id="stage-full">Full screen</button>
+                <button class="btn small danger" id="stage-stop">Stop watching</button>
+              </div>
+              <div class="stage-view" id="stage-view">
+                <canvas id="stage-canvas"></canvas>
+                <div class="stage-wait" id="stage-wait">Waiting for the picture…</div>
+              </div>
+            </div>
+
             <div class="roomgrid">
               <div class="card chatcard">
                 <div class="card-head">
@@ -328,7 +344,11 @@
                   <span class="meta">Only people in this room see it</span>
                 </div>
                 <div class="chatlist" id="voip-chat"></div>
+                <div class="uploads" id="voip-uploads"></div>
                 <form class="chatform" id="voip-chatform">
+                  <button type="button" class="iconbtn attachbtn" id="voip-attach" title="Attach files (or drop them here)">
+                    <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M13.5 7.6 8.3 12.8a3.3 3.3 0 0 1-4.7-4.7l5.6-5.6a2.2 2.2 0 0 1 3.1 3.1L6.8 11.1a1.1 1.1 0 0 1-1.6-1.6l4.9-4.9" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  </button>
                   <input id="voip-text" class="input" maxlength="2000" autocomplete="off" placeholder="Message #chat">
                   <button class="btn primary" type="submit">Send</button>
                 </form>
@@ -350,6 +370,42 @@
                   <span class="meta" id="voip-devices"></span>
                 </div>
                 <p class="warn" id="voip-voice-error"></p>
+                <p class="warn" id="voip-room-notice"></p>
+
+                <!-- Screen share: pick a size and frame rate, then go live. -->
+                <div class="sharerow" id="ss-row">
+                  <button class="btn" id="ss-open">
+                    <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><rect x="1.5" y="2.5" width="13" height="9" rx="1.5" stroke="currentColor" stroke-width="1.4"/><path d="M5.5 14h5M8 11.5V14" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+                    Share screen
+                  </button>
+                </div>
+                <div class="sharebox hide" id="ss-box">
+                  <div class="share-opts">
+                    <label class="share-opt"><span class="field-label">Resolution</span><select class="input" id="ss-res"></select></label>
+                    <label class="share-opt"><span class="field-label">Frame rate</span>
+                      <select class="input" id="ss-fps">
+                        <option value="15">15 fps</option>
+                        <option value="30" selected>30 fps</option>
+                        <option value="60">60 fps</option>
+                      </select>
+                    </label>
+                  </div>
+                  <span class="meta" id="ss-est"></span>
+                  <div class="row">
+                    <button class="btn primary" id="ss-go">Go live</button>
+                    <button class="btn ghost" id="ss-cancel">Cancel</button>
+                  </div>
+                </div>
+                <div class="livebox hide" id="ss-live">
+                  <video id="ss-preview" muted autoplay playsinline></video>
+                  <div class="live-info">
+                    <span class="live-tag">LIVE</span>
+                    <span class="meta" id="ss-stats"></span>
+                  </div>
+                  <button class="btn small danger" id="ss-stop">Stop sharing</button>
+                </div>
+                <p class="warn" id="ss-error"></p>
+
                 <span class="field-label">In voice</span>
                 <div class="people" id="voip-invoice"></div>
                 <span class="field-label">In the room</span>
@@ -372,6 +428,10 @@
       <span id="version"></span>
     </footer>
   </div>
+
+  <!-- Right-click a person in a room: their volume for you, mute for you, and
+       (for the host) mute for everyone or disconnect. -->
+  <div class="ctxmenu hide" id="ctxmenu" role="menu"></div>
 
   <!-- The webview fills the window, so these strips hand resizing back to it. -->
   <div class="grips">

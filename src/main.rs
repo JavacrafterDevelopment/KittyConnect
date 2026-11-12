@@ -215,6 +215,8 @@ struct App {
     join_error: String,
     next_key: u64,
     voip: Voip,
+    /// The tab on screen, so a drop lands where the user expects.
+    page: String,
     status: (String, &'static str),
 }
 
@@ -248,8 +250,17 @@ fn main() {
     let mut web_context = WebContext::new(Some(data_dir().join("webview")));
     let ipc_proxy = proxy.clone();
     let drop_proxy = proxy.clone();
+    // Old room files and image previews from a run that didn't close cleanly.
+    let _ = std::fs::remove_dir_all(voip::rooms_dir());
+    let _ = std::fs::remove_dir_all(data_dir().join("cache"));
+    // The page is served from kc://localhost, which WebView2 loads as
+    // https://kc.localhost: a secure origin, which screen capture and the
+    // browser's video encoder and decoder require. Nothing here is fetched
+    // from the network; the handler answers from memory and the preview cache.
+    let html = std::sync::Arc::new(page_html());
     let mut webview_builder = WebViewBuilder::new_with_web_context(&mut web_context)
-        .with_html(page_html())
+        .with_custom_protocol("kc".into(), move |_id, req| serve_page(&html, req.uri().path()))
+        .with_url("kc://localhost/")
         .with_background_color((255, 255, 255, 255))
         .with_devtools(cfg!(debug_assertions))
         .with_ipc_handler(move |req| {
@@ -263,7 +274,7 @@ fn main() {
         });
     #[cfg(windows)]
     {
-        webview_builder = webview_builder.with_browser_accelerator_keys(false);
+        webview_builder = webview_builder.with_browser_accelerator_keys(false).with_https_scheme(true);
     }
     let webview = match webview_builder.build(&window) {
         Ok(w) => w,
@@ -311,13 +322,19 @@ fn main() {
                         app.shutdown();
                         *flow = ControlFlow::Exit;
                     }
-                    true
+                    // Screen video chunks arrive many times a second and change nothing on screen.
+                    !matches!(msg["cmd"].as_str(), Some("voip.video" | "voip.keyframe" | "page"))
                 }
                 Err(_) => false,
             },
             Event::UserEvent(UserEvent::Tc(role, id, ev)) => app.on_tailcat(role, id, ev),
             Event::UserEvent(UserEvent::Share(ev)) => app.on_share(ev),
             Event::UserEvent(UserEvent::Recv(ev)) => app.on_recv(ev),
+            Event::UserEvent(UserEvent::Dropped(paths)) if app.page == "voip" && app.voip.is_live() => {
+                // Dropped on a room: send them into chat.
+                app.voip.attach(paths.into_iter().filter(|p| p.is_file()).collect(), String::new(), &app.proxy);
+                true
+            }
             Event::UserEvent(UserEvent::Dropped(paths)) => {
                 let n = share::add_paths(&app.share.lib, &paths);
                 send(&webview, json!({ "type": "dropped", "count": n }));
@@ -329,7 +346,9 @@ fn main() {
             Event::UserEvent(UserEvent::Voip(gen, ev)) => match app.voip.on_event(gen, ev) {
                 // Talking lights and the mic meter go on their own, many times a second.
                 Some(live) => {
-                    send(&webview, live);
+                    if !live.is_null() {
+                        send(&webview, live);
+                    }
                     false
                 }
                 None => true,
@@ -352,6 +371,41 @@ fn page_html() -> String {
         .replace("/*{{CSS}}*/", APP_CSS)
         .replace("/*{{BOOT}}*/", &format!("window.BOOT = {boot};"))
         .replace("/*{{JS}}*/", APP_JS)
+}
+
+/// Answers the page's own requests: the app itself, and inline image previews
+/// of room attachments (already fetched through the tunnel into the cache).
+fn serve_page(html: &str, path: &str) -> wry::http::Response<std::borrow::Cow<'static, [u8]>> {
+    use wry::http::Response;
+    let reply = |status: u16, mime: &str, body: Vec<u8>| {
+        Response::builder()
+            .status(status)
+            .header("Content-Type", mime)
+            .header("Cache-Control", "no-store")
+            .body(std::borrow::Cow::Owned(body))
+            .unwrap()
+    };
+    if path == "/" || path == "/index.html" {
+        return reply(200, "text/html; charset=utf-8", html.as_bytes().to_vec());
+    }
+    // /att/<room generation>/<attachment id>: numbers only, so nothing outside the cache is reachable.
+    let parts: Vec<&str> = path.trim_start_matches('/').split('/').collect();
+    if let ["att", gen, aid] = parts[..] {
+        if let (Ok(gen), Ok(aid)) = (gen.parse::<u64>(), aid.parse::<u32>()) {
+            if let Ok(bytes) = std::fs::read(voip::preview_dir(gen).join(format!("a{aid}"))) {
+                let mime = match bytes.get(..12) {
+                    Some([0x89, b'P', b'N', b'G', ..]) => "image/png",
+                    Some([0xFF, 0xD8, ..]) => "image/jpeg",
+                    Some([b'G', b'I', b'F', ..]) => "image/gif",
+                    Some([b'R', b'I', b'F', b'F', _, _, _, _, b'W', b'E', b'B', b'P']) => "image/webp",
+                    Some([b'B', b'M', ..]) => "image/bmp",
+                    _ => "application/octet-stream",
+                };
+                return reply(200, mime, bytes);
+            }
+        }
+    }
+    reply(404, "text/plain", b"not found".to_vec())
 }
 
 fn send(webview: &WebView, msg: Value) {
@@ -430,6 +484,7 @@ impl App {
             join_error: String::new(),
             next_key: 1,
             voip: Voip::default(),
+            page: "files".into(),
             status: ("Ready. Everything runs from this folder.".into(), "idle"),
         }
     }
@@ -452,6 +507,12 @@ impl App {
         let s = |k: &str| msg[k].as_str().unwrap_or_default().to_string();
         match cmd {
             "ready" | "reveal" => {
+                // For build checks: proves the page loaded and its script ran.
+                if cmd == "ready" {
+                    if let Some(marker) = std::env::var_os("KC_READY_MARKER") {
+                        let _ = std::fs::write(marker, format!("ready {}", s("origin")));
+                    }
+                }
                 if !window.is_visible() {
                     window.set_visible(true);
                     window.set_focus();
@@ -587,6 +648,29 @@ impl App {
             "voip.chat" => self.voip.chat(&s("text")),
             "voip.voice" => self.voip.voice(msg["on"].as_bool().unwrap_or(false), &self.proxy),
             "voip.mute" => self.voip.set_mute(msg["muted"].as_bool().unwrap_or(false), msg["deaf"].as_bool().unwrap_or(false)),
+            "voip.screen" => self.voip.screen(msg.get("info").filter(|v| v.is_object()).cloned()),
+            "voip.video" => {
+                use base64::Engine as _;
+                if let Ok(data) = base64::engine::general_purpose::STANDARD.decode(s("data")) {
+                    self.voip.video(msg["key"].as_bool().unwrap_or(false), msg["ts"].as_u64().unwrap_or(0), &data);
+                }
+            }
+            "voip.watch" => self.voip.watch(msg["id"].as_u64().map(|v| v as u16)),
+            "voip.keyframe" => self.voip.request_keyframe(msg["id"].as_u64().unwrap_or(0) as u16),
+            "voip.attach" => {
+                if let Some(files) = rfd::FileDialog::new().set_title("Send files in chat").set_parent(window).pick_files() {
+                    self.voip.attach(files, s("text"), &self.proxy);
+                }
+            }
+            "voip.download" => self.voip.download(msg["aid"].as_u64().unwrap_or(0) as u32, self.recv.inbox.clone()),
+            "voip.reveal" => {
+                if let Some(path) = self.voip.download_path(msg["aid"].as_u64().unwrap_or(0) as u32) {
+                    let _ = std::process::Command::new("explorer").arg(format!("/select,{}", path.display())).spawn();
+                }
+            }
+            "voip.volume" => self.voip.set_volume(msg["id"].as_u64().unwrap_or(0) as u16, msg["gain"].as_f64().unwrap_or(1.0) as f32),
+            "voip.mod" => self.voip.moderate(&s("action"), msg["id"].as_u64().unwrap_or(0) as u16),
+            "page" => self.page = s("page"),
 
             // ------------------------------------------------------- misc
             "copy" => {

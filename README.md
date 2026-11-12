@@ -32,6 +32,19 @@ TailCat forwards **TCP** ports. Games that only use UDP won't work this way.
   speaking light and how they're connected. Use headphones: there's no echo
   cancellation.
 - When the host ends the room, everyone sees it closed.
+- **Share screen**: pick a resolution (it starts at your screen's own, e.g.
+  2560×1440, with 1440p/1080p/720p/480p below it) and a frame rate (15, 30 or
+  60; 30 by default), then **Go live**. Others press **Watch** on your name.
+  Like Discord, it's encoded as H.264 on your GPU where available (VP8
+  otherwise), at roughly 2.5 Mbit/s for 720p30 and 4.5 Mbit/s for 1080p30, with
+  a key frame every 2 seconds, so new viewers and dropped frames recover quickly.
+- **Attach files** in chat with the paperclip, or drop them on the room (up to
+  100 MB each). Images up to 8 MB show inline; anything can be downloaded to
+  your Downloads folder. Attachments live only as long as the room.
+- **Right-click someone** for their volume (0–200%) and **Mute for me**. These
+  only change what you hear, and are remembered by name.
+- The **host** can also **Mute for everyone** (their voice stops reaching anyone,
+  they're told, and the chat says so for everyone) and **Disconnect from room**.
 
 **Connection status.** Everything you're connected to shows **Direct** (peer to
 peer) or **Relay** (through a TailCat relay, still end-to-end encrypted) with
@@ -71,6 +84,12 @@ runtime into a `WebView2\` folder beside the exe.
   loopback. Names, chat and voice (16 kHz IMA ADPCM, about 64 kbit/s per
   speaker, sent only while you talk) are all frames on that one connection.
   Voice is relayed by the room, not mixed; each member mixes what they hear.
+  Screen video (WebCodecs, in the page) and attachments are frames on the same
+  connection; video goes only to members watching that share.
+- The UI is served from `kc://localhost` (WebView2 loads it as
+  `https://kc.localhost`, a secure origin, which screen capture and WebCodecs
+  need). Nothing is fetched from the network; the page and image previews come
+  from inside the app.
 - **Every byte between peers goes through the WireGuard-encrypted TailCat
   tunnel.** KittyConnect's own servers and clients only ever use `127.0.0.1`.
   The one exception is *Share with my network* on a joined port, which lets

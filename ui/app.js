@@ -105,6 +105,7 @@ document.querySelectorAll('.chip[data-page]').forEach((chip) => {
 function page(name) {
   document.querySelectorAll('.chip[data-page]').forEach((c) => c.classList.toggle('on', c.dataset.page === name));
   document.querySelectorAll('.page').forEach((p) => p.classList.toggle('on', p.id === `page-${name}`));
+  post({ cmd: 'page', page: name });
 }
 
 /* ------------------------------------------------------------- window */
@@ -515,15 +516,22 @@ function person(m, v, speaking) {
   const tags = [];
   if (m.host) tags.push('<span class="tag-sm">Host</span>');
   if (you) tags.push('<span class="tag-sm you">You</span>');
+  if (m.smuted) tags.push('<span class="tag-sm bad" title="Muted for everyone by the host">Muted by host</span>');
+  if (m.screen) tags.push('<span class="tag-sm live">LIVE</span>');
   const link = m.host ? '' : linkPill({ path: m.path, rtt: m.rtt }, m.name);
   const icons = m.deaf ? `<span class="ico" title="Deafened">${ICON_DEAF}</span>` : m.muted ? `<span class="ico" title="Muted">${ICON_MUTED}</span>` : '';
+  const g = v.gains[m.id];
+  const mine = !you && g != null && g !== 1 ? `<span class="ico soft" title="Your volume for ${esc(m.name)}">${g === 0 ? ICON_MUTED : `${Math.round(g * 100)}%`}</span>` : '';
+  const watch = m.screen && !you
+    ? `<button class="btn small ${v.watching === m.id ? '' : 'primary'}" data-watch="${v.watching === m.id ? '' : m.id}">${v.watching === m.id ? 'Watching' : 'Watch'}</button>`
+    : '';
   return `
-    <div class="person" data-member="${m.id}">
+    <div class="person" data-member="${m.id}" title="Right-click for options">
       <span class="avatar${speaking.includes(m.id) ? ' speaking' : ''}" style="--h:${hue(m.name)}">${esc(initials(m.name))}</span>
       <span class="person-name">${esc(m.name)}</span>
-      ${tags.join('')}${icons}
+      ${tags.join('')}${icons}${mine}
       <span class="grow"></span>
-      ${link}
+      ${watch}${link}
     </div>`;
 }
 
@@ -561,10 +569,20 @@ function renderVoip(v) {
     ? `<div class="msg system"><span>${esc(m.text)}</span><span class="msg-time">${time(m.ts)}</span></div>`
     : `<div class="msg${m.from === v.me ? ' mine' : ''}">
          <div class="msg-head"><span class="msg-name" style="--h:${hue(m.name)}">${esc(m.name)}</span><span class="msg-time">${time(m.ts)}</span></div>
-         <div class="msg-text">${esc(m.text)}</div>
+         ${m.text ? `<div class="msg-text">${esc(m.text)}</div>` : ''}
+         ${m.file ? attachmentHtml(m.file, v) : ''}
        </div>`).join('') : '<div class="empty">No messages yet. Say hi.</div>');
   if (atBottom) list.scrollTop = list.scrollHeight;
   $('voip-text').disabled = v.st !== 'live';
+  $('voip-attach').disabled = v.st !== 'live';
+  setHtml($('voip-uploads'), v.uploads.map((u) => u.error
+    ? `<div class="upload bad"><span>${esc(u.name)}: ${esc(u.error)}</span></div>`
+    : `<div class="upload"><span>Sending <b>${esc(u.name)}</b></span><span class="meta">${u.size ? `${pct(u.sent, u.size)}%` : '…'}</span>
+         <div class="bar-wrap"><div class="bar" style="width:${pct(u.sent, u.size || 1)}%"></div></div></div>`).join(''));
+  $('voip-room-notice').textContent = v.roomNotice;
+  show($('voip-room-notice'), v.roomNotice);
+  renderScreen(v);
+  applySavedVolumes(v);
 
   // Voice.
   const voiceMembers = v.members.filter((m) => m.voice);
@@ -606,6 +624,415 @@ function voipLive(msg) {
   });
 }
 
+/* -------------------------------------------------------- attachments */
+
+function attachmentHtml(f, v) {
+  const d = v.downloads[String(f.aid)];
+  const img = v.previews.includes(f.aid)
+    ? `<img class="att-img" src="/att/${v.gen}/${f.aid}" alt="${esc(f.name)}" draggable="false">`
+    : '';
+  let action = `<button class="btn small" data-dl="${f.aid}">${ICON_DL} Download</button>`;
+  let meta = size(f.size);
+  if (d && d.st === 'downloading') {
+    action = '';
+    meta = d.size ? `${size(d.got)} of ${size(d.size)} · ${pct(d.got, d.size)}%` : 'Starting…';
+  } else if (d && d.st === 'done') {
+    action = `<button class="btn small" data-show="${f.aid}">${ICON_FOLDER} Show in folder</button>`;
+    meta = `Saved · ${size(f.size)}`;
+  } else if (d && d.st === 'error') {
+    meta = d.error;
+  }
+  return `${img}
+    <div class="att">
+      <span class="file-ico">${esc(ext(f.name).slice(0, 4))}</span>
+      <div class="file-main">
+        <span class="file-name" title="${esc(f.name)}">${esc(f.name)}</span>
+        <span class="file-meta${d && d.st === 'error' ? ' bad' : ''}">${esc(meta)}</span>
+      </div>
+      ${action}
+    </div>`;
+}
+
+$('voip-attach').addEventListener('click', () => {
+  post({ cmd: 'voip.attach', text: $('voip-text').value.trim() });
+  $('voip-text').value = '';
+});
+$('voip-chat').addEventListener('click', (e) => {
+  const dl = e.target.closest('[data-dl]');
+  if (dl) post({ cmd: 'voip.download', aid: Number(dl.dataset.dl) });
+  const sh = e.target.closest('[data-show]');
+  if (sh) post({ cmd: 'voip.reveal', aid: Number(sh.dataset.show) });
+});
+
+/* -------------------------------------------------------- screen share */
+
+/* Like Discord: capture with the browser, encode with a hardware video encoder
+   where there is one (H.264, else VP8), at a bitrate that fits the size and
+   frame rate, with a key frame every two seconds so late joiners and dropped
+   frames recover quickly. Chunks go to the room through the TailCat tunnel. */
+
+const ss = { stream: null, encoder: null, reader: null, running: false, forceKey: false, bytes: 0, frames: 0, info: null, tick: 0 };
+
+function nativeRes() {
+  const r = window.devicePixelRatio || 1;
+  return { w: Math.round(screen.width * r), h: Math.round(screen.height * r) };
+}
+
+function fillResOptions() {
+  const n = nativeRes();
+  const opts = [`<option value="native">Your screen (${n.w}×${n.h})</option>`];
+  for (const h of [1440, 1080, 720, 480]) {
+    if (h < n.h) opts.push(`<option value="${h}">${h}p</option>`);
+  }
+  $('ss-res').innerHTML = opts.join('');
+  estimate();
+}
+
+function outSize(srcW, srcH, choice) {
+  let h = choice === 'native' ? srcH : Math.min(srcH, Number(choice));
+  let w = Math.round((srcW * h) / srcH);
+  return { w: w - (w % 2), h: h - (h % 2) };
+}
+
+// Roughly what Discord streams at: ~2.5 Mbit/s for 720p30, ~4.5 for 1080p30.
+function bitrateFor(w, h, fps) {
+  return Math.round(Math.min(10e6, Math.max(600e3, w * h * fps * 0.07)));
+}
+
+function estimate() {
+  const n = nativeRes();
+  const { w, h } = outSize(n.w, n.h, $('ss-res').value || 'native');
+  const fps = Number($('ss-fps').value);
+  const mbps = (bitrateFor(w, h, fps) / 1e6).toFixed(1);
+  $('ss-est').textContent = `${w}×${h} at ${fps} fps, about ${mbps} Mbit/s. On a relay, a lower setting stays smoother.`;
+}
+$('ss-res').addEventListener('change', estimate);
+$('ss-fps').addEventListener('change', estimate);
+
+async function pickConfig(w, h, fps) {
+  const bitrate = bitrateFor(w, h, fps);
+  const base = { width: w, height: h, bitrate, framerate: fps, latencyMode: 'realtime', bitrateMode: 'variable' };
+  const candidates = [
+    { ...base, codec: w * h > 2073600 || fps > 30 ? 'avc1.640033' : 'avc1.640028', avc: { format: 'annexb' }, hardwareAcceleration: 'prefer-hardware' },
+    { ...base, codec: 'avc1.42E033', avc: { format: 'annexb' } },
+    { ...base, codec: 'vp8' },
+  ];
+  for (const c of candidates) {
+    try {
+      const r = await VideoEncoder.isConfigSupported(c);
+      if (r.supported) return c;
+    } catch (_) { /* try the next */ }
+  }
+  return null;
+}
+
+function b64(bytes) {
+  let s = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  return btoa(s);
+}
+
+function unb64(str) {
+  const s = atob(str);
+  const out = new Uint8Array(s.length);
+  for (let i = 0; i < s.length; i++) out[i] = s.charCodeAt(i);
+  return out;
+}
+
+function shareError(text) {
+  $('ss-error').textContent = text;
+  show($('ss-error'), text);
+}
+
+async function startShare() {
+  shareError('');
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia || !window.VideoEncoder || !window.MediaStreamTrackProcessor) {
+    return shareError('Screen sharing needs a newer Microsoft Edge WebView2 runtime. Update Edge and try again.');
+  }
+  const fps = Number($('ss-fps').value);
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: { ideal: fps, max: fps } }, audio: false });
+  } catch (e) {
+    return shareError(e && e.name === 'NotAllowedError' ? 'Screen sharing was cancelled.' : `Couldn't capture the screen: ${e && e.message}`);
+  }
+  const track = stream.getVideoTracks()[0];
+  const set = track.getSettings();
+  const n = nativeRes();
+  const { w, h } = outSize(set.width || n.w, set.height || n.h, $('ss-res').value);
+  const config = await pickConfig(w, h, fps);
+  if (!config) {
+    stream.getTracks().forEach((t) => t.stop());
+    return shareError('No video encoder is available for that size. Try a lower resolution.');
+  }
+  ss.stream = stream;
+  ss.running = true;
+  ss.bytes = 0;
+  ss.frames = 0;
+  ss.forceKey = true;
+  ss.info = { w, h, fps, codec: config.codec };
+  ss.encoder = new VideoEncoder({
+    output: (chunk) => {
+      const buf = new Uint8Array(chunk.byteLength);
+      chunk.copyTo(buf);
+      ss.bytes += buf.length;
+      post({ cmd: 'voip.video', key: chunk.type === 'key', ts: Math.round(chunk.timestamp), data: b64(buf) });
+    },
+    error: (e) => stopShare(`The video encoder stopped: ${e.message}`),
+  });
+  ss.encoder.configure(config);
+  post({ cmd: 'voip.screen', info: ss.info });
+  $('ss-preview').srcObject = stream;
+  track.addEventListener('ended', () => stopShare());
+  hide($('ss-box'), true);
+  hide($('ss-live'), false);
+  hide($('ss-row'), true);
+
+  // Frames come in at the screen's pace; this keeps to the chosen rate and
+  // size, and never lets the encoder fall behind.
+  const canvas = new OffscreenCanvas(w, h);
+  const ctx = canvas.getContext('2d');
+  ss.reader = new MediaStreamTrackProcessor({ track }).readable.getReader();
+  const interval = 1e6 / fps;
+  let last = -Infinity;
+  let sent = 0;
+  ss.tick = setInterval(() => {
+    const mbps = ((ss.bytes * 8) / 2 / 1e6).toFixed(1);
+    $('ss-stats').textContent = `${w}×${h} · ${Math.round(ss.frames / 2)} fps · ${mbps} Mbit/s · ${config.codec.startsWith('avc') ? 'H.264' : 'VP8'}`;
+    ss.bytes = 0;
+    ss.frames = 0;
+  }, 2000);
+  while (ss.running) {
+    let r;
+    try { r = await ss.reader.read(); } catch (_) { break; }
+    if (r.done) break;
+    const frame = r.value;
+    if (frame.timestamp - last < interval * 0.9 || ss.encoder.encodeQueueSize > 2) {
+      frame.close();
+      continue;
+    }
+    last = frame.timestamp;
+    const keyFrame = ss.forceKey || sent % (fps * 2) === 0;
+    ss.forceKey = false;
+    sent++;
+    ss.frames++;
+    let input = frame;
+    if (frame.displayWidth !== w || frame.displayHeight !== h) {
+      ctx.drawImage(frame, 0, 0, w, h);
+      input = new VideoFrame(canvas, { timestamp: frame.timestamp });
+      frame.close();
+    }
+    try { ss.encoder.encode(input, { keyFrame }); } catch (_) { /* closed */ }
+    input.close();
+  }
+}
+
+function stopShare(error) {
+  if (!ss.running && !ss.stream) return;
+  ss.running = false;
+  clearInterval(ss.tick);
+  try { ss.reader && ss.reader.cancel(); } catch (_) { /* gone */ }
+  try { ss.encoder && ss.encoder.state !== 'closed' && ss.encoder.close(); } catch (_) { /* gone */ }
+  if (ss.stream) ss.stream.getTracks().forEach((t) => t.stop());
+  ss.stream = null;
+  ss.encoder = null;
+  $('ss-preview').srcObject = null;
+  post({ cmd: 'voip.screen', info: null });
+  hide($('ss-live'), true);
+  hide($('ss-row'), false);
+  if (error) shareError(error);
+}
+
+$('ss-open').addEventListener('click', () => {
+  fillResOptions();
+  hide($('ss-box'), false);
+  hide($('ss-row'), true);
+});
+$('ss-cancel').addEventListener('click', () => { hide($('ss-box'), true); hide($('ss-row'), false); });
+$('ss-go').addEventListener('click', () => startShare());
+$('ss-stop').addEventListener('click', () => stopShare());
+
+/* Watching: decode with the browser's (hardware) decoder onto a canvas. */
+const view = { id: null, decoder: null, codec: null, waitKey: true, frames: 0, bytes: 0, tick: 0 };
+
+function closeViewer() {
+  try { view.decoder && view.decoder.state !== 'closed' && view.decoder.close(); } catch (_) { /* gone */ }
+  view.decoder = null;
+  view.id = null;
+  clearInterval(view.tick);
+  hide($('voip-stage'), true);
+}
+
+function openViewer(m) {
+  closeViewer();
+  view.id = m.id;
+  view.codec = m.screen.codec;
+  view.waitKey = true;
+  view.frames = 0;
+  view.bytes = 0;
+  const canvas = $('stage-canvas');
+  const ctx = canvas.getContext('2d');
+  view.decoder = new VideoDecoder({
+    output: (frame) => {
+      if (canvas.width !== frame.displayWidth || canvas.height !== frame.displayHeight) {
+        canvas.width = frame.displayWidth;
+        canvas.height = frame.displayHeight;
+      }
+      ctx.drawImage(frame, 0, 0);
+      frame.close();
+      view.frames++;
+      hide($('stage-wait'), true);
+    },
+    error: () => resetDecoder(),
+  });
+  view.decoder.configure({ codec: view.codec, optimizeForLatency: true, hardwareAcceleration: 'no-preference' });
+  $('stage-title').textContent = `${m.name}'s screen`;
+  hide($('stage-wait'), false);
+  hide($('voip-stage'), false);
+  view.tick = setInterval(() => {
+    $('stage-stats').textContent = `${m.screen.w}×${m.screen.h} · ${Math.round(view.frames / 2)} fps · ${((view.bytes * 8) / 2 / 1e6).toFixed(1)} Mbit/s`;
+    view.frames = 0;
+    view.bytes = 0;
+  }, 2000);
+}
+
+// After a decode error or a backlog: start again from the next key frame.
+function resetDecoder() {
+  if (view.id == null) return;
+  try { view.decoder && view.decoder.state !== 'closed' && view.decoder.reset(); } catch (_) { /* gone */ }
+  try { view.decoder.configure({ codec: view.codec, optimizeForLatency: true }); } catch (_) { /* gone */ }
+  view.waitKey = true;
+  post({ cmd: 'voip.keyframe', id: view.id });
+}
+
+function onVideo(msg) {
+  if (msg.from !== view.id || !view.decoder || view.decoder.state === 'closed') return;
+  if (view.waitKey && !msg.key) return;
+  if (view.decoder.decodeQueueSize > 8) return resetDecoder();
+  view.waitKey = false;
+  const data = unb64(msg.data);
+  view.bytes += data.length;
+  try {
+    view.decoder.decode(new EncodedVideoChunk({ type: msg.key ? 'key' : 'delta', timestamp: msg.ts, data }));
+  } catch (_) {
+    resetDecoder();
+  }
+}
+
+function renderScreen(v) {
+  // Follow what the room says: stop viewing a share that ended.
+  const target = v.watching != null ? v.members.find((m) => m.id === v.watching && m.screen) : null;
+  if (target && view.id !== target.id) openViewer(target);
+  if (!target && view.id != null) closeViewer();
+  // If the room dropped our share (we left, it ended), stop capturing.
+  if (ss.running && !v.sharing && v.st !== 'live') stopShare();
+  hide($('ss-row'), ss.running || !$('ss-box').classList.contains('hide'));
+}
+
+document.getElementById('page-voip').addEventListener('click', (e) => {
+  const w = e.target.closest('[data-watch]');
+  if (!w) return;
+  const id = w.dataset.watch === '' ? null : Number(w.dataset.watch);
+  post({ cmd: 'voip.watch', id });
+});
+$('stage-stop').addEventListener('click', () => post({ cmd: 'voip.watch', id: null }));
+$('stage-full').addEventListener('click', () => {
+  const el = $('stage-view');
+  if (document.fullscreenElement) document.exitFullscreen();
+  else if (el.requestFullscreen) el.requestFullscreen();
+});
+
+/* ---------------------------------------------------- right-click menu */
+
+/* Volume and mute are yours alone and remembered by name; the host's mute and
+   disconnect apply to everyone. */
+function savedVolume(name) {
+  try {
+    const v = JSON.parse(localStorage.getItem(`kc-vol:${name}`) || 'null');
+    return v && typeof v.vol === 'number' ? v : null;
+  } catch (_) { return null; }
+}
+
+function saveVolume(name, vol, muted) {
+  try { localStorage.setItem(`kc-vol:${name}`, JSON.stringify({ vol, muted })); } catch (_) { /* no storage */ }
+}
+
+function applySavedVolumes(v) {
+  for (const m of v.members) {
+    if (m.id === v.me || v.gains[m.id] != null) continue;
+    const s = savedVolume(m.name);
+    if (s && (s.muted || s.vol !== 1)) post({ cmd: 'voip.volume', id: m.id, gain: s.muted ? 0 : s.vol });
+  }
+}
+
+const menu = $('ctxmenu');
+function closeMenu() { hide(menu, true); }
+
+function openMenu(m, x, y) {
+  const v = voipState;
+  const you = m.id === v.me;
+  const g = v.gains[m.id];
+  const s = savedVolume(m.name) || { vol: g == null || g === 0 ? 1 : g, muted: g === 0 };
+  const parts = [`<div class="ctx-title"><span class="avatar" style="--h:${hue(m.name)}">${esc(initials(m.name))}</span>${esc(m.name)}</div>`];
+  if (!you) {
+    parts.push(`
+      <div class="ctx-sec">
+        <div class="ctx-label"><span>User volume</span><span id="ctx-vol-val">${Math.round(s.vol * 100)}%</span></div>
+        <input type="range" class="ctx-range" id="ctx-vol" min="0" max="200" step="5" value="${Math.round(s.vol * 100)}">
+      </div>
+      <label class="ctx-item"><input type="checkbox" id="ctx-mute" ${s.muted ? 'checked' : ''}> Mute for me</label>`);
+  } else {
+    parts.push('<div class="ctx-note">That\'s you. Use Mute and Deafen in the voice panel.</div>');
+  }
+  if (v.isHost && !m.host) {
+    parts.push(`
+      <div class="ctx-sep"></div>
+      <div class="ctx-head">Host</div>
+      <button class="ctx-item" data-mod="${m.smuted ? 'unmute' : 'mute'}">${m.smuted ? 'Unmute for everyone' : 'Mute for everyone'}</button>
+      <button class="ctx-item danger" data-mod="kick">Disconnect from room</button>`);
+  }
+  menu.innerHTML = parts.join('');
+  menu.dataset.member = m.id;
+  menu.dataset.name = m.name;
+  hide(menu, false);
+  const r = menu.getBoundingClientRect();
+  menu.style.left = `${Math.min(x, window.innerWidth - r.width - 8)}px`;
+  menu.style.top = `${Math.min(y, window.innerHeight - r.height - 8)}px`;
+
+  const apply = () => {
+    const vol = Number($('ctx-vol').value) / 100;
+    const muted = $('ctx-mute').checked;
+    $('ctx-vol-val').textContent = `${Math.round(vol * 100)}%`;
+    saveVolume(m.name, vol, muted);
+    post({ cmd: 'voip.volume', id: m.id, gain: muted ? 0 : vol });
+  };
+  if (!you) {
+    $('ctx-vol').addEventListener('input', apply);
+    $('ctx-mute').addEventListener('change', apply);
+  }
+}
+
+menu.addEventListener('click', (e) => {
+  const b = e.target.closest('[data-mod]');
+  if (!b) return;
+  const id = Number(menu.dataset.member);
+  if (b.dataset.mod === 'kick' && !confirm(`Disconnect ${menu.dataset.name} from the room?`)) return;
+  post({ cmd: 'voip.mod', action: b.dataset.mod, id });
+  closeMenu();
+});
+
+document.getElementById('page-voip').addEventListener('contextmenu', (e) => {
+  const row = e.target.closest('[data-member]');
+  if (!row || !voipState) return;
+  e.preventDefault();
+  const m = voipState.members.find((x) => x.id === Number(row.dataset.member));
+  if (m) openMenu(m, e.clientX, e.clientY);
+});
+document.addEventListener('mousedown', (e) => { if (!menu.contains(e.target)) closeMenu(); });
+window.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeMenu(); });
+window.addEventListener('blur', closeMenu);
+document.querySelectorAll('.page').forEach((p) => p.addEventListener('scroll', closeMenu));
+
 /* ------------------------------------------------------------ host events */
 
 window.onHost = (msg) => {
@@ -629,6 +1056,12 @@ window.onHost = (msg) => {
     }
     case 'voipLive':
       voipLive(msg);
+      break;
+    case 'video':
+      onVideo(msg);
+      break;
+    case 'keyframe':
+      ss.forceKey = true;
       break;
     case 'paste': {
       const input = $(msg.target);
@@ -665,7 +1098,7 @@ document.addEventListener('contextmenu', (e) => { if (!e.target.closest('input, 
 function demo() {}
 
 if (window.ipc) {
-  post({ cmd: 'ready' });
+  post({ cmd: 'ready', origin: `${location.origin} secure=${window.isSecureContext} encoder=${!!window.VideoEncoder} capture=${!!(navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia)}` });
 } else {
   const addr = 'tcomFwWCCcjS5nKNqAod034nWoJZW0LZqDhhC8U_dKdnDRYQ8uNGFpGQEuXk2pL9qR7vW3yZ8aB4cD6eF1gH5iJ0kLmN';
   window.onHost({
@@ -698,16 +1131,21 @@ if (window.ipc) {
       code: `kitty:voip:50211:${addr}`, inVoice: true, muted: false, deaf: false, voiceError: '',
       devices: 'Headset Microphone · Headset Earphone', speaking: [2],
       link: { path: 'unknown' },
+      gen: 1, isHost: true, roomNotice: '', sharing: null, watching: null,
+      uploads: [{ tid: 4, name: 'clip.mp4', sent: 31457280, size: 52428800, error: null }],
+      downloads: { 7: { st: 'downloading', got: 5242880, size: 12582912, error: '' } },
+      previews: [], gains: { 3: 0.6 },
       members: [
-        { id: 1, name: 'Sam', host: true, voice: true, muted: false, deaf: false, path: 'host', rtt: null },
-        { id: 2, name: 'Alex Rivera', host: false, voice: true, muted: false, deaf: false, path: 'direct', rtt: 24 },
-        { id: 3, name: 'Jo', host: false, voice: false, muted: true, deaf: false, path: 'relay', rtt: 88 },
+        { id: 1, name: 'Sam', host: true, voice: true, muted: false, deaf: false, smuted: false, path: 'host', rtt: null, screen: null },
+        { id: 2, name: 'Alex Rivera', host: false, voice: true, muted: false, deaf: false, smuted: false, path: 'direct', rtt: 24, screen: { w: 1920, h: 1080, fps: 30, codec: 'avc1.640028' } },
+        { id: 3, name: 'Jo', host: false, voice: true, muted: false, deaf: false, smuted: true, path: 'relay', rtt: 88, screen: null },
       ],
       chat: [
         { system: true, text: 'Alex Rivera joined the room', ts: 1794443000 },
         { from: 2, name: 'Alex Rivera', text: 'yo, server is up?', ts: 1794443030 },
-        { from: 1, name: 'Sam', text: 'yep, port 25565 is open in the Ports tab', ts: 1794443060 },
-        { system: true, text: 'Jo joined the room', ts: 1794443090 },
+        { from: 1, name: 'Sam', text: 'yep, here are the mods', ts: 1794443060, file: { aid: 7, name: 'modpack-1.2.zip', size: 12582912, image: false } },
+        { system: true, text: 'Alex Rivera started sharing their screen', ts: 1794443075 },
+        { system: true, text: 'Sam muted Jo for everyone', ts: 1794443090 },
       ],
       log: [],
     },

@@ -398,7 +398,7 @@ pub fn safe_relative(name: &str) -> Option<PathBuf> {
 }
 
 /// `a.txt` → `a (1).txt` if `a.txt` is already there.
-fn unique(path: &Path) -> PathBuf {
+pub fn unique(path: &Path) -> PathBuf {
     if !path.exists() {
         return path.to_path_buf();
     }

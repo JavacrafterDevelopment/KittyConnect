@@ -26,9 +26,44 @@ pub enum VoipEvent {
     Speaking(Vec<u16>),
     Level { level: f32, talking: bool },
     Failed(String),
+    /// A piece of someone's screen share, for the page to decode.
+    Video { from: u16, key: bool, ts: u64, data: Vec<u8> },
+    Upload { tid: u32, name: String, sent: u64, size: u64, error: Option<String> },
+    Fetching { aid: u32, got: u64, size: u64 },
+    Fetched { aid: u32, result: Result<std::path::PathBuf, String>, preview: bool },
 }
 
 const CHAT_KEEP: usize = 500;
+/// Images up to this size are fetched as soon as they're posted, to show inline.
+const PREVIEW_MAX: u64 = 8 * 1024 * 1024;
+
+/// Where room files live while a room is open; removed when it closes.
+pub fn rooms_dir() -> std::path::PathBuf {
+    crate::portable::data_dir().join("rooms")
+}
+
+/// Inline image previews for the current room, by generation.
+pub fn preview_dir(gen: u64) -> std::path::PathBuf {
+    crate::portable::data_dir().join("cache").join(format!("room{gen}"))
+}
+
+struct UploadState {
+    tid: u32,
+    name: String,
+    sent: u64,
+    size: u64,
+    error: Option<String>,
+    done: bool,
+}
+
+#[derive(Clone)]
+struct DownloadState {
+    st: &'static str,
+    got: u64,
+    size: u64,
+    path: Option<std::path::PathBuf>,
+    error: String,
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Mode {
@@ -65,6 +100,16 @@ pub struct Voip {
     ping_n: u64,
     pings: HashMap<u64, Instant>,
     log: Log,
+    is_host: bool,
+    /// A message from the host to you ("muted you for everyone").
+    room_notice: String,
+    sharing: Option<Value>,
+    watching: Option<u16>,
+    next_tid: u32,
+    uploads: Vec<UploadState>,
+    downloads: HashMap<u32, DownloadState>,
+    previews: HashMap<u32, bool>,
+    gains: HashMap<u16, f32>,
 }
 
 impl Default for Voip {
@@ -96,6 +141,15 @@ impl Default for Voip {
             ping_n: 0,
             pings: HashMap::new(),
             log: Log::default(),
+            is_host: false,
+            room_notice: String::new(),
+            sharing: None,
+            watching: None,
+            next_tid: 1,
+            uploads: Vec::new(),
+            downloads: HashMap::new(),
+            previews: HashMap::new(),
+            gains: HashMap::new(),
         }
     }
 }
@@ -125,6 +179,15 @@ impl Voip {
         self.speaking.clear();
         self.pings.clear();
         self.link = Link::default();
+        let _ = std::fs::remove_dir_all(preview_dir(self.gen));
+        self.is_host = false;
+        self.room_notice.clear();
+        self.sharing = None;
+        self.watching = None;
+        self.uploads.clear();
+        self.downloads.clear();
+        self.previews.clear();
+        self.gains.clear();
         self.gen += 1;
     }
 
@@ -139,7 +202,7 @@ impl Voip {
             Ok(n) => n,
             Err(e) => return self.error = e,
         };
-        let srv = match server::RoomServer::start(room) {
+        let srv = match server::RoomServer::start(room, rooms_dir()) {
             Ok(s) => s,
             Err(e) => return self.error = e,
         };
@@ -276,6 +339,108 @@ impl Voip {
         }
     }
 
+    // ------------------------------------------------------- screen share
+
+    /// The page has started or stopped capturing; tell the room.
+    pub fn screen(&mut self, info: Option<Value>) {
+        let Some(c) = &self.conn else { return };
+        match info {
+            Some(i) => {
+                c.send(json!({ "t": "screen", "on": true, "w": i["w"], "h": i["h"], "fps": i["fps"], "codec": i["codec"] }));
+                self.sharing = Some(i);
+            }
+            None => {
+                c.send(json!({ "t": "screen", "on": false }));
+                self.sharing = None;
+            }
+        }
+    }
+
+    /// One encoded chunk from the page's encoder, straight to the room.
+    pub fn video(&self, key: bool, ts: u64, data: &[u8]) {
+        if self.sharing.is_none() {
+            return;
+        }
+        if let Some(c) = &self.conn {
+            let mut head = [0u8; 9];
+            head[0] = key as u8;
+            head[1..].copy_from_slice(&ts.to_be_bytes());
+            // Dropped rather than queued when the link is full: the next key
+            // frame (every couple of seconds) recovers the picture.
+            let _ = c.tx.try_send(wire::Out::Frame(wire::binary(wire::VIDEO, &head, data)));
+        }
+    }
+
+    pub fn watch(&mut self, id: Option<u16>) {
+        self.watching = id;
+        if let Some(c) = &self.conn {
+            c.send(json!({ "t": "watch", "id": id }));
+        }
+    }
+
+    pub fn request_keyframe(&self, id: u16) {
+        if let Some(c) = &self.conn {
+            c.send(json!({ "t": "keyframe", "id": id }));
+        }
+    }
+
+    // -------------------------------------------------------- attachments
+
+    pub fn attach(&mut self, paths: Vec<std::path::PathBuf>, text: String, proxy: &EventLoopProxy<UserEvent>) {
+        let Some(c) = &self.conn else { return };
+        for (i, p) in paths.into_iter().enumerate() {
+            let tid = self.next_tid;
+            self.next_tid += 1;
+            let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            self.uploads.push(UploadState { tid, name, sent: 0, size: 0, error: None, done: false });
+            // The typed message goes with the first file.
+            c.upload(tid, p, if i == 0 { text.clone() } else { String::new() }, self.gen, proxy.clone());
+        }
+    }
+
+    pub fn download(&mut self, aid: u32, dir: std::path::PathBuf) {
+        let Some(c) = &self.conn else { return };
+        if self.downloads.get(&aid).is_some_and(|d| d.st == "downloading") {
+            return;
+        }
+        self.downloads.insert(aid, DownloadState { st: "downloading", got: 0, size: 0, path: None, error: String::new() });
+        c.fetch(aid, client::Fetch { dir, preview: false });
+    }
+
+    pub fn download_path(&self, aid: u32) -> Option<std::path::PathBuf> {
+        self.downloads.get(&aid).and_then(|d| d.path.clone())
+    }
+
+    fn maybe_preview(&mut self, msg: &Value) {
+        let f = &msg["file"];
+        if f["image"] != true || f["size"].as_u64().unwrap_or(u64::MAX) > PREVIEW_MAX {
+            return;
+        }
+        let aid = f["aid"].as_u64().unwrap_or(0) as u32;
+        if let (Some(c), false) = (&self.conn, self.previews.contains_key(&aid)) {
+            self.previews.insert(aid, false);
+            c.fetch(aid, client::Fetch { dir: preview_dir(self.gen), preview: true });
+        }
+    }
+
+    // ------------------------------------------------- volume and the host
+
+    /// Someone's volume for me only (0 = muted for me, 1 = normal, 2 = 200%).
+    pub fn set_volume(&mut self, id: u16, gain: f32) {
+        self.gains.insert(id, gain);
+        if let Some(c) = &self.conn {
+            c.mixer.set_gain(id, gain);
+        }
+    }
+
+    /// Host only: mute someone for everyone, or disconnect them. The room
+    /// checks it's really the host asking.
+    pub fn moderate(&self, action: &str, id: u16) {
+        if let (Some(c), true, true) = (&self.conn, self.is_host, matches!(action, "mute" | "unmute" | "kick")) {
+            c.send(json!({ "t": "mod", "action": action, "id": id }));
+        }
+    }
+
     pub fn on_tailcat(&mut self, role: Role, id: u64, ev: TcEvent) -> bool {
         if self.proc.as_ref().map(|p| p.id) != Some(id) || !matches!(role, Role::VoipHost | Role::VoipJoin) {
             return false;
@@ -313,7 +478,11 @@ impl Voip {
                 self.me = w["you"].as_u64().unwrap_or(0) as u16;
                 self.my_name = w["name"].as_str().unwrap_or(&self.my_name).to_string();
                 self.room = w["room"].as_str().unwrap_or("Room").to_string();
+                self.is_host = w["host"] == true;
                 self.chat = w["history"].as_array().cloned().unwrap_or_default().into();
+                for m in self.chat.clone() {
+                    self.maybe_preview(&m);
+                }
                 if self.mode == Mode::Joined {
                     // First check right away, then every 30 seconds.
                     self.link.next_ping = Some(Instant::now());
@@ -322,12 +491,32 @@ impl Voip {
             }
             VoipEvent::Message(m) => {
                 match m["t"].as_str().unwrap_or("") {
-                    "members" => self.members = m["members"].as_array().cloned().unwrap_or_default(),
+                    "members" => {
+                        self.members = m["members"].as_array().cloned().unwrap_or_default();
+                        // Stop watching a share that has ended.
+                        if let Some(w) = self.watching {
+                            if !self.members.iter().any(|x| x["id"] == w && !x["screen"].is_null()) {
+                                self.watching = None;
+                            }
+                        }
+                    }
                     "chat" => {
+                        self.maybe_preview(&m);
                         if self.chat.len() >= CHAT_KEEP {
                             self.chat.pop_front();
                         }
                         self.chat.push_back(m);
+                    }
+                    "notice" => self.room_notice = m["text"].as_str().unwrap_or("").to_string(),
+                    "keyframe" => return Some(json!({ "type": "keyframe" })),
+                    "attach.ok" | "attach.err" => {
+                        let tid = m["tid"].as_u64().unwrap_or(0) as u32;
+                        if let Some(u) = self.uploads.iter_mut().find(|u| u.tid == tid) {
+                            u.done = true;
+                            u.error = m["error"].as_str().map(str::to_string);
+                        }
+                        // Finished uploads leave the list; failed ones stay to show why.
+                        self.uploads.retain(|u| !(u.done && u.error.is_none()));
                     }
                     "pong" => {
                         let n = m["n"].as_u64().unwrap_or(0);
@@ -349,6 +538,52 @@ impl Voip {
                 Some(self.live_json(None))
             }
             VoipEvent::Level { level, talking } => Some(self.live_json(Some((level, talking)))),
+            VoipEvent::Video { from, key, ts, data } => {
+                if self.watching != Some(from) {
+                    return Some(Value::Null);
+                }
+                use base64::Engine as _;
+                Some(json!({
+                    "type": "video", "from": from, "key": key, "ts": ts,
+                    "data": base64::engine::general_purpose::STANDARD.encode(&data),
+                }))
+            }
+            VoipEvent::Upload { tid, name, sent, size, error } => {
+                if let Some(u) = self.uploads.iter_mut().find(|u| u.tid == tid) {
+                    u.name = name;
+                    u.sent = sent;
+                    u.size = size;
+                    if error.is_some() {
+                        u.error = error;
+                        u.done = true;
+                    }
+                }
+                None
+            }
+            VoipEvent::Fetching { aid, got, size } => {
+                if let Some(d) = self.downloads.get_mut(&aid) {
+                    d.got = got;
+                    d.size = size;
+                }
+                None
+            }
+            VoipEvent::Fetched { aid, result, preview } => {
+                if preview {
+                    self.previews.insert(aid, result.is_ok());
+                } else if let Some(d) = self.downloads.get_mut(&aid) {
+                    match result {
+                        Ok(p) => {
+                            d.st = "done";
+                            d.path = Some(p);
+                        }
+                        Err(e) => {
+                            d.st = "error";
+                            d.error = e;
+                        }
+                    }
+                }
+                None
+            }
             VoipEvent::Failed(why) => {
                 if self.st == "starting" {
                     self.reset();
@@ -436,6 +671,19 @@ impl Voip {
             "devices": self.devices,
             "link": self.link.json(),
             "log": self.log.json(),
+            "gen": self.gen,
+            "isHost": self.is_host,
+            "roomNotice": self.room_notice,
+            "sharing": self.sharing,
+            "watching": self.watching,
+            "uploads": self.uploads.iter().map(|u| json!({
+                "tid": u.tid, "name": u.name, "sent": u.sent, "size": u.size, "error": u.error,
+            })).collect::<Vec<_>>(),
+            "downloads": self.downloads.iter().map(|(aid, d)| (aid.to_string(), json!({
+                "st": d.st, "got": d.got, "size": d.size, "error": d.error,
+            }))).collect::<serde_json::Map<_, _>>(),
+            "previews": self.previews.iter().filter(|(_, ok)| **ok).map(|(aid, _)| *aid).collect::<Vec<_>>(),
+            "gains": self.gains.iter().map(|(id, g)| (id.to_string(), json!(g))).collect::<serde_json::Map<_, _>>(),
         })
     }
 }

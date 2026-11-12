@@ -39,10 +39,17 @@ struct Jitter {
 pub struct Mixer {
     streams: Mutex<HashMap<u16, Jitter>>,
     loud: Mutex<HashMap<u16, Instant>>,
+    /// Per-person volume set from the right-click menu (1.0 = normal, 0 = muted
+    /// for me). Only affects what this PC plays.
+    gains: Mutex<HashMap<u16, f32>>,
     deaf: AtomicBool,
 }
 
 impl Mixer {
+    pub fn set_gain(&self, member: u16, gain: f32) {
+        self.gains.lock().unwrap().insert(member, gain.clamp(0.0, 2.0));
+    }
+
     pub fn push(&self, from: u16, samples: &[i16]) {
         let rms = (samples.iter().map(|s| (*s as f32 / 32768.0).powi(2)).sum::<f32>() / samples.len().max(1) as f32).sqrt();
         if rms > GATE {
@@ -61,17 +68,19 @@ impl Mixer {
     fn pull(&self, out: &mut [i16]) {
         let mut acc = vec![0i32; out.len()];
         {
+            let gains = self.gains.lock().unwrap().clone();
             let mut streams = self.streams.lock().unwrap();
-            for j in streams.values_mut() {
+            for (id, j) in streams.iter_mut() {
                 if !j.primed && j.buf.len() >= PRIME {
                     j.primed = true;
                 }
                 if !j.primed {
                     continue;
                 }
+                let gain = gains.get(id).copied().unwrap_or(1.0);
                 for a in acc.iter_mut() {
                     match j.buf.pop_front() {
-                        Some(s) => *a += s as i32,
+                        Some(s) => *a += (s as f32 * gain) as i32,
                         None => {
                             j.primed = false;
                             break;
@@ -427,5 +436,9 @@ mod tests {
         m.pull(&mut out);
         assert!(out.iter().all(|s| *s == 1000));
         assert_eq!(m.speaking(), vec![7]);
+        // Their volume at 50% for me.
+        m.set_gain(7, 0.5);
+        m.pull(&mut out);
+        assert!(out.iter().all(|s| *s == 500));
     }
 }
