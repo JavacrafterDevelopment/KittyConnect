@@ -103,6 +103,8 @@ pub struct Voip {
     /// A message from the host to you ("muted you for everyone").
     room_notice: String,
     sharing: Option<Value>,
+    /// Our outgoing video fell behind; when we last asked the page for a key frame.
+    video_gap: Option<Instant>,
     watching: Option<u16>,
     next_tid: u32,
     uploads: Vec<UploadState>,
@@ -145,6 +147,7 @@ impl Default for Voip {
             is_host: false,
             room_notice: String::new(),
             sharing: None,
+            video_gap: None,
             watching: None,
             next_tid: 1,
             uploads: Vec::new(),
@@ -185,6 +188,7 @@ impl Voip {
         self.is_host = false;
         self.room_notice.clear();
         self.sharing = None;
+        self.video_gap = None;
         self.watching = None;
         self.uploads.clear();
         self.downloads.clear();
@@ -358,19 +362,37 @@ impl Voip {
         }
     }
 
-    /// One encoded chunk from the page's encoder, straight to the room.
-    pub fn video(&self, key: bool, ts: u64, data: &[u8]) {
+    /// One encoded chunk from the page's encoder, straight to the room on the
+    /// video connection. When that's backed up the chunk is dropped rather
+    /// than queued (so the stream stays live), later chunks are skipped until
+    /// a key frame, and true is returned: the page should make one now.
+    pub fn video(&mut self, key: bool, ts: u64, data: &[u8]) -> bool {
         if self.sharing.is_none() {
-            return;
+            return false;
         }
-        if let Some(c) = &self.conn {
-            let mut head = [0u8; 9];
-            head[0] = key as u8;
-            head[1..].copy_from_slice(&ts.to_be_bytes());
-            // Dropped rather than queued when the link is full: the next key
-            // frame (every couple of seconds) recovers the picture.
-            let _ = c.tx.try_send(wire::Out::Frame(wire::binary(wire::VIDEO, &head, data)));
+        let Some(c) = &self.conn else { return false };
+        if let Some(asked) = self.video_gap {
+            if !key {
+                // Ask again if the key frame we asked for didn't make it either.
+                let again = asked.elapsed() > Duration::from_secs(1);
+                if again {
+                    self.video_gap = Some(Instant::now());
+                }
+                return again;
+            }
         }
+        let mut head = [0u8; 9];
+        head[0] = key as u8;
+        head[1..].copy_from_slice(&ts.to_be_bytes());
+        if c.video_tx().try_send(wire::Out::Frame(wire::binary(wire::VIDEO, &head, data))).is_ok() {
+            self.video_gap = None;
+            return false;
+        }
+        let first = self.video_gap.is_none();
+        if first {
+            self.video_gap = Some(Instant::now());
+        }
+        first
     }
 
     pub fn watch(&mut self, id: Option<u16>) {

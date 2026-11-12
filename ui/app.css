@@ -176,7 +176,7 @@ code {
 #body { position: relative; flex: 1 1 auto; min-height: 0; }
 
 .page { position: absolute; inset: 0; overflow-y: auto; display: none; }
-.page.on { display: block; animation: page-in .22s ease both; }
+.page.on { display: block; animation: page-in .22s ease backwards; }
 
 @keyframes page-in {
   from { opacity: 0; transform: translateY(4px); }
@@ -254,7 +254,7 @@ code {
   border-left: 3px solid var(--rule-strong);
   border-radius: 12px;
   box-shadow: var(--shadow-soft);
-  animation: page-in .22s ease both;
+  animation: page-in .22s ease backwards;
 }
 
 .sess.live { border-left-color: var(--ok); }
@@ -484,7 +484,7 @@ code {
   border: 1px solid #C9D9F2;
   border-radius: 12px;
   background: linear-gradient(180deg, #FFFFFF 0%, var(--blue-wash) 100%);
-  animation: page-in .25s ease both;
+  animation: page-in .25s ease backwards;
 }
 
 .codebox.on { display: flex; }
@@ -1011,7 +1011,7 @@ select.input { padding: 7px 9px; }
   display: grid;
   place-items: center;
   background: rgba(20, 28, 40, .35);
-  animation: page-in .15s ease both;
+  animation: page-in .15s ease backwards;
 }
 .modal-card {
   width: min(460px, calc(100vw - 32px));

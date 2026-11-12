@@ -6,20 +6,21 @@
 //!
 //! Voice is relayed, not mixed: each speaker's frames go to everyone else in
 //! voice, and each member mixes what they receive. Screen video goes only to
-//! the members watching that share.
+//! the members watching that share, on their video connection, and attachments
+//! on their files connection, so neither can hold up voice (see `wire`).
 //!
 //! The host (the member who presented the host token) can mute anyone for
 //! everyone, and disconnect them. Everyone is told when that happens.
 
 use std::collections::{HashMap, VecDeque};
 use std::fs::File;
-use std::io::{Read, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{sync_channel, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
 
@@ -31,11 +32,25 @@ const MAX_TEXT: usize = 2000;
 /// Members ping every 30 seconds; one that's silent this long is gone.
 const IDLE: Duration = Duration::from_secs(100);
 const QUEUE: usize = 512;
+/// Video frames waiting for one watcher: about a third of a second at 30 fps.
+/// Past that the watcher is falling behind, and frames are dropped (then
+/// skipped up to the next key frame) rather than queued, so the picture stays
+/// live instead of drifting seconds late.
+pub const VIDEO_QUEUE: usize = 10;
+/// Attachment chunks waiting for one member (2 MB).
+const FILES_QUEUE: usize = 64;
+/// A sharer is asked for a key frame at most this often because of drops.
+const KEY_RETRY: Duration = Duration::from_secs(1);
 /// The room protocol version members must speak (2: Opus voice).
 pub const PROTOCOL: u64 = 2;
 /// Largest single attachment, and all attachments in one room together.
 pub const MAX_ATTACHMENT: u64 = 100 * 1024 * 1024;
 const MAX_ROOM_FILES: u64 = 1024 * 1024 * 1024;
+
+/// A side connection's sender, numbered so a closing connection only detaches
+/// itself (not a newer one that replaced it).
+type Side = Option<(u64, SyncSender<Out>)>;
+static NEXT_SIDE: AtomicU64 = AtomicU64::new(1);
 
 struct Member {
     id: u16,
@@ -52,7 +67,34 @@ struct Member {
     screen: Option<Value>,
     /// The member whose screen they're watching.
     watching: Option<u16>,
+    /// A video frame to them was dropped (or they just started watching):
+    /// skip frames until the next key frame, which their decoder can start from.
+    video_gap: bool,
+    /// When this sharer was last asked for a key frame.
+    key_asked: Option<Instant>,
+    /// Lets this member's side connections attach to them.
+    key: String,
     tx: SyncSender<Out>,
+    video_tx: Side,
+    files_tx: Side,
+}
+
+impl Member {
+    fn video(&self) -> &SyncSender<Out> {
+        self.video_tx.as_ref().map(|s| &s.1).unwrap_or(&self.tx)
+    }
+
+    fn files(&self) -> SyncSender<Out> {
+        self.files_tx.as_ref().map(|s| s.1.clone()).unwrap_or_else(|| self.tx.clone())
+    }
+
+    /// Closes all their connections, after anything already queued.
+    fn close(&self) {
+        for (_, t) in [&self.video_tx, &self.files_tx].into_iter().flatten() {
+            let _ = t.try_send(Out::Close);
+        }
+        let _ = self.tx.try_send(Out::Close);
+    }
 }
 
 struct Attachment {
@@ -152,7 +194,7 @@ impl Drop for RoomServer {
         if let Ok(mut room) = self.room.lock() {
             for m in room.members.drain(..) {
                 let _ = m.tx.try_send(Out::Frame(closed.clone()));
-                let _ = m.tx.try_send(Out::Close);
+                m.close();
             }
             // Attachments only live as long as the room.
             let _ = std::fs::remove_dir_all(&room.dir);
@@ -198,6 +240,39 @@ fn push_history(room: &mut Room, msg: Value) {
     room.history.push_back(msg);
 }
 
+/// Asks a sharer for a key frame: always when `now` (a new viewer), otherwise
+/// at most once per `KEY_RETRY`, so a struggling viewer can't flood them.
+fn ask_key(room: &mut Room, sharer: u16, now: bool) {
+    let Some(s) = room.members.iter_mut().find(|m| m.id == sharer && m.screen.is_some()) else { return };
+    if !now && s.key_asked.is_some_and(|t| t.elapsed() < KEY_RETRY) {
+        return;
+    }
+    s.key_asked = Some(Instant::now());
+    send(&s.tx, wire::json(&json!({ "t": "keyframe" })));
+}
+
+/// One chunk of a member's screen share, to each member watching it. A
+/// watcher whose queue is full loses the frame and then waits for the next
+/// key frame, rather than getting a picture that can't be decoded.
+fn relay_video(room: &mut Room, me: usize, body: &[u8]) {
+    if room.members[me].screen.is_none() || body.len() < 10 {
+        return;
+    }
+    let id = room.members[me].id;
+    let key = body[0] & 1 == 1;
+    let frame = wire::binary(wire::VIDEO, &id.to_be_bytes(), body);
+    let mut behind = false;
+    for o in room.members.iter_mut().filter(|o| o.watching == Some(id)) {
+        if !(o.video_gap && !key) {
+            o.video_gap = o.video().try_send(Out::Frame(frame.clone())).is_err();
+        }
+        behind |= o.video_gap;
+    }
+    if behind {
+        ask_key(room, id, false);
+    }
+}
+
 /// An attachment on its way up from a member.
 struct Upload {
     file: File,
@@ -207,14 +282,143 @@ struct Upload {
     got: u64,
 }
 
+/// A chunk of an upload. Written outside the room lock.
+fn file_chunk(uploads: &mut HashMap<u32, Upload>, body: &[u8], reply: &SyncSender<Out>) {
+    if body.len() < 4 {
+        return;
+    }
+    let tid = u32::from_be_bytes([body[0], body[1], body[2], body[3]]);
+    let mut failed = None;
+    if let Some(u) = uploads.get_mut(&tid) {
+        u.got += (body.len() - 4) as u64;
+        if u.got > u.size {
+            failed = Some("The file was bigger than it said.");
+        } else if u.file.write_all(&body[4..]).is_err() {
+            failed = Some("The host couldn't store the file.");
+        }
+    }
+    if let Some(why) = failed {
+        if let Some(u) = uploads.remove(&tid) {
+            let _ = std::fs::remove_file(&u.path);
+        }
+        send(reply, wire::json(&json!({ "t": "attach.err", "tid": tid, "error": why })));
+    }
+}
+
+/// Uploads cut off when their connection closed.
+fn drop_uploads(room: &Mutex<Room>, uploads: HashMap<u32, Upload>) {
+    for u in uploads.into_values() {
+        drop(u.file);
+        let _ = std::fs::remove_file(&u.path);
+        if let Ok(mut r) = room.lock() {
+            r.stored = r.stored.saturating_sub(u.size);
+        }
+    }
+}
+
+/// attach.begin / attach.end / attach.get from member `me`. Replies about an
+/// upload go back on the connection it came on (`reply`); a download is
+/// streamed on the member's files connection.
+fn attachment(r: &mut Room, me: usize, msg: &Value, uploads: &mut HashMap<u32, Upload>, reply: &SyncSender<Out>) {
+    let id = r.members[me].id;
+    match msg["t"].as_str().unwrap_or("") {
+        "attach.begin" => {
+            let tid = msg["tid"].as_u64().unwrap_or(0) as u32;
+            let size = msg["size"].as_u64().unwrap_or(0);
+            let name = clean(msg["name"].as_str().unwrap_or("file"), 120);
+            let err = if size == 0 {
+                Some("That file is empty.".to_string())
+            } else if size > MAX_ATTACHMENT {
+                Some(format!("Files up to {} MB can be sent in chat.", MAX_ATTACHMENT / 1024 / 1024))
+            } else if r.stored + size > MAX_ROOM_FILES {
+                Some("This room has no room left for attachments.".to_string())
+            } else {
+                None
+            };
+            if let Some(error) = err {
+                send(reply, wire::json(&json!({ "t": "attach.err", "tid": tid, "error": error })));
+                return;
+            }
+            let path = r.dir.join(format!("up-{id}-{tid}.part"));
+            match File::create(&path) {
+                Ok(file) => {
+                    r.stored += size;
+                    uploads.insert(tid, Upload { file, path, name, size, got: 0 });
+                }
+                Err(_) => send(reply, wire::json(&json!({ "t": "attach.err", "tid": tid, "error": "The host couldn't store the file." }))),
+            }
+        }
+        "attach.end" => {
+            let tid = msg["tid"].as_u64().unwrap_or(0) as u32;
+            let Some(u) = uploads.remove(&tid) else { return };
+            drop(u.file);
+            if u.got != u.size {
+                r.stored = r.stored.saturating_sub(u.size);
+                let _ = std::fs::remove_file(&u.path);
+                send(reply, wire::json(&json!({ "t": "attach.err", "tid": tid, "error": "The upload was cut short." })));
+                return;
+            }
+            let aid = r.next_attachment;
+            r.next_attachment += 1;
+            let path = r.dir.join(format!("a{aid}"));
+            let _ = std::fs::rename(&u.path, &path);
+            r.attachments.insert(aid, Attachment { path, name: u.name.clone(), size: u.size });
+            let text = clean(msg["text"].as_str().unwrap_or(""), MAX_TEXT);
+            let name = r.members[me].name.clone();
+            let out = json!({
+                "t": "chat", "id": r.next_msg, "from": id, "name": name, "text": text, "ts": now(),
+                "file": { "aid": aid, "name": u.name, "size": u.size, "image": is_image(&u.name) },
+            });
+            r.next_msg += 1;
+            push_history(r, out.clone());
+            broadcast(r, &out);
+            send(reply, wire::json(&json!({ "t": "attach.ok", "tid": tid })));
+        }
+        "attach.get" => {
+            let aid = msg["aid"].as_u64().unwrap_or(0) as u32;
+            let out = r.members[me].files();
+            let Some(a) = r.attachments.get(&aid) else {
+                send(&out, wire::json(&json!({ "t": "attach.missing", "aid": aid })));
+                return;
+            };
+            let (path, name, size) = (a.path.clone(), a.name.clone(), a.size);
+            // Streamed from its own thread, waiting on the member's queue
+            // rather than dropping chunks the way voice does.
+            std::thread::spawn(move || {
+                let Ok(mut f) = File::open(&path) else { return };
+                let start = json!({ "t": "attach.start", "aid": aid, "name": name, "size": size });
+                if out.send(Out::Frame(wire::json(&start))).is_err() {
+                    return;
+                }
+                let mut buf = vec![0u8; wire::FILE_CHUNK];
+                loop {
+                    match f.read(&mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            if out.send(Out::Frame(wire::binary(wire::FILE, &aid.to_be_bytes(), &buf[..n]))).is_err() {
+                                return;
+                            }
+                        }
+                    }
+                }
+                let _ = out.send(Out::Frame(wire::json(&json!({ "t": "attach.done", "aid": aid }))));
+            });
+        }
+        _ => {}
+    }
+}
+
 fn serve_member(stream: TcpStream, room: &Arc<Mutex<Room>>, host_token: &str) {
     let mut reader = stream;
     reader.set_read_timeout(Some(Duration::from_secs(30))).ok();
     reader.set_nodelay(true).ok();
 
-    // The first frame must be a hello with a name.
+    // The first frame must be a hello with a name, or a side connection.
     let Ok((wire::JSON, body)) = wire::read(&mut reader) else { return };
     let Ok(hello) = serde_json::from_slice::<Value>(&body) else { return };
+    if hello["t"] == "channel" {
+        return serve_side(reader, &hello, room);
+    }
     if hello["t"] != "hello" {
         return;
     }
@@ -228,7 +432,7 @@ fn serve_member(stream: TcpStream, room: &Arc<Mutex<Room>>, host_token: &str) {
     let (tx, rx) = sync_channel::<Out>(QUEUE);
     wire::writer(writer_stream, rx);
 
-    let (id, dir) = {
+    let id = {
         let mut r = room.lock().unwrap();
         let mut name = clean(hello["name"].as_str().unwrap_or(""), MAX_NAME);
         if name.is_empty() {
@@ -243,6 +447,7 @@ fn serve_member(stream: TcpStream, room: &Arc<Mutex<Room>>, host_token: &str) {
         let id = r.next_id;
         r.next_id = r.next_id.wrapping_add(1).max(1);
         let host = hello["host"].as_str() == Some(host_token);
+        let key = token();
         r.members.push(Member {
             id,
             name: name.clone(),
@@ -255,14 +460,19 @@ fn serve_member(stream: TcpStream, room: &Arc<Mutex<Room>>, host_token: &str) {
             rtt: None,
             screen: None,
             watching: None,
+            video_gap: true,
+            key_asked: None,
+            key: key.clone(),
             tx: tx.clone(),
+            video_tx: None,
+            files_tx: None,
         });
-        let welcome = json!({ "t": "welcome", "you": id, "name": name, "room": r.name, "history": r.history, "host": host });
+        let welcome = json!({ "t": "welcome", "you": id, "name": name, "room": r.name, "history": r.history, "host": host, "key": key });
         send(&tx, wire::json(&welcome));
         let members = members_json(&r);
         broadcast(&r, &members);
         system(&mut r, format!("{name} joined the room"));
-        (id, r.dir.clone())
+        id
     };
 
     let mut uploads: HashMap<u32, Upload> = HashMap::new();
@@ -270,27 +480,9 @@ fn serve_member(stream: TcpStream, room: &Arc<Mutex<Room>>, host_token: &str) {
     loop {
         let Ok((kind, body)) = wire::read(&mut reader) else { break };
 
-        // Attachment chunks are written outside the room lock.
+        // Attachments from a member without a files connection.
         if kind == wire::FILE {
-            if body.len() < 4 {
-                continue;
-            }
-            let tid = u32::from_be_bytes([body[0], body[1], body[2], body[3]]);
-            let mut failed = None;
-            if let Some(u) = uploads.get_mut(&tid) {
-                u.got += (body.len() - 4) as u64;
-                if u.got > u.size {
-                    failed = Some("The file was bigger than it said.");
-                } else if u.file.write_all(&body[4..]).is_err() {
-                    failed = Some("The host couldn't store the file.");
-                }
-            }
-            if let Some(why) = failed {
-                if let Some(u) = uploads.remove(&tid) {
-                    let _ = std::fs::remove_file(&u.path);
-                }
-                send(&tx, wire::json(&json!({ "t": "attach.err", "tid": tid, "error": why })));
-            }
+            file_chunk(&mut uploads, &body, &tx);
             continue;
         }
 
@@ -308,13 +500,8 @@ fn serve_member(stream: TcpStream, room: &Arc<Mutex<Room>>, host_token: &str) {
             continue;
         }
         if kind == wire::VIDEO {
-            if r.members[me].screen.is_none() || body.len() < 10 {
-                continue;
-            }
-            let frame = wire::binary(wire::VIDEO, &id.to_be_bytes(), &body);
-            for other in r.members.iter().filter(|o| o.watching == Some(id)) {
-                send(&other.tx, frame.clone());
-            }
+            // From a member without a video connection.
+            relay_video(&mut r, me, &body);
             continue;
         }
         let Ok(msg) = serde_json::from_slice::<Value>(&body) else { continue };
@@ -387,100 +574,19 @@ fn serve_member(stream: TcpStream, room: &Arc<Mutex<Room>>, host_token: &str) {
             "watch" => {
                 let target = msg["id"].as_u64().map(|v| v as u16).filter(|t| *t != id);
                 r.members[me].watching = target;
-                // A new viewer needs a key frame to start from.
-                if let Some(s) = target.and_then(|t| r.members.iter().find(|m| m.id == t && m.screen.is_some())) {
-                    send(&s.tx, wire::json(&json!({ "t": "keyframe" })));
+                // A new viewer starts from a key frame.
+                r.members[me].video_gap = true;
+                if let Some(t) = target {
+                    ask_key(&mut r, t, true);
                 }
             }
             "keyframe" => {
-                let target = msg["id"].as_u64().map(|v| v as u16);
-                if let Some(s) = r.members.iter().find(|m| Some(m.id) == target && m.screen.is_some()) {
-                    send(&s.tx, wire::json(&json!({ "t": "keyframe" })));
+                if let Some(t) = msg["id"].as_u64().map(|v| v as u16) {
+                    ask_key(&mut r, t, false);
                 }
             }
 
-            // -------------------------------------------------- attachments
-            "attach.begin" => {
-                let tid = msg["tid"].as_u64().unwrap_or(0) as u32;
-                let size = msg["size"].as_u64().unwrap_or(0);
-                let name = clean(msg["name"].as_str().unwrap_or("file"), 120);
-                let err = if size == 0 {
-                    Some("That file is empty.".to_string())
-                } else if size > MAX_ATTACHMENT {
-                    Some(format!("Files up to {} MB can be sent in chat.", MAX_ATTACHMENT / 1024 / 1024))
-                } else if r.stored + size > MAX_ROOM_FILES {
-                    Some("This room has no room left for attachments.".to_string())
-                } else {
-                    None
-                };
-                if let Some(error) = err {
-                    send(&tx, wire::json(&json!({ "t": "attach.err", "tid": tid, "error": error })));
-                    continue;
-                }
-                let path = dir.join(format!("up-{id}-{tid}.part"));
-                match File::create(&path) {
-                    Ok(file) => {
-                        r.stored += size;
-                        uploads.insert(tid, Upload { file, path, name, size, got: 0 });
-                    }
-                    Err(_) => send(&tx, wire::json(&json!({ "t": "attach.err", "tid": tid, "error": "The host couldn't store the file." }))),
-                }
-            }
-            "attach.end" => {
-                let tid = msg["tid"].as_u64().unwrap_or(0) as u32;
-                let Some(u) = uploads.remove(&tid) else { continue };
-                drop(u.file);
-                if u.got != u.size {
-                    r.stored = r.stored.saturating_sub(u.size);
-                    let _ = std::fs::remove_file(&u.path);
-                    send(&tx, wire::json(&json!({ "t": "attach.err", "tid": tid, "error": "The upload was cut short." })));
-                    continue;
-                }
-                let aid = r.next_attachment;
-                r.next_attachment += 1;
-                let path = r.dir.join(format!("a{aid}"));
-                let _ = std::fs::rename(&u.path, &path);
-                r.attachments.insert(aid, Attachment { path, name: u.name.clone(), size: u.size });
-                let text = clean(msg["text"].as_str().unwrap_or(""), MAX_TEXT);
-                let name = r.members[me].name.clone();
-                let out = json!({
-                    "t": "chat", "id": r.next_msg, "from": id, "name": name, "text": text, "ts": now(),
-                    "file": { "aid": aid, "name": u.name, "size": u.size, "image": is_image(&u.name) },
-                });
-                r.next_msg += 1;
-                push_history(&mut r, out.clone());
-                broadcast(&r, &out);
-                send(&tx, wire::json(&json!({ "t": "attach.ok", "tid": tid })));
-            }
-            "attach.get" => {
-                let aid = msg["aid"].as_u64().unwrap_or(0) as u32;
-                let Some(a) = r.attachments.get(&aid) else {
-                    send(&tx, wire::json(&json!({ "t": "attach.missing", "aid": aid })));
-                    continue;
-                };
-                let (path, name, size, out) = (a.path.clone(), a.name.clone(), a.size, tx.clone());
-                // Streamed from its own thread, waiting on the member's queue
-                // rather than dropping chunks the way voice does.
-                std::thread::spawn(move || {
-                    let Ok(mut f) = File::open(&path) else { return };
-                    let start = json!({ "t": "attach.start", "aid": aid, "name": name, "size": size });
-                    if out.send(Out::Frame(wire::json(&start))).is_err() {
-                        return;
-                    }
-                    let mut buf = vec![0u8; wire::FILE_CHUNK];
-                    loop {
-                        match f.read(&mut buf) {
-                            Ok(0) | Err(_) => break,
-                            Ok(n) => {
-                                if out.send(Out::Frame(wire::binary(wire::FILE, &aid.to_be_bytes(), &buf[..n]))).is_err() {
-                                    return;
-                                }
-                            }
-                        }
-                    }
-                    let _ = out.send(Out::Frame(wire::json(&json!({ "t": "attach.done", "aid": aid }))));
-                });
-            }
+            "attach.begin" | "attach.end" | "attach.get" => attachment(&mut r, me, &msg, &mut uploads, &tx),
 
             // ------------------------------------------------- host controls
             "mod" => {
@@ -516,7 +622,7 @@ fn serve_member(stream: TcpStream, room: &Arc<Mutex<Room>>, host_token: &str) {
                         let m = r.members.remove(t);
                         let bye = json!({ "t": "closed", "reason": format!("{host_name} disconnected you from the room.") });
                         let _ = m.tx.try_send(Out::Frame(wire::json(&bye)));
-                        let _ = m.tx.try_send(Out::Close);
+                        m.close();
                         for o in r.members.iter_mut().filter(|o| o.watching == Some(m.id)) {
                             o.watching = None;
                         }
@@ -534,22 +640,97 @@ fn serve_member(stream: TcpStream, room: &Arc<Mutex<Room>>, host_token: &str) {
     // Gone: a closed connection, garbage or silence past IDLE. (A kicked member
     // was already removed and announced.)
     let _ = reader.shutdown(Shutdown::Both);
-    for u in uploads.into_values() {
-        let _ = std::fs::remove_file(&u.path);
-        if let Ok(mut r) = room.lock() {
-            r.stored = r.stored.saturating_sub(u.size);
-        }
-    }
+    drop_uploads(room, uploads);
     let mut r = room.lock().unwrap();
     if let Some(pos) = r.members.iter().position(|m| m.id == id) {
         let m = r.members.remove(pos);
-        let _ = m.tx.try_send(Out::Close);
+        m.close();
         for o in r.members.iter_mut().filter(|o| o.watching == Some(id)) {
             o.watching = None;
         }
         let members = members_json(&r);
         broadcast(&r, &members);
         system(&mut r, format!("{} left the room", m.name));
+    }
+}
+
+/// A member's video or files connection. It carries only that traffic, and
+/// lasts as long as the member does.
+fn serve_side(mut reader: TcpStream, hello: &Value, room: &Arc<Mutex<Room>>) {
+    let video = match hello["kind"].as_str() {
+        Some("video") => true,
+        Some("files") => false,
+        _ => return,
+    };
+    let id = hello["id"].as_u64().unwrap_or(0) as u16;
+    let key = hello["key"].as_str().unwrap_or("");
+    let Ok(writer_stream) = reader.try_clone() else { return };
+    let (tx, rx) = sync_channel::<Out>(if video { VIDEO_QUEUE } else { FILES_QUEUE });
+    let serial = NEXT_SIDE.fetch_add(1, Ordering::Relaxed);
+    {
+        let mut r = room.lock().unwrap();
+        let Some(m) = r.members.iter_mut().find(|m| m.id == id && !key.is_empty() && m.key == key) else { return };
+        // Queued before the connection is handed out, so it's the first thing sent.
+        send(&tx, wire::json(&json!({ "t": "channel.ok" })));
+        let slot = if video { &mut m.video_tx } else { &mut m.files_tx };
+        if let Some((_, old)) = slot.replace((serial, tx.clone())) {
+            let _ = old.try_send(Out::Close);
+        }
+        if video {
+            // Whatever they're watching now comes this way, from a key frame.
+            m.video_gap = true;
+            if let Some(t) = m.watching {
+                ask_key(&mut r, t, true);
+            }
+        }
+    }
+    wire::writer(writer_stream, rx);
+
+    let mut uploads: HashMap<u32, Upload> = HashMap::new();
+    reader.set_read_timeout(Some(IDLE)).ok();
+    loop {
+        let (kind, body) = match wire::read(&mut reader) {
+            Ok(f) => f,
+            // Quiet is normal here (no share, no files); the main connection
+            // decides when the member is gone.
+            Err(e) if matches!(e.kind(), ErrorKind::TimedOut | ErrorKind::WouldBlock) => {
+                if room.lock().unwrap().members.iter().any(|m| m.id == id) {
+                    continue;
+                }
+                break;
+            }
+            Err(_) => break,
+        };
+        if kind == wire::FILE && !video {
+            file_chunk(&mut uploads, &body, &tx);
+            continue;
+        }
+        let mut r = room.lock().unwrap();
+        let Some(me) = r.members.iter().position(|m| m.id == id) else { break };
+        match kind {
+            wire::VIDEO if video => relay_video(&mut r, me, &body),
+            wire::JSON if !video => {
+                if let Ok(msg) = serde_json::from_slice::<Value>(&body) {
+                    attachment(&mut r, me, &msg, &mut uploads, &tx);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let _ = reader.shutdown(Shutdown::Both);
+    drop_uploads(room, uploads);
+    let _ = tx.try_send(Out::Close);
+    // Back to the main connection, unless a newer side connection took over.
+    let mut r = room.lock().unwrap();
+    if let Some(m) = r.members.iter_mut().find(|m| m.id == id) {
+        let slot = if video { &mut m.video_tx } else { &mut m.files_tx };
+        if slot.as_ref().is_some_and(|(s, _)| *s == serial) {
+            *slot = None;
+            if video {
+                m.video_gap = true;
+            }
+        }
     }
 }
 

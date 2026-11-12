@@ -652,7 +652,10 @@ impl App {
             "voip.video" => {
                 use base64::Engine as _;
                 if let Ok(data) = base64::engine::general_purpose::STANDARD.decode(s("data")) {
-                    self.voip.video(msg["key"].as_bool().unwrap_or(false), msg["ts"].as_u64().unwrap_or(0), &data);
+                    // Fell behind: the page's encoder makes a key frame to recover from.
+                    if self.voip.video(msg["key"].as_bool().unwrap_or(false), msg["ts"].as_u64().unwrap_or(0), &data) {
+                        send(webview, json!({ "type": "keyframe" }));
+                    }
                 }
             }
             "voip.watch" => self.voip.watch(msg["id"].as_u64().map(|v| v as u16)),

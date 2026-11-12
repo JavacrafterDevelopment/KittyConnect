@@ -94,8 +94,13 @@ runtime into a `WebView2\` folder beside the exe.
   loopback. Names, chat and voice (48 kHz Opus, 64 kbit/s per speaker,
   sent only while you talk) are all frames on that one connection.
   Voice is relayed by the room, not mixed; each member mixes what they hear.
-  Screen video (WebCodecs, in the page) and attachments are frames on the same
-  connection; video goes only to members watching that share.
+  Screen video (WebCodecs, in the page) and attachments each get their own
+  connection to the room, so a big key frame or a download never queues in
+  front of voice (TCP delivers in order, so anything ahead on the same
+  connection delays what's behind it). Video goes only to members watching that
+  share. When a viewer's link can't keep up, frames are dropped rather than
+  queued, and their picture resumes at the next key frame, so it stays live
+  instead of drifting behind.
 - The UI is served from `kc://localhost` (WebView2 loads it as
   `https://kc.localhost`, a secure origin, which screen capture and WebCodecs
   need). Nothing is fetched from the network; the page and image previews come

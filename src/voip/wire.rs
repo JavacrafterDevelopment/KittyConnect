@@ -1,12 +1,20 @@
-//! Room protocol framing. Everything in a room (names, chat, voice) travels as
-//! these frames over one TCP connection per member, and that connection is
-//! carried by the TailCat tunnel: WireGuard-encrypted end to end.
+//! Room protocol framing. Everything in a room travels as these frames over
+//! TCP connections carried by the TailCat tunnel: WireGuard-encrypted end to end.
+//!
+//! Each member has a main connection for names, chat and voice, and (from 0.5)
+//! two side connections: one for screen video, one for attachments. TCP
+//! delivers in order, so a lost packet or a big key frame holds up everything
+//! behind it on the same connection; keeping video and files off the main one
+//! means they can't delay voice. A side connection opens with
+//! {"t": "channel", "kind": "video" | "files", "id": <member>, "key": <from welcome>}
+//! and is answered {"t": "channel.ok"}. Without side connections (an older room
+//! or member), everything still works on the main one.
 //!
 //!   [kind: u8][length: u32 BE][payload]
 //!
 //! kind 1: a JSON control message ({"t": "hello" | "chat" | ...}).
-//! kind 2: voice. Member → room: [seq u32][ADPCM frame].
-//!         Room → member: [from u16][seq u32][ADPCM frame].
+//! kind 2: voice. Member → room: [seq u32][Opus packet].
+//!         Room → member: [from u16][seq u32][Opus packet].
 //! kind 3: a file chunk. Member → room: [upload id u32][bytes].
 //!         Room → member: [attachment id u32][bytes].
 //! kind 4: screen video. Member → room: [flags u8][timestamp µs u64][encoded chunk].
