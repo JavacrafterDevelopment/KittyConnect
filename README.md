@@ -119,6 +119,27 @@ TailCat forwards **TCP** ports. Games that only use UDP won't work this way.
 - The **host** can also **Mute for everyone** (their voice stops reaching anyone,
   they're told, and the chat says so for everyone) and **Disconnect from room**.
 
+**Mounts**: share a folder that friends open like a drive.
+- *Share*: **Choose folder**, then tick **Let them add, change and delete files
+  and folders** if they may (off, they can only open and copy files), and
+  **Start sharing**. Send the code (`kitty:mount:…`). Several folders can be
+  shared at once, each with its own code. Only the folder you chose, and
+  what's in it, can be reached: links in it that lead elsewhere aren't
+  followed.
+- *Open*: paste the code and press **Connect**. Then **Map as drive** (Windows:
+  a drive letter in Explorer) or **Mount** (Mac: in Finder's sidebar), or
+  **Browse here** to look through it and download (or upload, if allowed)
+  inside KittyConnect. **Disconnect** unmounts it first.
+- Windows opens files up to 50 MB from a drive like this, unless that's
+  raised: **Allow big files** does that (to 4 GB, Windows' most; it asks for
+  an administrator's OK). Bigger files: download them from **Browse here**.
+  Windows opens a file by fetching all of it first, so a big video takes a
+  while; documents and photos open quickly. Microsoft has said this part of
+  Windows (its WebDAV client) is deprecated, though it's still in Windows 10
+  and 11; Browse here works either way. Macs have neither limit.
+- It's as fast as File Share over the same connection: on Direct, mostly the
+  host's upload speed; on Relay, much slower.
+
 **Connection status.** Everything you're connected to shows **Direct** (peer to
 peer) or **Relay** (through a TailCat relay, still end-to-end encrypted) with
 the round-trip time, and the name of whoever you joined. When you're the one
@@ -239,6 +260,17 @@ runtime into a `WebView2\` folder beside the exe.
   the same message to their own Minecraft on `127.0.0.1:4445`, pointing at the
   local end of the tunnel. Nothing about it leaves either PC except through
   the tunnel.
+- **Mounts**: the host runs a WebDAV server (the `dav-server` crate) on
+  `127.0.0.1` for the shared folder, and `tailcat serve`s that port beside the
+  beacon. WebDAV is what Windows ("Map network drive", `net use`) and macOS
+  ("Connect to Server", `mount volume`) speak without installing anything.
+  Read only allows only reading methods; read and write adds the rest, with
+  real locks (Finder and Office lock before writing, so two people can't
+  overwrite each other). Every path is checked to stay inside the folder,
+  links included, so nothing outside it can be read, listed or written. The
+  built-in browser uses two endpoints of its own on the same server
+  (`/.kittyconnect/info` and `/list`). Mounts are undone before the tunnel
+  closes, and any a crash left behind are undone at the next start.
 - The UI is served from `kc://localhost` (WebView2 loads it as
   `https://kc.localhost`, a secure origin, which screen capture and WebCodecs
   need). Nothing is fetched from the network; the page and image previews come

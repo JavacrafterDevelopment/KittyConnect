@@ -262,6 +262,7 @@ impl Voip {
         let c = match code::parse(input) {
             Ok(c) if c.kind == Kind::Voip => c,
             Ok(c) if c.kind == Kind::File => return self.error = "That's a file share code. Paste it in the File Share tab.".into(),
+            Ok(c) if c.kind == Kind::Mount => return self.error = "That's a mount code. Paste it in the Mounts tab.".into(),
             Ok(_) => return self.error = "That's a port code. Ask for the room code (it starts with kitty:voip:).".into(),
             Err(e) => return self.error = e,
         };

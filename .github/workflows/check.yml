@@ -66,6 +66,11 @@ jobs:
       - name: Test
         run: cargo test --locked
 
+      # A shared folder mounted with macOS's own WebDAV file system (what
+      # Finder uses), then read and written through it.
+      - name: Mount test (macOS WebDAV)
+        run: cargo test --locked macos_mounts_it -- --ignored
+
       - name: Build (Apple Silicon and Intel, universal)
         run: |
           cargo build --release --locked --target aarch64-apple-darwin

@@ -6,6 +6,7 @@ mod code;
 mod firewall;
 mod icon;
 mod lan;
+mod mount;
 mod peers;
 mod portable;
 mod share;
@@ -68,6 +69,21 @@ pub enum UserEvent {
     Firewall(Result<usize, String>),
     /// Whether something is listening on each port checked (see `App::probe`).
     Probed(Vec<(u16, bool)>),
+    /// A joined mount, by key: what the host said about it.
+    MountInfo(u64, Result<mount::Info, String>),
+    /// A joined mount was mounted (Some) or unmounted (None), or couldn't be.
+    MountDone(u64, Result<Option<mount::Mounted>, String>),
+    /// A folder's contents for the built-in browser: (key, path, entries).
+    MountList(u64, String, Result<Vec<mount::Entry>, String>),
+    /// A download or upload of a joined mount: (key, transfer id, what happened).
+    MountXfer(u64, u64, Xfer),
+    /// The largest file Windows' WebDAV opens (None: no limit here, or unknown).
+    WebdavLimit(Option<u64>),
+}
+
+pub enum Xfer {
+    Progress(u64, u64),
+    Done(Result<Option<PathBuf>, String>),
 }
 
 #[derive(Clone, Copy)]
@@ -216,11 +232,58 @@ struct PortHost {
     peers: Peers,
     /// A one-click game server ("minecraft"), or None for a manual port.
     game: Option<String>,
+    /// A shared folder (Mounts tab): its WebDAV server is the port served.
+    mount: Option<MountShare>,
     /// Its ports have been checked for a server at least once.
     probed: bool,
     /// For Minecraft: what friends see, once it's showing.
     lan_note: String,
     log: Log,
+}
+
+/// A folder shared from the Mounts tab.
+struct MountShare {
+    dir: PathBuf,
+    write: bool,
+    /// Held so the server runs while the share is on; dropping it stops it.
+    #[allow(dead_code)]
+    server: mount::MountServer,
+}
+
+/// A joined mount: what the host said, and how it's open on this PC.
+#[derive(Default)]
+struct MountJoin {
+    info: Option<mount::Info>,
+    asking: bool,
+    asked_at: Option<Instant>,
+    mounted: Option<mount::Mounted>,
+    /// "mounting", "unmounting", or "".
+    busy: &'static str,
+    error: String,
+    browse: Option<Browse>,
+    transfers: Vec<Transfer>,
+}
+
+/// The built-in browser's place in a joined mount.
+struct Browse {
+    path: String,
+    entries: Vec<mount::Entry>,
+    loading: bool,
+    error: String,
+}
+
+struct Transfer {
+    id: u64,
+    name: String,
+    up: bool,
+    done: u64,
+    total: u64,
+    /// "going", "done" or "error".
+    st: &'static str,
+    error: String,
+    path: Option<PathBuf>,
+    speed: Speed,
+    cancel: Arc<AtomicBool>,
 }
 
 impl PortHost {
@@ -263,7 +326,17 @@ struct PortJoin {
     worlds: Vec<lan::World>,
     lan_next: Instant,
     lan_asking: bool,
+    /// A joined mount (Mounts tab).
+    mount: Option<MountJoin>,
     log: Log,
+}
+
+/// Where a join comes from: the forms differ in what codes they take.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum JoinFrom {
+    Manual,
+    Game,
+    Mount,
 }
 
 /// A joined port that hasn't heard from the host in this long says so (it
@@ -323,9 +396,21 @@ struct App {
     listening: HashMap<u16, bool>,
     probing: bool,
     probe_at: Instant,
+    /// Mounts tab: the folder chosen to share next, and the forms' errors.
+    mount_pick: Option<PathBuf>,
+    mount_host_error: String,
+    mount_join_error: String,
+    /// Windows' WebDAV file size limit (None on a Mac, or unknown).
+    webdav_limit: Option<u64>,
+    next_xfer: u64,
 }
 
 fn main() {
+    // Run as administrator by "Allow big files" (Mounts): raise Windows'
+    // WebDAV file size limit, then exit. Nothing else.
+    if std::env::args().any(|a| a == "--kc-webdav-big-files") {
+        std::process::exit(mount::raise_limit_elevated());
+    }
     // A fixed-version WebView2 runtime in a `WebView2` folder beside the exe is
     // used in preference to the system one, for machines without Edge.
     #[cfg(windows)]
@@ -407,9 +492,12 @@ fn main() {
 
     // Unpack TailCat in the background so the first Start is quick, and end
     // any TailCat an earlier run that crashed left behind (macOS).
-    std::thread::spawn(|| {
+    let limits = proxy.clone();
+    std::thread::spawn(move || {
         tailcat::sweep_leftovers();
+        mount::sweep_leftovers();
         let _ = tailcat::prepare();
+        let _ = limits.send_event(UserEvent::WebdavLimit(mount::size_limit()));
     });
     let ticker = proxy.clone();
     std::thread::spawn(move || {
@@ -482,6 +570,14 @@ fn main() {
             Event::UserEvent(UserEvent::Heard { share, heard }) => app.on_heard(share, heard),
             Event::UserEvent(UserEvent::Lan(key, result)) => app.on_lan(key, result),
             Event::UserEvent(UserEvent::Probed(found)) => app.on_probed(found),
+            Event::UserEvent(UserEvent::MountInfo(key, r)) => app.on_mount_info(key, r),
+            Event::UserEvent(UserEvent::MountDone(key, r)) => app.on_mount_done(key, r),
+            Event::UserEvent(UserEvent::MountList(key, path, r)) => app.on_mount_list(key, path, r),
+            Event::UserEvent(UserEvent::MountXfer(key, id, x)) => app.on_mount_xfer(key, id, x),
+            Event::UserEvent(UserEvent::WebdavLimit(limit)) => {
+                app.webdav_limit = limit;
+                true
+            }
             Event::UserEvent(UserEvent::Firewall(result)) => {
                 match result {
                     Ok(_) => app.set_status(
@@ -700,6 +796,11 @@ impl App {
             listening: HashMap::new(),
             probing: false,
             probe_at: Instant::now(),
+            mount_pick: None,
+            mount_host_error: String::new(),
+            mount_join_error: String::new(),
+            webdav_limit: None,
+            next_xfer: 1,
         }
     }
 
@@ -872,12 +973,17 @@ impl App {
                     self.start_port_host(&s("port"), Some(game));
                 }
             }
-            "game.join" => self.start_port_join(&s("code"), "", &[], false, true),
+            "game.join" => self.start_port_join(&s("code"), "", &[], false, JoinFrom::Game),
             "port.hostStop" => {
                 let key = msg["key"].as_u64().unwrap_or(0);
                 if let Some(h) = self.hosts.iter().find(|h| h.key == key) {
-                    let list = h.ports.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", ");
-                    self.set_status(format!("Closed port {list}. Its code no longer works."), "idle");
+                    if let Some(m) = &h.mount {
+                        let name = m.dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                        self.set_status(format!("Stopped sharing {name}. Its code no longer works."), "idle");
+                    } else {
+                        let list = h.ports.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", ");
+                        self.set_status(format!("Closed port {list}. Its code no longer works."), "idle");
+                    }
                 }
                 self.hosts.retain(|h| h.key != key);
             }
@@ -886,7 +992,7 @@ impl App {
                     .as_array()
                     .map(|a| a.iter().map(|v| v.as_u64().unwrap_or(0) as u16).collect())
                     .unwrap_or_default();
-                self.start_port_join(&s("code"), &s("ports"), &locals, msg["lan"].as_bool().unwrap_or(false), false);
+                self.start_port_join(&s("code"), &s("ports"), &locals, msg["lan"].as_bool().unwrap_or(false), JoinFrom::Manual);
             }
             "port.joinStop" => {
                 let key = msg["key"].as_u64().unwrap_or(0);
@@ -895,6 +1001,66 @@ impl App {
                 }
                 self.joins.retain(|j| j.key != key);
                 self.set_status("Disconnected", "idle");
+            }
+
+            // ------------------------------------------------------ mounts
+            "mount.pick" => {
+                if let Some(dir) = rfd::FileDialog::new().set_title("Choose a folder to share").set_parent(window).pick_folder() {
+                    self.mount_host_error.clear();
+                    self.mount_pick = Some(dir);
+                }
+            }
+            "mount.host" => self.start_mount_host(msg["write"].as_bool().unwrap_or(false)),
+            "mount.join" => {
+                self.start_port_join(&s("code"), "", &[], false, JoinFrom::Mount);
+                self.mount_join_error = std::mem::take(&mut self.join_error);
+            }
+            "mount.map" => self.mount_map(msg["key"].as_u64().unwrap_or(0)),
+            "mount.unmap" => self.mount_unmap(msg["key"].as_u64().unwrap_or(0)),
+            "mount.open" => {
+                let key = msg["key"].as_u64().unwrap_or(0);
+                if let Some(m) = self.joins.iter().find(|j| j.key == key).and_then(|j| j.mount.as_ref()?.mounted.as_ref()) {
+                    mount::open(m);
+                }
+            }
+            // No path: stay where it is (Refresh).
+            "mount.browse" => self.mount_browse(msg["key"].as_u64().unwrap_or(0), msg["path"].as_str().map(str::to_string)),
+            "mount.browseClose" => {
+                let key = msg["key"].as_u64().unwrap_or(0);
+                if let Some(m) = self.joins.iter_mut().find(|j| j.key == key).and_then(|j| j.mount.as_mut()) {
+                    m.browse = None;
+                }
+            }
+            "mount.get" => self.mount_get(msg["key"].as_u64().unwrap_or(0), &s("path"), msg["dir"].as_bool().unwrap_or(false)),
+            "mount.put" => {
+                let key = msg["key"].as_u64().unwrap_or(0);
+                if let Some(files) = rfd::FileDialog::new().set_title("Upload to the shared folder").set_parent(window).pick_files() {
+                    self.mount_put(key, &s("path"), files);
+                }
+            }
+            "mount.cancel" => {
+                let (key, id) = (msg["key"].as_u64().unwrap_or(0), msg["id"].as_u64().unwrap_or(0));
+                if let Some(t) = self.joins.iter().find(|j| j.key == key).and_then(|j| j.mount.as_ref()?.transfers.iter().find(|t| t.id == id)) {
+                    t.cancel.store(true, Ordering::Relaxed);
+                }
+            }
+            "mount.reveal" => {
+                let (key, id) = (msg["key"].as_u64().unwrap_or(0), msg["id"].as_u64().unwrap_or(0));
+                if let Some(p) = self.joins.iter().find(|j| j.key == key).and_then(|j| j.mount.as_ref()?.transfers.iter().find(|t| t.id == id)?.path.clone()) {
+                    reveal_in_shell(&p);
+                }
+            }
+            "mount.bigFiles" => {
+                let proxy = self.proxy.clone();
+                self.set_status("Waiting for Windows to allow bigger files…", "busy");
+                std::thread::spawn(move || {
+                    #[cfg(windows)]
+                    {
+                        let me = std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_default();
+                        let _ = firewall::run_elevated(&me, "--kc-webdav-big-files", "change how big a file Windows' WebDAV opens");
+                    }
+                    let _ = proxy.send_event(UserEvent::WebdavLimit(mount::size_limit()));
+                });
             }
 
             // ------------------------------------------------------- voip
@@ -1054,6 +1220,7 @@ impl App {
             Ok(c) if c.kind == Kind::Game => {
                 return self.fail_recv("That's a game server code. Paste it in Port Forward, under Game servers.".into())
             }
+            Ok(c) if c.kind == Kind::Mount => return self.fail_recv("That's a mount code. Paste it in the Mounts tab.".into()),
             Ok(c) if c.kind == Kind::Voip => return self.fail_recv("That's a room code. Paste it in the VOIP tab.".into()),
             Ok(_) => return self.fail_recv("That's a port code. Paste it in the Port Forward tab, or ask for the file code (it starts with kitty:file:).".into()),
             Err(e) => return self.fail_recv(e),
@@ -1168,6 +1335,7 @@ impl App {
                     link: Link::default(),
                     peers: Peers::default(),
                     game,
+                    mount: None,
                     probed: false,
                     lan_note: String::new(),
                     log: Log::default(),
@@ -1178,16 +1346,23 @@ impl App {
         }
     }
 
-    /// `game_mode`: joined from Game servers, where the code carries the game
-    /// and its port, and a busy local port is swapped for a free one.
-    fn start_port_join(&mut self, input: &str, ports_input: &str, locals: &[u16], lan: bool, game_mode: bool) {
+    /// `from` says which form: Game servers and Mounts take codes that carry
+    /// their port, and pick a free local port themselves.
+    fn start_port_join(&mut self, input: &str, ports_input: &str, locals: &[u16], lan: bool, from: JoinFrom) {
         self.join_error.clear();
+        let game_mode = from != JoinFrom::Manual;
         let c = match code::parse(input) {
             Ok(c) if c.kind == Kind::File => {
                 return self.join_error = "That's a file share code. Paste it in the File Share tab.".into()
             }
             Ok(c) if c.kind == Kind::Voip => return self.join_error = "That's a room code. Paste it in the VOIP tab.".into(),
-            Ok(c) if game_mode && c.kind != Kind::Game => {
+            Ok(c) if from != JoinFrom::Mount && c.kind == Kind::Mount => {
+                return self.join_error = "That's a mount code. Paste it in the Mounts tab.".into()
+            }
+            Ok(c) if from == JoinFrom::Mount && c.kind != Kind::Mount => {
+                return self.join_error = "That isn't a mount code. Ask for the code from the Mounts tab (it starts with kitty:mount:).".into()
+            }
+            Ok(c) if from == JoinFrom::Game && c.kind != Kind::Game => {
                 return self.join_error =
                     "That's a manual port code. Paste it in Manual port forward, or ask for the game code (it starts with kitty:game.).".into()
             }
@@ -1213,8 +1388,9 @@ impl App {
             if maps.iter().any(|(l, _)| *l == local) {
                 return self.join_error = format!("Local port {local} is used twice. Give each one its own number.");
             }
-            // A game join picks another port itself; Minecraft finds it through LAN anyway.
-            if game_mode && !port_free(local, lan) {
+            // A game join picks another port itself (Minecraft finds it through
+            // LAN anyway); a mount always does, as nobody types its address.
+            if from == JoinFrom::Mount || (game_mode && !port_free(local, lan)) {
                 local = match free_port() {
                     Ok(p) => p,
                     Err(e) => return self.join_error = e,
@@ -1261,6 +1437,7 @@ impl App {
                     worlds: Vec::new(),
                     lan_next: Instant::now() + Duration::from_secs(3),
                     lan_asking: false,
+                    mount: (from == JoinFrom::Mount).then(MountJoin::default),
                     log: Log::default(),
                 });
                 self.set_status("Reaching your friend through TailCat…", "busy");
@@ -1485,6 +1662,7 @@ impl App {
             self.spawn_ping(PingTarget::Join(key), port, request);
         }
         changed |= self.games_tick(now);
+        self.mounts_tick(now);
         changed |= self.voip.tick();
         changed
     }
@@ -1590,7 +1768,7 @@ impl App {
         self.listening.extend(found);
         let mut changed = false;
         // A manual port warns until something is running on every one of its ports.
-        for h in self.hosts.iter_mut().filter(|h| h.proc.is_some() && h.game.is_none()) {
+        for h in self.hosts.iter_mut().filter(|h| h.proc.is_some() && h.game.is_none() && h.mount.is_none()) {
             let idle: Vec<String> = h
                 .ports
                 .iter()
@@ -1723,6 +1901,320 @@ impl App {
         }
     }
 
+    // ------------------------------------------------------------- mounts
+
+    /// Shares the chosen folder: its WebDAV server, served through TailCat
+    /// beside the beacon. Read only unless `write`.
+    fn start_mount_host(&mut self, write: bool) {
+        self.mount_host_error.clear();
+        let Some(dir) = self.mount_pick.clone() else {
+            return self.mount_host_error = "Choose a folder first.".into();
+        };
+        if self.hosts.iter().any(|h| h.proc.is_some() && h.mount.as_ref().is_some_and(|m| m.dir == dir)) {
+            return self.mount_host_error = "That folder is already shared below.".into();
+        }
+        let server = match mount::MountServer::start(&dir, write) {
+            Ok(s) => s,
+            Err(e) => return self.mount_host_error = e,
+        };
+        let mut list = vec![server.port.to_string()];
+        if let Some(b) = beacon::ensure(&self.proxy) {
+            list.push(b.to_string());
+        }
+        let args = vec!["serve".into(), "--key=new".into(), list.join(",")];
+        match tailcat::spawn(Role::PortHost, &args, &self.proxy) {
+            Ok(p) => {
+                let key = self.key();
+                self.hosts.insert(0, PortHost {
+                    key,
+                    st: St::Starting,
+                    error: String::new(),
+                    warn: String::new(),
+                    proc: Some(p),
+                    ports: vec![server.port],
+                    addr: None,
+                    link: Link::default(),
+                    peers: Peers::default(),
+                    game: None,
+                    mount: Some(MountShare { dir, write, server }),
+                    // Nothing to check: the server is ours, and it's up.
+                    probed: true,
+                    lan_note: String::new(),
+                    log: Log::default(),
+                });
+                self.mount_pick = None;
+                self.set_status("Starting TailCat…", "busy");
+            }
+            Err(e) => self.mount_host_error = e,
+        }
+    }
+
+    /// Once a joined mount's host has answered, asks it for the folder's name
+    /// and whether changes are allowed (again every few seconds until it says).
+    fn mounts_tick(&mut self, now: Instant) {
+        for j in self.joins.iter_mut().filter(|j| j.st == St::Live && j.proc.is_some()) {
+            let Some(m) = j.mount.as_mut() else { continue };
+            if m.info.is_some() || m.asking || m.asked_at.is_some_and(|t| now.duration_since(t) < Duration::from_secs(3)) {
+                continue;
+            }
+            m.asking = true;
+            m.asked_at = Some(now);
+            let (key, port, proxy) = (j.key, j.maps[0].0, self.proxy.clone());
+            std::thread::spawn(move || {
+                let _ = proxy.send_event(UserEvent::MountInfo(key, mount::info(port)));
+            });
+        }
+    }
+
+    fn mount_of(&mut self, key: u64) -> Option<(u16, &mut MountJoin)> {
+        let j = self.joins.iter_mut().find(|j| j.key == key && j.proc.is_some())?;
+        let port = j.maps[0].0;
+        Some((port, j.mount.as_mut()?))
+    }
+
+    fn on_mount_info(&mut self, key: u64, r: Result<mount::Info, String>) -> bool {
+        let Some((_, m)) = self.mount_of(key) else { return false };
+        m.asking = false;
+        match r {
+            Ok(info) => {
+                m.info = Some(info);
+                m.error.clear();
+            }
+            Err(e) => m.error = e,
+        }
+        true
+    }
+
+    /// Mounts it as a drive (Windows) or a volume (macOS), off the UI thread.
+    fn mount_map(&mut self, key: u64) {
+        let proxy = self.proxy.clone();
+        let Some((port, m)) = self.mount_of(key) else { return };
+        let Some(name) = m.info.as_ref().map(|i| i.name.clone()) else { return };
+        if m.mounted.is_some() || !m.busy.is_empty() {
+            return;
+        }
+        m.busy = "mounting";
+        m.error.clear();
+        std::thread::spawn(move || {
+            let _ = proxy.send_event(UserEvent::MountDone(key, mount::mount(port, &name).map(Some)));
+        });
+    }
+
+    fn mount_unmap(&mut self, key: u64) {
+        let proxy = self.proxy.clone();
+        let Some((_, m)) = self.mount_of(key) else { return };
+        let Some(mounted) = m.mounted.clone() else { return };
+        m.busy = "unmounting";
+        std::thread::spawn(move || {
+            mount::unmount(&mounted);
+            let _ = proxy.send_event(UserEvent::MountDone(key, Ok(None)));
+        });
+    }
+
+    fn on_mount_done(&mut self, key: u64, r: Result<Option<mount::Mounted>, String>) -> bool {
+        let Some((_, m)) = self.mount_of(key) else {
+            // Gone meanwhile (disconnected): don't leave it mounted.
+            if let Ok(Some(mounted)) = r {
+                std::thread::spawn(move || mount::unmount(&mounted));
+            }
+            return false;
+        };
+        m.busy = "";
+        let status = match r {
+            Ok(Some(mounted)) => {
+                let label = mounted.label();
+                m.mounted = Some(mounted.clone());
+                mount::open(&mounted);
+                (format!("Mounted as {label}."), "ok")
+            }
+            Ok(None) => {
+                m.mounted = None;
+                ("Unmounted.".to_string(), "idle")
+            }
+            Err(e) => {
+                m.error = e.clone();
+                (e, "bad")
+            }
+        };
+        self.set_status(status.0, status.1);
+        true
+    }
+
+    /// Opens (or moves) the built-in browser to `path` and lists it.
+    fn mount_browse(&mut self, key: u64, path: Option<String>) {
+        let proxy = self.proxy.clone();
+        let Some((port, m)) = self.mount_of(key) else { return };
+        let path = path.or_else(|| m.browse.as_ref().map(|b| b.path.clone())).unwrap_or_default();
+        let b = m.browse.get_or_insert_with(|| Browse { path: String::new(), entries: Vec::new(), loading: false, error: String::new() });
+        b.path = path.clone();
+        b.loading = true;
+        b.error.clear();
+        std::thread::spawn(move || {
+            let r = mount::list(port, &path);
+            let _ = proxy.send_event(UserEvent::MountList(key, path, r));
+        });
+    }
+
+    fn on_mount_list(&mut self, key: u64, path: String, r: Result<Vec<mount::Entry>, String>) -> bool {
+        let Some((_, m)) = self.mount_of(key) else { return false };
+        let Some(b) = m.browse.as_mut().filter(|b| b.path == path) else { return false };
+        b.loading = false;
+        match r {
+            Ok(entries) => b.entries = entries,
+            Err(e) => b.error = e,
+        }
+        true
+    }
+
+    fn new_transfer(&mut self, name: String, up: bool) -> (u64, Arc<AtomicBool>, Transfer) {
+        let id = self.next_xfer;
+        self.next_xfer += 1;
+        let cancel = Arc::new(AtomicBool::new(false));
+        let t = Transfer { id, name, up, done: 0, total: 0, st: "going", error: String::new(), path: None, speed: Speed::new(0), cancel: cancel.clone() };
+        (id, cancel, t)
+    }
+
+    /// Downloads a file, or a folder with everything in it, into the Downloads
+    /// folder (or wherever File Share saves).
+    fn mount_get(&mut self, key: u64, path: &str, dir: bool) {
+        let inbox = self.recv.inbox.clone();
+        let label = path.rsplit('/').next().unwrap_or(path).to_string();
+        let (id, cancel, t) = self.new_transfer(if dir { format!("{label}/") } else { label.clone() }, false);
+        let proxy = self.proxy.clone();
+        let Some((port, m)) = self.mount_of(key) else { return };
+        let Some(name) = m.info.as_ref().map(|i| i.name.clone()) else { return };
+        m.transfers.insert(0, t);
+        m.transfers.truncate(30);
+        let path = path.to_string();
+        std::thread::spawn(move || {
+            let send = |x: Xfer| {
+                let _ = proxy.send_event(UserEvent::MountXfer(key, id, x));
+            };
+            let result = if dir {
+                // Every file under it, keeping the layout, into <inbox>/<folder>.
+                let dest = crate::share::safe_relative(&label).map(|r| crate::share::unique(&inbox.join(r)));
+                match dest {
+                    None => Err("The folder name isn't safe to save.".to_string()),
+                    Some(dest) => {
+                        let mut files = Vec::new();
+                        let mut todo = vec![(path.clone(), dest.clone())];
+                        let mut listed = Ok(());
+                        while let Some((rel, to)) = todo.pop() {
+                            match mount::list(port, &rel) {
+                                Ok(entries) => {
+                                    for e in entries {
+                                        let (r, Some(sub)) = (format!("{rel}/{}", e.name), crate::share::safe_relative(&e.name)) else { continue };
+                                        if e.dir {
+                                            todo.push((r, to.join(sub)));
+                                        } else {
+                                            files.push((r, to.clone(), e.size));
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    listed = Err(e);
+                                    break;
+                                }
+                            }
+                        }
+                        let total: u64 = files.iter().map(|f| f.2).sum();
+                        let mut done_before = 0u64;
+                        let mut result = listed;
+                        if result.is_ok() {
+                            let _ = std::fs::create_dir_all(&dest);
+                            for (rel, to, size) in files {
+                                let mut last = std::time::Instant::now();
+                                let r = mount::download(port, &name, &rel, &to, &cancel, &mut |d, _| {
+                                    if last.elapsed() >= Duration::from_millis(200) {
+                                        last = std::time::Instant::now();
+                                        send(Xfer::Progress(done_before + d, total));
+                                    }
+                                });
+                                if let Err(e) = r {
+                                    result = Err(e);
+                                    break;
+                                }
+                                done_before += size;
+                                send(Xfer::Progress(done_before, total));
+                            }
+                        }
+                        result.map(|_| Some(dest))
+                    }
+                }
+            } else {
+                let mut last = std::time::Instant::now();
+                mount::download(port, &name, &path, &inbox, &cancel, &mut |d, t| {
+                    if last.elapsed() >= Duration::from_millis(200) {
+                        last = std::time::Instant::now();
+                        send(Xfer::Progress(d, t));
+                    }
+                })
+                .map(Some)
+            };
+            send(Xfer::Done(result));
+        });
+    }
+
+    /// Uploads files into the browser's folder (when the host allows changes).
+    fn mount_put(&mut self, key: u64, path: &str, files: Vec<PathBuf>) {
+        let mut queued = Vec::new();
+        for f in files.into_iter().filter(|f| f.is_file()) {
+            let label = f.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            let (id, cancel, t) = self.new_transfer(label, true);
+            queued.push((id, cancel, f, t));
+        }
+        let proxy = self.proxy.clone();
+        let Some((port, m)) = self.mount_of(key) else { return };
+        let Some(name) = m.info.as_ref().filter(|i| i.write).map(|i| i.name.clone()) else { return };
+        let mut jobs = Vec::new();
+        for (id, cancel, f, t) in queued {
+            m.transfers.insert(0, t);
+            jobs.push((id, cancel, f));
+        }
+        m.transfers.truncate(30);
+        let path = path.to_string();
+        std::thread::spawn(move || {
+            for (id, cancel, f) in jobs {
+                let mut last = std::time::Instant::now();
+                let r = mount::upload(port, &name, &path, &f, &cancel, &mut |d, t| {
+                    if last.elapsed() >= Duration::from_millis(200) {
+                        last = std::time::Instant::now();
+                        let _ = proxy.send_event(UserEvent::MountXfer(key, id, Xfer::Progress(d, t)));
+                    }
+                });
+                let _ = proxy.send_event(UserEvent::MountXfer(key, id, Xfer::Done(r.map(|_| None))));
+            }
+        });
+    }
+
+    fn on_mount_xfer(&mut self, key: u64, id: u64, x: Xfer) -> bool {
+        let mut refresh = false;
+        let Some((_, m)) = self.mount_of(key) else { return false };
+        let Some(t) = m.transfers.iter_mut().find(|t| t.id == id) else { return false };
+        match x {
+            Xfer::Progress(done, total) => {
+                t.done = done;
+                t.total = total;
+                t.speed.update(done);
+            }
+            Xfer::Done(Ok(path)) => {
+                t.st = "done";
+                t.done = t.total.max(t.done);
+                t.path = path;
+                refresh = t.up;
+            }
+            Xfer::Done(Err(e)) => {
+                t.st = "error";
+                t.error = e;
+            }
+        }
+        // An upload finished: show it in the browser.
+        if refresh && m.browse.is_some() {
+            self.mount_browse(key, None);
+        }
+        true
+    }
+
     /// Someone connected to what we opened checked in or left.
     fn on_heard(&mut self, share: bool, heard: Heard) -> bool {
         if !heard.is_named() {
@@ -1790,17 +2282,31 @@ impl App {
             "voip": self.voip.json(),
             "hostError": self.host_error,
             "joinError": self.join_error,
+            "mounts": {
+                "pick": self.mount_pick.as_ref().map(|p| p.display().to_string()),
+                "hostError": self.mount_host_error,
+                "joinError": self.mount_join_error,
+                // Windows' WebDAV limit on file size (None on a Mac).
+                "limit": self.webdav_limit,
+                "os": OS,
+            },
             "hosts": self.hosts.iter().map(|h| json!({
                 "key": h.key,
                 "st": h.st.name(),
                 "error": h.error,
                 "warn": h.warn,
                 "ports": h.ports,
-                "code": match (&h.game, &h.addr) {
-                    (Some(g), Some(a)) => Some(code::game(g, h.ports[0], a)),
+                "code": match (&h.game, &h.mount, &h.addr) {
+                    (Some(g), _, Some(a)) => Some(code::game(g, h.ports[0], a)),
+                    (_, Some(_), Some(a)) => Some(code::mount(h.ports[0], a)),
                     _ => h.addr.clone(),
                 },
                 "game": h.game,
+                "mount": h.mount.as_ref().map(|m| json!({
+                    "folder": m.dir.display().to_string(),
+                    "name": m.dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
+                    "write": m.write,
+                })),
                 "lanNote": h.lan_note,
                 "peers": h.peers.json(),
                 "log": h.log.json(),
@@ -1816,6 +2322,20 @@ impl App {
                 "hostName": j.host_name,
                 "game": j.game,
                 "worlds": j.worlds,
+                "mount": j.mount.as_ref().map(|m| json!({
+                    "name": m.info.as_ref().map(|i| if i.title.is_empty() { i.name.clone() } else { i.title.clone() }),
+                    "write": m.info.as_ref().is_some_and(|i| i.write),
+                    "mounted": m.mounted.as_ref().map(mount::Mounted::label),
+                    "busy": m.busy,
+                    "error": m.error,
+                    "browse": m.browse.as_ref().map(|b| json!({
+                        "path": b.path, "entries": b.entries, "loading": b.loading, "error": b.error,
+                    })),
+                    "transfers": m.transfers.iter().map(|t| json!({
+                        "id": t.id, "name": t.name, "up": t.up, "done": t.done, "total": t.total,
+                        "st": t.st, "error": t.error, "speed": t.speed.bps as u64, "saved": t.path.is_some(),
+                    })).collect::<Vec<_>>(),
+                })),
                 "checks": j.beacon.is_some(),
                 "log": j.log.json(),
             })).collect::<Vec<_>>(),
@@ -1823,13 +2343,23 @@ impl App {
     }
 }
 
-/// Tells a port host we're leaving, then closes the tunnel.
+/// Tells a port host we're leaving, then closes the tunnel. A mounted share
+/// is unmounted first: a drive whose server is gone makes Explorer and Finder
+/// wait on it.
 fn join_bye(j: &mut PortJoin) -> Option<std::thread::JoinHandle<()>> {
-    let port = j.beacon.filter(|_| j.link.ok_once)?;
-    let report = j.report().bye();
-    let proc = j.proc.take()?;
+    let mounted = j.mount.as_mut().and_then(|m| m.mounted.take());
+    let bye = j.beacon.filter(|_| j.link.ok_once).map(|port| (port, j.report().bye()));
+    if mounted.is_none() && bye.is_none() {
+        return None;
+    }
+    let proc = j.proc.take();
     Some(std::thread::spawn(move || {
-        tailcat::say_bye(port, &report);
+        if let Some(m) = mounted {
+            mount::unmount(&m);
+        }
+        if let Some((port, report)) = bye {
+            tailcat::say_bye(port, &report);
+        }
         drop(proc);
     }))
 }
@@ -1903,6 +2433,7 @@ mod tests {
             worlds: Vec::new(),
             lan_next: now,
             lan_asking: false,
+            mount: None,
             log: Log::default(),
         }
     }

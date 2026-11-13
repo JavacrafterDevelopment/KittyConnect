@@ -43,6 +43,15 @@
             VOIP
             <span class="badge" id="voip-badge"></span>
           </button>
+          <button class="chip" data-page="mounts" title="Share a folder friends open like a drive">
+            <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <rect x="1.5" y="4" width="13" height="8" rx="1.6" stroke="currentColor" stroke-width="1.5"/>
+              <circle cx="11.6" cy="8" r="0.9" fill="currentColor"/>
+              <path d="M4 8h4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+            </svg>
+            Mounts
+            <span class="badge" id="mounts-badge"></span>
+          </button>
         </nav>
       </div>
 
@@ -508,6 +517,71 @@
             <div class="card logcard">
               <div class="logbox" data-log="voip"></div>
             </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- -------------------------------------------------------------- mounts -->
+      <section id="page-mounts" class="page">
+        <div class="column wide">
+          <div class="lib-head">
+            <h1 class="page-title">Mounts</h1>
+          </div>
+          <p class="lib-note">Share a folder that friends open like a drive: a drive letter in
+            Explorer, a place in Finder's sidebar, or browsed right here. Everything goes through the
+            encrypted <b>TailCat</b> tunnel, and only the folder you choose (and what's in it) can
+            be reached.</p>
+
+          <div class="panes">
+            <div class="card pane">
+              <div class="card-head"><h3>Share a folder</h3></div>
+              <div class="pickrow">
+                <button class="btn" id="mount-pick">Choose folder</button>
+                <span class="pick-path" id="mount-picked">No folder chosen</span>
+              </div>
+              <label class="writebox">
+                <input type="checkbox" id="mount-write">
+                <span class="set-text">
+                  <span class="set-title">Let them add, change and delete files and folders</span>
+                  <span class="set-desc" id="mount-write-desc">Off: read only. They can open and copy files, nothing else.</span>
+                </span>
+              </label>
+              <p class="err" id="mount-host-error"></p>
+              <div class="actions">
+                <button class="btn primary" id="mount-start" disabled>Start sharing</button>
+                <span class="meta">You get a code to send your friends.</span>
+              </div>
+            </div>
+
+            <div class="card pane">
+              <div class="card-head"><h3>Open a shared folder</h3></div>
+              <label class="field-label" for="mount-code">Paste the mount code your friend sent</label>
+              <div class="codein">
+                <input id="mount-code" class="input mono" spellcheck="false" autocomplete="off" placeholder="kitty:mount:…">
+                <button class="btn small" data-paste="mount-code">Paste</button>
+              </div>
+              <p class="err" id="mount-join-error"></p>
+              <div class="actions">
+                <button class="btn primary" id="mount-join">Connect</button>
+              </div>
+              <p class="set-desc game-tip" id="mount-tip">Then map it as a drive, or browse it here.</p>
+            </div>
+          </div>
+
+          <div class="lib-section">
+            <div class="lib-head">
+              <h2 class="section-title">Sharing</h2>
+              <span class="meta" id="mount-host-count"></span>
+            </div>
+            <div class="sessions" id="mount-host-list"></div>
+          </div>
+
+          <div class="lib-section">
+            <div class="lib-head">
+              <h2 class="section-title">Opened</h2>
+              <span class="meta" id="mount-join-count"></span>
+            </div>
+            <div class="sessions" id="mount-join-list"></div>
           </div>
         </div>
       </section>
