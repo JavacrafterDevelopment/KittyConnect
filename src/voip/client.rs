@@ -473,17 +473,36 @@ mod tests {
         u
     }
 
-    /// The next datagram of `kind`, or None within half a second.
-    fn next_udp(u: &UdpSocket, kind: u8) -> Option<Vec<u8>> {
-        u.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
+    /// The next datagram of `kind`, waiting up to `within`. Windows reports
+    /// an earlier datagram's "port unreachable" on the next receive as a
+    /// connection reset; that isn't an answer, so it keeps waiting.
+    fn udp_within(u: &UdpSocket, kind: u8, within: Duration) -> Option<Vec<u8>> {
+        let until = std::time::Instant::now() + within;
         let mut b = vec![0u8; 2048];
         loop {
+            let left = until.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                return None;
+            }
+            u.set_read_timeout(Some(left)).unwrap();
             match u.recv(&mut b) {
                 Ok(n) if b[0] == kind => return Some(b[..n].to_vec()),
                 Ok(_) => continue,
+                Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => continue,
                 Err(_) => return None,
             }
         }
+    }
+
+    /// The next datagram of `kind`, which should come: up to 3 seconds, so a
+    /// busy test machine doesn't fail it.
+    fn next_udp(u: &UdpSocket, kind: u8) -> Option<Vec<u8>> {
+        udp_within(u, kind, Duration::from_secs(3))
+    }
+
+    /// True if no datagram of `kind` comes within half a second.
+    fn no_udp(u: &UdpSocket, kind: u8) -> bool {
+        udp_within(u, kind, Duration::from_millis(500)).is_none()
     }
 
     /// A real room over loopback: two members, a chat message, and voice
@@ -520,7 +539,7 @@ mod tests {
         assert_eq!(media::u16_at(&got, 1), wa["you"].as_u64().unwrap() as u16);
         assert_eq!(media::u32_at(&got, 3), 7);
         assert_eq!(&got[7..], &opus[..]);
-        assert!(next_udp(&ua, media::VOICE).is_none(), "nobody hears themselves");
+        assert!(no_udp(&ua, media::VOICE), "nobody hears themselves");
 
         // Ping answers with the same number.
         b.write_all_frame(&json!({ "t": "ping", "n": 42 })).unwrap();
@@ -562,9 +581,9 @@ mod tests {
         let stranger = udp_socket(addr).unwrap();
         stranger.send(&media::voice(1, &[1; 50])).unwrap();
         stranger.send(&media::register(wa["you"].as_u64().unwrap() as u16, wb["key"].as_str().unwrap())).unwrap();
-        assert!(next_udp(&stranger, media::REGISTERED).is_none(), "a wrong key isn't accepted");
+        assert!(no_udp(&stranger, media::REGISTERED), "a wrong key isn't accepted");
         stranger.send(&media::voice(2, &[2; 50])).unwrap();
-        assert!(next_udp(&ub, media::VOICE).is_none(), "unregistered voice isn't relayed");
+        assert!(no_udp(&ub, media::VOICE), "unregistered voice isn't relayed");
 
         // Ann registered: her voice gets through.
         let ua = udp_member(room.port, &wa);
@@ -642,7 +661,7 @@ mod tests {
         assert!(out[0].key);
         assert_eq!(out[0].ts, 123);
         assert_eq!(out[0].data, frame);
-        assert!(next_udp(&uh, media::VIDEO).is_none(), "the host isn't watching");
+        assert!(no_udp(&uh, media::VIDEO), "the host isn't watching");
 
         // Cy asks for piece 1 again (a NACK); the room resends it from its buffer.
         let mut nack = vec![media::NACK];
@@ -652,10 +671,10 @@ mod tests {
         uc.send(&nack).unwrap();
         let again = next_udp(&uc, media::VIDEO).expect("resent");
         assert_eq!(media::u16_at(&again, 2 + 5), 1, "piece 1");
-        assert!(next_udp(&uc, media::VIDEO).is_none(), "only what was asked for");
+        assert!(no_udp(&uc, media::VIDEO), "only what was asked for");
         // The host isn't watching Ben, so the room won't resend to them.
         uh.send(&nack).unwrap();
-        assert!(next_udp(&uh, media::VIDEO).is_none());
+        assert!(no_udp(&uh, media::VIDEO));
 
         // Cy's report reaches Ben, tagged with Cy's id.
         uc.send(&asm.report()).unwrap();
@@ -679,7 +698,7 @@ mod tests {
         }
         assert_eq!(sys["text"], "Hana muted Ben for everyone");
         ub.send(&media::voice(2, &[5; 40])).unwrap();
-        assert!(next_udp(&uc, media::VOICE).is_none(), "muted for everyone: not relayed");
+        assert!(no_udp(&uc, media::VOICE), "muted for everyone: not relayed");
         // Earlier member updates may still be queued; the newest shows the mute.
         host.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
         loop {
@@ -699,7 +718,7 @@ mod tests {
         }
         assert_eq!(sys["text"], "Ben was disconnected by the host");
         ub.send(&media::voice(3, &[5; 40])).unwrap();
-        assert!(next_udp(&uc, media::VOICE).is_none(), "a kicked member's UDP is ignored");
+        assert!(no_udp(&uc, media::VOICE), "a kicked member's UDP is ignored");
 
         drop(room);
         assert!(!dir.join(format!("room-{}", addr.port())).exists(), "attachments are removed with the room");
