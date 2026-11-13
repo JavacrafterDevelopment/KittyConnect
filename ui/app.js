@@ -125,7 +125,7 @@ const PILL = {
   share: { off: ['', 'Off'], starting: ['busy', 'Starting'], live: ['ok', 'Sharing'], error: ['bad', 'Stopped'] },
   recv:  { off: ['', 'Off'], starting: ['busy', 'Connecting'], live: ['ok', 'Connected'], error: ['bad', 'Failed'] },
   host:  { off: ['', 'Closed'], starting: ['busy', 'Opening'], live: ['ok', 'Open'], error: ['bad', 'Stopped'] },
-  join:  { off: ['', 'Off'], starting: ['busy', 'Connecting'], live: ['ok', 'Connected'], error: ['bad', 'Failed'] },
+  join:  { off: ['', 'Off'], starting: ['busy', 'Reaching'], live: ['ok', 'Connected'], unreachable: ['bad', 'Not reached'], error: ['bad', 'Failed'] },
 };
 
 function pill(id, kind, st) {
@@ -194,13 +194,19 @@ function renderLog(name, lines) {
 
 /* ------------------------------------------------------ copy and paste */
 
+/* One Copy code button everywhere. A code always goes out in backticks:
+   Discord (and Slack, Telegram) would otherwise turn the underscores in it
+   into italics and drop them, breaking the code. KittyConnect ignores the
+   backticks when it's pasted back in. Addresses (127.0.0.1:…) copy as they are. */
+function copyCode(text, code) {
+  post({ cmd: 'copy', text: code ? '`' + text + '`' : text, code });
+}
+
 document.querySelectorAll('[data-copy]').forEach((b) => {
   b.addEventListener('click', () => {
     const text = $(b.dataset.copy).textContent.trim();
     if (!text) return;
-    const discord = !!b.dataset.discord;
-    // Backticks stop Discord turning the underscores in the code into italics.
-    post({ cmd: 'copy', text: discord ? '`' + text + '`' : text, discord });
+    copyCode(text, !!b.dataset.code);
     b.classList.add('flash');
     setTimeout(() => b.classList.remove('flash'), 700);
   });
@@ -392,19 +398,26 @@ function portList(ports) {
 function hostCard(h) {
   const g = h.game ? gameInfo(h.game) : null;
   const title = g ? `${esc(g.name)} · port <b>${h.ports[0]}</b>` : portList(h.ports);
+  // A manual port's code can carry its port numbers, so they fill in when
+  // your friend joins (the checkbox, remembered on this PC).
+  const withPorts = !g && inclPorts && h.code;
+  const code = withPorts ? `kitty:port:${h.ports.join(',')}:${h.code}` : h.code;
   const hint = g
     ? 'Send this code to your friends. They paste it in Port Forward → Game servers → Join.'
-    : `Send this code and port ${h.ports.join(', ')} to your friend.`;
+    : withPorts
+      ? 'Send this code to your friend. The port numbers are in it.'
+      : `Send this code and port ${h.ports.join(', ')} to your friend.`;
   return `
     <div class="sess${h.st === 'live' ? ' live' : ''}">
       ${sessHead(title, 'host', h.st, `data-stop-host="${h.key}"`)}
       ${h.st === 'starting' ? '<p class="meta">Getting a code from TailCat…</p>' : ''}
       ${h.st === 'live' && h.code ? `
         <div class="sess-code">
-          <code class="code">${esc(h.code)}</code>
+          <code class="code">${esc(code)}</code>
           <div class="row">
-            <button class="btn small primary" data-copytext="${esc(h.code)}" data-discord="1">Copy for Discord</button>
-            <button class="btn small" data-copytext="${esc(h.code)}">Copy code</button>
+            <button class="btn small primary" data-copytext="${esc(code)}" data-code="1">Copy code</button>
+            ${g ? '' : `<label class="inclports" title="Puts the port numbers in the code, so they fill in by themselves when your friend joins">
+              <input type="checkbox" data-incl-ports${inclPorts ? ' checked' : ''}> Include port numbers</label>`}
             <span class="meta">${hint}</span>
           </div>
         </div>` : ''}
@@ -416,7 +429,14 @@ function hostCard(h) {
     </div>`;
 }
 
+/* "Include port numbers", remembered on this PC. */
+let inclPorts = false;
+try { inclPorts = localStorage.getItem('kc-incl-ports') === '1'; } catch (_) { /* no storage */ }
+let shownHosts = [], shownHostError = '';
+
 function renderHosts(hosts, error) {
+  shownHosts = hosts;
+  shownHostError = error;
   const manual = hosts.filter((h) => !h.game);
   const games = hosts.filter((h) => h.game);
   $('host-error').textContent = pfFrom === 'manual' ? error : '';
@@ -485,8 +505,7 @@ function sessClick(e) {
   if (sj) return post({ cmd: 'port.joinStop', key: Number(sj.dataset.stopJoin) });
   const c = t.closest('[data-copytext]');
   if (c) {
-    const discord = !!c.dataset.discord;
-    post({ cmd: 'copy', text: discord ? '`' + c.dataset.copytext + '`' : c.dataset.copytext, discord });
+    copyCode(c.dataset.copytext, !!c.dataset.code);
     c.classList.add('flash');
     setTimeout(() => c.classList.remove('flash'), 700);
     return;
@@ -500,6 +519,12 @@ function sessClick(e) {
   }
 }
 ['host-list', 'join-list'].forEach((id) => $(id).addEventListener('click', sessClick));
+$('host-list').addEventListener('change', (e) => {
+  if (!e.target.matches('[data-incl-ports]')) return;
+  inclPorts = e.target.checked;
+  try { localStorage.setItem('kc-incl-ports', inclPorts ? '1' : '0'); } catch (_) { /* no storage */ }
+  renderHosts(shownHosts, shownHostError);
+});
 
 /* One joined port set or game server: where to connect, and for Minecraft
    whether the host's world is showing under LAN. */
@@ -526,6 +551,7 @@ function joinCard(j) {
     <div class="sess${j.st === 'live' ? ' live' : ''}">
       ${sessHead(title, 'join', j.st, `data-stop-join="${j.key}"`, hostHtml(j.hostName, j.link, { label: 'Host', who: 'your friend' }, `data-join-retry="${j.key}"`))}
       ${j.st === 'starting' ? '<p class="meta">Reaching your friend through TailCat…</p>' : ''}
+      ${j.st === 'unreachable' ? '<p class="warn on">Can\'t reach your friend. Check the code, and that they still have the port open. KittyConnect keeps trying.</p>' : ''}
       ${body}
       ${j.st === 'error' && j.error ? `<p class="err on">${esc(j.error)}</p>` : ''}
       ${sessLog(`j${j.key}`, j.log)}
@@ -1549,6 +1575,7 @@ if (window.ipc) {
       { key: 5, st: 'live', error: '', lan: false, hostName: 'Kit', game: 'terraria', worlds: [],
         maps: [{ local: 7777, remote: 7777 }], link: { path: 'relay', rtt: 70, checkedAgo: 5 }, log: [] },
       { key: 4, st: 'live', error: '', lan: false, hostName: 'Sam', maps: [{ local: 7777, remote: 7777 }], link: { path: 'relay', rtt: 91, checkedAgo: 40 }, log: [] },
+      { key: 7, st: 'unreachable', error: '', lan: false, hostName: null, maps: [{ local: 12345, remote: 12345 }], link: { path: 'unknown' }, log: ['# forwarding 127.0.0.1:12345 -> remote localhost:12345'] },
     ],
   });
   voipLive({ speaking: [2], me: 1, level: -24, talking: true });

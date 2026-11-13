@@ -110,7 +110,7 @@ struct Sending {
     speed: Speed,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum St {
     Off,
     Starting,
@@ -250,6 +250,8 @@ struct PortJoin {
     started: Instant,
     beacon: Option<u16>,
     link: Link,
+    /// The page has been told it can't reach the host (so it's told once).
+    told_unreachable: bool,
     /// The `tailcat forward` arguments, to reconnect with ("Retry direct").
     args: Vec<String>,
     peer: u64,
@@ -264,7 +266,33 @@ struct PortJoin {
     log: Log,
 }
 
+/// A joined port that hasn't heard from the host in this long says so (it
+/// keeps trying).
+const UNREACHED: Duration = Duration::from_secs(30);
+
 impl PortJoin {
+    /// The host has answered through the tunnel: a check came back, or TailCat
+    /// found a path to it. TailCat listens on this PC before it has even tried
+    /// to reach anyone, so that alone proves nothing. Without a beacon to ask
+    /// (the friend's own port is the beacon's), a few quiet seconds have to do.
+    fn reached(&self) -> bool {
+        self.link.peer_seen || self.link.direct.is_some() || (self.beacon.is_none() && self.started.elapsed() > Duration::from_secs(3))
+    }
+
+    /// Joining, and nothing has answered for a while.
+    fn unreachable(&self) -> bool {
+        self.proc.is_some() && self.st == St::Starting && self.started.elapsed() > UNREACHED
+    }
+
+    /// Becomes "Connected" once the host has answered. True if it just did.
+    fn promote(&mut self) -> bool {
+        if self.st == St::Starting && self.proc.is_some() && self.reached() {
+            self.st = St::Live;
+            return true;
+        }
+        false
+    }
+
     fn report(&self) -> Report<'_> {
         Report { peer: self.peer, addr: &self.addr, path: self.link.path(), rtt: self.link.rtt_ms }
     }
@@ -941,8 +969,8 @@ impl App {
             "copy" => {
                 let ok = arboard::Clipboard::new().and_then(|mut c| c.set_text(s("text"))).is_ok();
                 if ok {
-                    self.set_status(if msg["discord"].as_bool() == Some(true) {
-                        "Copied for Discord. Paste it in a message."
+                    self.set_status(if msg["code"].as_bool() == Some(true) {
+                        "Code copied. Send it to your friend (it's safe to paste into Discord)."
                     } else {
                         "Copied to the clipboard"
                     }, "ok");
@@ -1223,6 +1251,7 @@ impl App {
                     lan,
                     started: Instant::now(),
                     beacon,
+                    told_unreachable: false,
                     link,
                     args,
                     peer: peers::new_id(),
@@ -1234,7 +1263,7 @@ impl App {
                     lan_asking: false,
                     log: Log::default(),
                 });
-                self.set_status("Connecting through TailCat…", "busy");
+                self.set_status("Reaching your friend through TailCat…", "busy");
             }
             Err(e) => self.join_error = e,
         }
@@ -1303,12 +1332,11 @@ impl App {
                 let Some(j) = self.joins.iter_mut().find(|j| current(&j.proc)) else { return false };
                 match ev {
                     TcEvent::Line(line) => {
-                        let l = line.to_ascii_lowercase();
-                        if j.st == St::Starting && !tailcat::is_verbose(&line) && (l.contains("listening") || l.contains("forwarding")) {
-                            j.st = St::Live;
-                            self.status = ("Connected. Use the address shown.".into(), "ok");
-                        }
                         tc_line(&mut j.log, &mut j.link, line);
+                        // TailCat found a path to the host: it's there.
+                        if j.promote() {
+                            self.status = ("Connected to your friend. Use the address shown.".into(), "ok");
+                        }
                     }
                     TcEvent::Exited => {
                         let why = last_words(&j.log);
@@ -1407,12 +1435,19 @@ impl App {
 
     fn on_tick(&mut self) -> bool {
         let mut changed = false;
-        // `forward` may say nothing once it's up; a few quiet seconds alive means it is.
+        // A joined port is "Connected" once the host has answered; until then
+        // it's reaching them, and after a while says it can't (and keeps trying).
+        let mut reached = false;
         for j in &mut self.joins {
-            if j.st == St::Starting && j.started.elapsed() > Duration::from_secs(3) {
-                j.st = St::Live;
+            reached |= j.promote();
+            if j.unreachable() != j.told_unreachable {
+                j.told_unreachable = j.unreachable();
                 changed = true;
             }
+        }
+        if reached {
+            self.status = ("Connected to your friend. Use the address shown.".into(), "ok");
+            changed = true;
         }
         // Whether each host's server has come up, checked in the background.
         self.probe(Instant::now());
@@ -1636,10 +1671,8 @@ impl App {
                     j.st = St::Error;
                     j.error = "Your friend closed this port or went offline.".into();
                     self.status = ("A joined port was disconnected by the other side.".into(), "bad");
-                }
-                // An older host with no beacon never answers; stop asking after a few tries.
-                if !j.link.ok_once && j.link.fails >= 3 {
-                    j.beacon = None;
+                } else if j.promote() {
+                    self.status = ("Connected to your friend. Use the address shown.".into(), "ok");
                 }
                 if retry && j.proc.is_some() && j.link.path() == "relay" {
                     j.log.push("KittyConnect: the host asked to retry a direct connection");
@@ -1774,7 +1807,8 @@ impl App {
             })).collect::<Vec<_>>(),
             "joins": self.joins.iter().map(|j| json!({
                 "key": j.key,
-                "st": j.st.name(),
+                // "unreachable": joining, and the host hasn't answered for a while.
+                "st": if j.unreachable() { "unreachable" } else { j.st.name() },
                 "error": j.error,
                 "lan": j.lan,
                 "maps": j.maps.iter().map(|(l, r)| json!({ "local": l, "remote": r })).collect::<Vec<_>>(),
@@ -1842,4 +1876,74 @@ fn missing_webview2(detail: &str) {
 #[cfg(not(windows))]
 fn missing_webview2(detail: &str) {
     eprintln!("KittyConnect couldn't start the system WebView ({detail})");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn joining(since: Duration, beacon: Option<u16>) -> PortJoin {
+        let now = Instant::now();
+        PortJoin {
+            key: 1,
+            st: St::Starting,
+            error: String::new(),
+            proc: Some(Proc::stand_in()),
+            maps: vec![(12345, 12345)],
+            lan: false,
+            started: now.checked_sub(since).unwrap_or(now),
+            beacon,
+            link: Link::default(),
+            told_unreachable: false,
+            args: Vec::new(),
+            peer: 1,
+            addr: String::new(),
+            host_name: None,
+            game: None,
+            worlds: Vec::new(),
+            lan_next: now,
+            lan_asking: false,
+            log: Log::default(),
+        }
+    }
+
+    /// TailCat listening on this PC proves nothing (a wrong code does that
+    /// too): "Connected" waits for the host to answer, or for a path to it.
+    #[test]
+    fn a_joined_port_is_connected_only_once_the_host_answers() {
+        let mut j = joining(Duration::from_secs(10), Some(40000));
+        assert!(!j.promote() && !j.unreachable());
+        assert_eq!(j.st, St::Starting);
+        j.link.ping_result(Err("no answer".into()));
+        assert!(!j.promote());
+        j.link.ping_result(Ok(Duration::from_millis(20)));
+        assert!(j.promote());
+        assert_eq!(j.st, St::Live);
+
+        let mut j = joining(Duration::from_secs(1), Some(40000));
+        j.link.observe("2026/11/12 01:02:03 magicsock: disco: node [a] d:1 now using 10.0.0.5:41641 mtu=1360");
+        assert!(j.promote(), "TailCat found a path to the host");
+    }
+
+    /// Nothing answers for 30 seconds: it says so, and keeps trying.
+    #[test]
+    fn a_host_that_never_answers_is_said_to_be_unreachable() {
+        let j = joining(Duration::from_secs(29), Some(40000));
+        assert!(!j.unreachable());
+        let mut j = joining(UNREACHED + Duration::from_secs(1), Some(40000));
+        j.link.ping_result(Err("no answer".into()));
+        assert!(!j.promote());
+        assert!(j.unreachable());
+        // They come online after all.
+        j.link.ping_result(Ok(Duration::from_millis(20)));
+        assert!(j.promote() && !j.unreachable());
+    }
+
+    /// Only joining waits: with no beacon to ask (the friend's own port is
+    /// the beacon's), a few quiet seconds have to do.
+    #[test]
+    fn without_a_beacon_a_few_quiet_seconds_do() {
+        assert!(!joining(Duration::from_secs(1), None).promote());
+        assert!(joining(Duration::from_secs(4), None).promote());
+    }
 }
