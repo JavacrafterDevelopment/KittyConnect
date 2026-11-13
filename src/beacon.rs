@@ -61,7 +61,7 @@ fn answer(line: &str) -> (Option<String>, Option<Heard>) {
     if let Some(h) = heard.as_ref().filter(|h| h.op == "lan") {
         return (Some(crate::lan::reply(&h.addr)), None);
     }
-    let reply = line.contains("\"ping\"").then(crate::peers::pong);
+    let reply = line.contains("\"ping\"").then(|| crate::peers::pong(heard.as_ref().map_or(0, |h| h.peer)));
     (reply, heard.filter(Heard::is_named))
 }
 

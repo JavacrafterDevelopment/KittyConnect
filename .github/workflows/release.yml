@@ -79,6 +79,7 @@ jobs:
           $dir = 'dist/KittyConnect'
           New-Item -ItemType Directory -Force "$dir/licenses" | Out-Null
           Copy-Item target/x86_64-pc-windows-msvc/release/KittyConnect.exe $dir
+          Copy-Item 'Start KittyConnect.bat' $dir
           Copy-Item LICENSE-MIT, LICENSE-APACHE "$dir/licenses/"
           Copy-Item vendor/TAILCAT-LICENSE "$dir/licenses/TailCat-LICENSE.txt"
           Copy-Item -Recurse vendor/kc-voip-licenses "$dir/licenses/kc-voip"

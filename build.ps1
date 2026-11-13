@@ -53,6 +53,8 @@ if ($LASTEXITCODE -ne 0) { throw 'cargo build failed' }
 if (Test-Path $dist) { Remove-Item -Recurse -Force $dist }
 New-Item -ItemType Directory -Force $dist | Out-Null
 Copy-Item (Join-Path $root 'target\release\KittyConnect.exe') $dist
+# Starts the app the same way; for people (and the Launcher) who prefer a .bat.
+Copy-Item (Join-Path $root 'Start KittyConnect.bat') $dist
 Copy-Item (Join-Path $vendor 'TAILCAT-LICENSE') $dist
 # Everything compiled into the VOIP helper, and its licenses.
 New-Item -ItemType Directory -Force (Join-Path $dist 'licenses') | Out-Null

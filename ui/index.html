@@ -522,6 +522,7 @@
       <span id="lamp"></span>
       <span id="statusText">Starting up</span>
       <span class="grow"></span>
+      <a class="link" id="fw-link" title="Stuck on Relay? Ask Windows for network permission again">Network permission</a>
       <a class="link" id="data-link" title="Open the data folder">Portable · data\</a>
       <span id="version"></span>
     </footer>
@@ -550,6 +551,31 @@
         <span class="meta">Press OK to use the grey name, or type your own.</span>
       </div>
     </form>
+  </div>
+
+  <!-- Network permission: removes Windows Firewall's remembered answer for
+       KittyConnect's programs, so Windows asks again. -->
+  <div class="modal hide" id="fw-modal" role="dialog" aria-labelledby="fw-title">
+    <div class="modal-card namecard">
+      <div class="card-head">
+        <h3 id="fw-title">Network permission</h3>
+        <button class="iconbtn" id="fw-close" title="Close">
+          <svg width="11" height="11" viewBox="0 0 10 10"><path d="M2 2l6 6M8 2L2 8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+        </button>
+      </div>
+      <p class="set-desc">The first time TailCat connects, Windows asks whether to allow it on your
+        network. If that was cancelled or missed, Windows blocks direct connections and everything
+        stays on <b>Relay</b>, and it never asks again by itself.</p>
+      <p class="set-desc">This makes Windows forget its answer for KittyConnect and its TailCat
+        programs (Windows asks for an administrator's OK first). Then reconnect: Windows asks again,
+        and you press <b>Allow</b>. Do it on whichever PC is stuck; if you're not sure, do it on both.</p>
+      <p class="set-desc">If it still stays on Relay, the network may be blocking devices from
+        reaching each other (a guest Wi-Fi, a VPN), which this can't change.</p>
+      <div class="actions">
+        <button class="btn primary" id="fw-go">Ask again</button>
+        <span class="meta" id="fw-state"></span>
+      </div>
+    </div>
   </div>
 
   <!-- Voice settings, from the gear in the voice panel. Yours only. -->

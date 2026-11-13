@@ -86,12 +86,16 @@ function peersHtml(peers, empty) {
     const at = Math.round(Date.now() / 1000 - p.checkedAgo);
     const link = linkPill({ path: p.path, rtt: p.rtt, checkedAgo: p.checkedAgo }, p.name)
       || `<span class="meta">Connecting… <span class="ago" data-at="${at}">${ago(at)}</span></span>`;
+    // On a relay: ask them to reconnect, which tries for a direct path from scratch.
+    const retry = p.path !== 'relay' ? ''
+      : p.retrying ? '<span class="meta">Retrying…</span>'
+        : `<button class="btn small" data-peer-retry="${esc(p.id)}" title="Ask ${esc(p.name)}'s KittyConnect to reconnect and try for a direct connection. Whatever they're doing through it drops for a moment.">Retry direct</button>`;
     return `
       <div class="person">
         <span class="avatar" style="--h:${hue(p.name)}">${esc(initials(p.name))}</span>
         <span class="person-name">${esc(p.name)}</span>
         <span class="grow"></span>
-        ${link}
+        ${retry}${link}
       </div>`;
   }).join('');
   return `
@@ -101,10 +105,14 @@ function peersHtml(peers, empty) {
     </div>`;
 }
 
-/* The name of whoever you joined, next to how you're connected to them. */
-function hostHtml(name, link, fallback) {
+/* The name of whoever you joined, next to how you're connected to them, and
+   on a relay a button to reconnect and try for a direct path. */
+function hostHtml(name, link, fallback, retryAttr = '') {
   const who = name ? `<span class="hostname">${esc(fallback.label)} <b>${esc(name)}</b></span>` : '';
-  return who + linkPill(link, name || fallback.who);
+  const retry = retryAttr && link && link.path === 'relay'
+    ? `<button class="btn small" ${retryAttr} title="Reconnect and try for a direct connection. Whatever is using it drops for a moment.">Retry direct</button>`
+    : '';
+  return who + linkPill(link, name || fallback.who) + retry;
 }
 
 function show(el, on) { el.classList.toggle('on', !!on); }
@@ -278,7 +286,10 @@ function renderRecv(r) {
   const on = r.st === 'starting' || r.st === 'live';
   pill('recv-pill', 'recv', r.st);
   $('recv-card').classList.toggle('live', r.st === 'live');
-  setHtml($('recv-link'), r.st === 'live' ? hostHtml(r.hostName, r.link, { label: 'From', who: 'the sharer' }) : '');
+  const downloading = r.files.some((f) => f.st === 'downloading' || f.st === 'queued');
+  setHtml($('recv-link'), r.st === 'live'
+    ? hostHtml(r.hostName, r.link, { label: 'From', who: 'the sharer' }, downloading ? '' : 'data-recv-retry')
+    : '');
   $('recv-code').disabled = on;
   hide($('recv-connect'), on);
   hide($('recv-stop'), !on);
@@ -461,6 +472,10 @@ $('join-start').addEventListener('click', () => {
 });
 function sessClick(e) {
   const t = e.target;
+  const pr = t.closest('[data-peer-retry]');
+  if (pr) return post({ cmd: 'peer.retry', id: pr.dataset.peerRetry });
+  const jr = t.closest('[data-join-retry]');
+  if (jr) return post({ cmd: 'port.retry', key: Number(jr.dataset.joinRetry) });
   const sh = t.closest('[data-stop-host]');
   if (sh) return post({ cmd: 'port.hostStop', key: Number(sh.dataset.stopHost) });
   const sj = t.closest('[data-stop-join]');
@@ -506,7 +521,7 @@ function joinCard(j) {
   }
   return `
     <div class="sess${j.st === 'live' ? ' live' : ''}">
-      ${sessHead(title, 'join', j.st, `data-stop-join="${j.key}"`, hostHtml(j.hostName, j.link, { label: 'Host', who: 'your friend' }))}
+      ${sessHead(title, 'join', j.st, `data-stop-join="${j.key}"`, hostHtml(j.hostName, j.link, { label: 'Host', who: 'your friend' }, `data-join-retry="${j.key}"`))}
       ${j.st === 'starting' ? '<p class="meta">Reaching your friend through TailCat…</p>' : ''}
       ${body}
       ${j.st === 'error' && j.error ? `<p class="err on">${esc(j.error)}</p>` : ''}
@@ -1268,6 +1283,31 @@ document.querySelectorAll('.page').forEach((p) => p.addEventListener('scroll', c
 
 /* ------------------------------------------------------------ host events */
 
+$('share-peers').addEventListener('click', (e) => {
+  const pr = e.target.closest('[data-peer-retry]');
+  if (pr) post({ cmd: 'peer.retry', id: pr.dataset.peerRetry });
+});
+$('recv-link').addEventListener('click', (e) => {
+  if (e.target.closest('[data-recv-retry]')) post({ cmd: 'recv.retry' });
+});
+
+/* ------------------------------------------------------- network permission */
+
+function openFirewall() {
+  $('fw-state').textContent = '';
+  $('fw-go').disabled = false;
+  hide($('fw-modal'), false);
+}
+$('fw-link').addEventListener('click', openFirewall);
+$('fw-close').addEventListener('click', () => hide($('fw-modal'), true));
+$('fw-modal').addEventListener('mousedown', (e) => { if (e.target === $('fw-modal')) hide($('fw-modal'), true); });
+window.addEventListener('keydown', (e) => { if (e.key === 'Escape') hide($('fw-modal'), true); });
+$('fw-go').addEventListener('click', () => {
+  $('fw-go').disabled = true;
+  $('fw-state').textContent = 'Waiting for Windows…';
+  post({ cmd: 'firewall.reset' });
+});
+
 /* ------------------------------------------------------------------- name */
 
 /* Asked every time the app opens. The input starts empty with a random name
@@ -1325,6 +1365,12 @@ openName(true);
 
 window.onHost = (msg) => {
   switch (msg.type) {
+    case 'firewall':
+      $('fw-go').disabled = false;
+      $('fw-state').textContent = msg.ok
+        ? 'Done. Reconnect, and press Allow when Windows asks.'
+        : 'Not changed. See the message at the bottom.';
+      break;
     case 'state': {
       renderShare(msg.share);
       renderRecv(msg.recv);
@@ -1459,7 +1505,7 @@ if (window.ipc) {
       { key: 2, st: 'live', error: '', warn: 'Nothing is running on port 25565 on this PC yet. Start your server; your friend can connect once it\'s up.', ports: [25565], code: addr, log: [],
         peers: [
           { id: '1', name: 'Alex Rivera', path: 'direct', rtt: 24, checkedAgo: 4 },
-          { id: '2', name: 'Jo', path: 'relay', rtt: 88, checkedAgo: 12 },
+          { id: '2', name: 'Jo', path: 'relay', rtt: 88, checkedAgo: 12, retrying: true },
           { id: '3', name: 'Mellow Otter', path: 'direct', rtt: 31, checkedAgo: 2 },
           { id: '4', name: 'Priya', path: 'relay', rtt: 120, checkedAgo: 25 },
           { id: '5', name: 'Kit', path: 'unknown', rtt: null, checkedAgo: 1 },

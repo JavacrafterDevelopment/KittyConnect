@@ -252,9 +252,16 @@ pub struct Link {
     /// The path we last told the far end about (see [`crate::peers`]); when
     /// it changes, the next check goes at once.
     pub reported: &'static str,
+    /// Just reconnected to try for a direct path: checks that fail before this
+    /// are the tunnel coming back up, not the far end leaving.
+    pub grace_until: Option<std::time::Instant>,
 }
 
 pub const PING_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
+/// More often while on a relay, so a host's "Retry direct" reaches us quickly.
+pub const PING_RELAY: std::time::Duration = std::time::Duration::from_secs(10);
+/// How long a reconnect gets to come back before failed checks count.
+pub const RECONNECT_GRACE: std::time::Duration = std::time::Duration::from_secs(45);
 pub const PING_RETRY: std::time::Duration = std::time::Duration::from_secs(5);
 
 impl Link {
@@ -275,6 +282,19 @@ impl Link {
             return true;
         }
         false
+    }
+
+    /// The tunnel was just restarted (to try for a direct path again): the
+    /// path is unknown until TailCat says, and the far end gets a moment to answer.
+    pub fn restarted(&mut self) {
+        let now = std::time::Instant::now();
+        self.direct = None;
+        self.peer_seen = false;
+        self.rtt_ms = None;
+        self.fails = 0;
+        self.pinging = false;
+        self.next_ping = Some(now + std::time::Duration::from_secs(3));
+        self.grace_until = Some(now + RECONNECT_GRACE);
     }
 
     pub fn ping_due(&self, now: std::time::Instant) -> bool {
@@ -298,7 +318,12 @@ impl Link {
                 self.ok_once = true;
                 self.peer_seen = true;
                 self.fails = 0;
-                self.next_ping = Some(now + PING_EVERY);
+                self.grace_until = None;
+                self.next_ping = Some(now + if self.direct.is_some() { PING_EVERY } else { PING_RELAY });
+                false
+            }
+            Err(_) if self.grace_until.is_some_and(|t| now < t) => {
+                self.next_ping = Some(now + std::time::Duration::from_secs(3));
                 false
             }
             Err(_) => {
@@ -339,6 +364,8 @@ pub struct Pong {
     pub rtt: std::time::Duration,
     /// The host's name; older versions don't send one.
     pub name: Option<String>,
+    /// The host pressed "Retry direct" for us.
+    pub retry: bool,
 }
 
 /// One request/reply check through a forwarded port: `request` (a
@@ -357,11 +384,9 @@ pub fn ping_port(port: u16, request: &str, timeout: std::time::Duration) -> Resu
     if !line.contains("pong") {
         return Err("no answer".into());
     }
-    let name = serde_json::from_str::<serde_json::Value>(line.trim())
-        .ok()
-        .and_then(|v| v["name"].as_str().map(crate::peers::clean_name))
-        .filter(|n| !n.is_empty());
-    Ok(Pong { rtt: t0.elapsed(), name })
+    let v = serde_json::from_str::<serde_json::Value>(line.trim()).unwrap_or_default();
+    let name = v["name"].as_str().map(crate::peers::clean_name).filter(|n| !n.is_empty());
+    Ok(Pong { rtt: t0.elapsed(), name, retry: v["retry"] == true })
 }
 
 /// Tells the far end we're leaving, so we drop off its list at once. Best
@@ -469,6 +494,23 @@ mod tests {
         assert!(l.report_due());
         l.ping_started();
         assert!(!l.report_due());
+        assert!(!l.ping_result(Err("x".into())));
+        assert!(l.ping_result(Err("x".into())));
+    }
+
+    #[test]
+    fn a_reconnect_is_not_mistaken_for_the_far_end_leaving() {
+        let mut l = Link::default();
+        l.ping_result(Ok(std::time::Duration::from_millis(20)));
+        assert!(l.observe("2026/11/12 01:02:03 magicsock: disco: node [a] d:1 now using 10.0.0.5:41641 mtu=1360"));
+        l.restarted();
+        assert_eq!(l.path(), "unknown");
+        for _ in 0..5 {
+            assert!(!l.ping_result(Err("tunnel coming back".into())));
+        }
+        assert!(!l.ping_result(Ok(std::time::Duration::from_millis(30))));
+        assert_eq!(l.path(), "relay");
+        // Back to normal: two misses now mean it's gone.
         assert!(!l.ping_result(Err("x".into())));
         assert!(l.ping_result(Err("x".into())));
     }

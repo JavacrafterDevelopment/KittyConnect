@@ -155,12 +155,14 @@ fn serve_one(
         return Ok(());
     };
     // Who's checking in (or leaving), for the list of who's connected.
-    if let Some(heard) = crate::peers::Heard::parse(&line).filter(crate::peers::Heard::is_named) {
+    let heard = crate::peers::Heard::parse(&line).filter(crate::peers::Heard::is_named);
+    let peer = heard.as_ref().map_or(0, |h| h.peer);
+    if let Some(heard) = heard {
         let _ = proxy.send_event(UserEvent::Heard { share: true, heard });
     }
     match req.op.as_str() {
         // The receiver checks every 30 seconds that sharing is still on.
-        "ping" => stream.write_all(crate::peers::pong().as_bytes())?,
+        "ping" => stream.write_all(crate::peers::pong(peer).as_bytes())?,
         "list" => {
             let files = lib.lock().unwrap().clone();
             let body = json!({ "v": 1, "files": files });

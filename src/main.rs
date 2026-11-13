@@ -3,6 +3,7 @@
 
 mod beacon;
 mod code;
+mod firewall;
 mod icon;
 mod lan;
 mod peers;
@@ -58,6 +59,8 @@ pub enum UserEvent {
     Heard { share: bool, heard: Heard },
     /// A Minecraft host's beacon said which LAN worlds it has open.
     Lan(u64, Result<Vec<lan::World>, String>),
+    /// "Ask for network permission again" finished (how many programs), or didn't.
+    Firewall(Result<usize, String>),
 }
 
 #[derive(Clone, Copy)]
@@ -182,6 +185,8 @@ struct Recv {
     states: BTreeMap<u64, FileState>,
     inbox: PathBuf,
     link: Link,
+    /// The `tailcat forward` arguments, to reconnect with ("Retry direct").
+    args: Vec<String>,
     /// Who we are to the sharer, and who they are to us.
     peer: u64,
     addr: String,
@@ -236,6 +241,8 @@ struct PortJoin {
     started: Instant,
     beacon: Option<u16>,
     link: Link,
+    /// The `tailcat forward` arguments, to reconnect with ("Retry direct").
+    args: Vec<String>,
     peer: u64,
     addr: String,
     host_name: Option<String>,
@@ -400,6 +407,17 @@ fn main() {
             Event::UserEvent(UserEvent::Ping(target, result)) => app.on_ping(target, result),
             Event::UserEvent(UserEvent::Heard { share, heard }) => app.on_heard(share, heard),
             Event::UserEvent(UserEvent::Lan(key, result)) => app.on_lan(key, result),
+            Event::UserEvent(UserEvent::Firewall(result)) => {
+                match result {
+                    Ok(_) => app.set_status(
+                        "Done. Windows asks again the next time a connection starts: reconnect, and press Allow.",
+                        "ok",
+                    ),
+                    Err(e) => app.set_status(e, "bad"),
+                }
+                send(&webview, json!({ "type": "firewall", "ok": app.status.1 == "ok" }));
+                true
+            }
             Event::UserEvent(UserEvent::Voip(gen, ev)) => match app.voip.on_event(gen, ev) {
                 // Talking lights and the mic meter go on their own, many times a second.
                 Some(live) => {
@@ -534,6 +552,7 @@ impl App {
                 states: BTreeMap::new(),
                 inbox: portable::default_inbox(),
                 link: Link::default(),
+                args: Vec::new(),
                 peer: 0,
                 addr: String::new(),
                 host_name: None,
@@ -748,6 +767,23 @@ impl App {
 
             // ------------------------------------------------------- voip
             "name.set" => self.set_name(&s("name")),
+
+            // ------------------------------------------- relay → direct
+            "recv.retry" => self.retry_recv(),
+            "port.retry" => self.retry_join(msg["key"].as_u64().unwrap_or(0)),
+            "peer.retry" => {
+                // Ids go to the page as strings: they don't fit in a JS number.
+                if let Ok(id) = s("id").parse::<u64>() {
+                    let _ = self.share.peers.retry(id) || self.hosts.iter_mut().any(|h| h.peers.retry(id));
+                }
+            }
+            "firewall.reset" => {
+                let proxy = self.proxy.clone();
+                self.set_status("Waiting for Windows to allow the change…", "busy");
+                std::thread::spawn(move || {
+                    let _ = proxy.send_event(UserEvent::Firewall(firewall::reset()));
+                });
+            }
             "voip.host" => {
                 self.voip.host(&s("room"), &self.name, &self.proxy);
                 self.set_status("Opening your room…", "busy");
@@ -888,13 +924,14 @@ impl App {
             Ok(p) => p,
             Err(e) => return self.fail_recv(e),
         };
-        let args = vec!["forward".into(), c.addr.clone(), format!("{local}:{}", c.ports[0])];
+        let args: Vec<String> = vec!["forward".into(), c.addr.clone(), format!("{local}:{}", c.ports[0])];
         self.recv.log.push(format!("KittyConnect: tunnelling 127.0.0.1:{local} to the sharer"));
         match tailcat::spawn(Role::RecvForward, &args, &self.proxy) {
             Ok(p) => {
                 let cancel = Arc::new(AtomicBool::new(false));
                 self.recv.proc = Some(p);
                 self.recv.port = local;
+                self.recv.args = args;
                 self.recv.peer = peers::new_id();
                 self.recv.addr = c.addr.clone();
                 self.recv.cancel = cancel.clone();
@@ -1071,6 +1108,7 @@ impl App {
         match tailcat::spawn(Role::PortJoin, &args, &self.proxy) {
             Ok(p) => {
                 let key = self.key();
+                let args = args.clone();
                 let link = Link { next_ping: Some(Instant::now() + Duration::from_secs(4)), ..Link::default() };
                 self.joins.insert(0, PortJoin {
                     key,
@@ -1082,6 +1120,7 @@ impl App {
                     started: Instant::now(),
                     beacon,
                     link,
+                    args,
                     peer: peers::new_id(),
                     addr: c.addr,
                     host_name: None,
@@ -1408,6 +1447,7 @@ impl App {
 
     fn on_ping(&mut self, target: PingTarget, result: Result<tailcat::Pong, String>) -> bool {
         let name = result.as_ref().ok().and_then(|p| p.name.clone());
+        let retry = result.as_ref().is_ok_and(|p| p.retry);
         let result = result.map(|p| p.rtt);
         match target {
             PingTarget::Recv(port) => {
@@ -1419,6 +1459,9 @@ impl App {
                 }
                 if self.recv.link.ping_result(result) {
                     self.fail_recv("The sharer stopped sharing or went offline.".into());
+                } else if retry && self.recv.link.path() == "relay" {
+                    self.recv.log.push("KittyConnect: the sharer asked to retry a direct connection");
+                    self.retry_recv();
                 }
             }
             PingTarget::Join(key) => {
@@ -1439,9 +1482,53 @@ impl App {
                 if !j.link.ok_once && j.link.fails >= 3 {
                     j.beacon = None;
                 }
+                if retry && j.proc.is_some() && j.link.path() == "relay" {
+                    j.log.push("KittyConnect: the host asked to retry a direct connection");
+                    self.retry_join(key);
+                }
             }
         }
         true
+    }
+
+    /// Restarts our end of a file-share tunnel to try for a direct path from
+    /// scratch. The file list stays; a download in progress fails and can be
+    /// started again.
+    fn retry_recv(&mut self) {
+        if self.recv.st != St::Live || self.recv.args.is_empty() {
+            return;
+        }
+        self.recv.proc = None; // ends the old tunnel
+        match tailcat::spawn(Role::RecvForward, &self.recv.args, &self.proxy) {
+            Ok(p) => {
+                self.recv.proc = Some(p);
+                self.recv.link.restarted();
+                self.recv.log.push("KittyConnect: reconnecting to try for a direct connection");
+                self.set_status("Reconnecting to try for a direct connection…", "busy");
+            }
+            Err(e) => self.fail_recv(e),
+        }
+    }
+
+    /// The same for a joined port set. Anything connected through it (a game)
+    /// drops for a moment and reconnects to the same local port.
+    fn retry_join(&mut self, key: u64) {
+        let Some(j) = self.joins.iter_mut().find(|j| j.key == key && j.proc.is_some()) else { return };
+        j.proc = None;
+        match tailcat::spawn(Role::PortJoin, &j.args, &self.proxy) {
+            Ok(p) => {
+                j.proc = Some(p);
+                j.st = St::Starting;
+                j.started = Instant::now();
+                j.link.restarted();
+                j.log.push("KittyConnect: reconnecting to try for a direct connection");
+                self.status = ("Reconnecting to try for a direct connection…".into(), "busy");
+            }
+            Err(e) => {
+                j.st = St::Error;
+                j.error = e;
+            }
+        }
     }
 
     /// Someone connected to what we opened checked in or left.
