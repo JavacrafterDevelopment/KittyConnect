@@ -38,7 +38,7 @@ rooms, and the host of a port or file share you join sees it next to how
 you're connected. It only travels inside the encrypted TailCat tunnel.
 
 **File Share**
-- *Send files*: drop files or folders in, press **Start sharing**, then **Copy for Discord**.
+- *Send files*: drop files or folders in, press **Start sharing**, then **Copy code**.
   Everyone who connects is listed by name, each with **Direct** or **Relay**.
 - *Receive files*: paste the code, press **Connect**, then download what you want.
   Files go to your Downloads folder unless you pick another one (folders keep
@@ -62,11 +62,16 @@ you're connected. It only travels inside the encrypted TailCat tunnel.
 
 *Manual port forward*: any TCP port by number.
 - *Open a port*: enter the port your server listens on (e.g. `8080`) and press
-  **Open port**. Send your friend the TailCat code (`tc…`) and the port number.
+  **Open port**. Send your friend the TailCat code (`tc…`) and the port number,
+  or tick **Include port numbers** before **Copy code** to put them in the code
+  (`kitty:port:8080:tc…`): they fill in by themselves when your friend joins.
   Everyone who joins is listed under that port by name, each with **Direct** or
   **Relay**.
 - *Join a port*: paste the TailCat code, type the port number, and press **Connect**. Then connect your game or
-  app to `127.0.0.1:<port>`. Turn on *Share with my network* to let a console
+  app to `127.0.0.1:<port>`. It says **Connected** once your friend's
+  KittyConnect has answered through the tunnel; until then **Reaching**, and if
+  nothing answers within 30 seconds, **Not reached** (check the code, and that
+  they still have the port open; it keeps trying). Turn on *Share with my network* to let a console
   or another device on your Wi-Fi use it too.
 
 TailCat forwards **TCP** ports. Games that only use UDP won't work this way.

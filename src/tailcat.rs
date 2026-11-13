@@ -114,6 +114,17 @@ pub struct Proc {
 }
 
 impl Proc {
+    /// A harmless stand-in process, for tests of what runs TailCat.
+    #[cfg(test)]
+    pub fn stand_in() -> Proc {
+        let child = if cfg!(windows) {
+            Command::new("cmd").args(["/c", "ping -n 60 127.0.0.1 >nul"]).spawn()
+        } else {
+            Command::new("sleep").arg("60").spawn()
+        };
+        Proc { id: 0, child: child.expect("a stand-in process") }
+    }
+
     pub fn kill(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
@@ -354,7 +365,9 @@ impl Link {
             }
             Err(_) => {
                 self.fails = self.fails.saturating_add(1);
-                self.next_ping = Some(now + if self.fails == 1 { PING_RETRY } else { PING_EVERY });
+                // Until the far end has answered once, keep asking every few
+                // seconds: a friend who comes online shows up quickly.
+                self.next_ping = Some(now + if self.fails == 1 || !self.ok_once { PING_RETRY } else { PING_EVERY });
                 self.ok_once && self.fails >= 2
             }
         }
@@ -603,7 +616,10 @@ mod tests {
         let bin = dir.join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         let sleeper = bin.join("tailcat-test");
-        std::fs::copy("/bin/sleep", &sleeper).unwrap();
+        // A link, not a copy: a copy still open for writing while another test
+        // starts a process can't be run ("text file busy").
+        let _ = std::fs::remove_file(&sleeper);
+        std::os::unix::fs::symlink("/bin/sleep", &sleeper).unwrap();
 
         let mut ours = Command::new(&sleeper).arg("60").spawn().unwrap();
         let mut other = Command::new("/bin/sleep").arg("60").spawn().unwrap();
@@ -666,6 +682,21 @@ mod tests {
         assert!(!l.report_due());
         assert!(!l.ping_result(Err("x".into())));
         assert!(l.ping_result(Err("x".into())));
+    }
+
+    #[test]
+    fn asks_often_until_the_far_end_first_answers() {
+        let mut l = Link::default();
+        for _ in 0..4 {
+            let t = std::time::Instant::now();
+            l.ping_result(Err("no answer".into()));
+            assert!(l.next_ping.unwrap() - t <= PING_RETRY + std::time::Duration::from_millis(50));
+        }
+        l.ping_result(Ok(std::time::Duration::from_millis(20)));
+        l.ping_result(Err("x".into()));
+        let t = std::time::Instant::now();
+        l.ping_result(Err("x".into()));
+        assert!(l.next_ping.unwrap() - t > PING_RETRY, "once it has answered, every 30 seconds");
     }
 
     #[test]

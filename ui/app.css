@@ -1194,3 +1194,7 @@ select.input { padding: 7px 9px; }
 :root[data-os="macos"] #winbtns,
 :root[data-os="macos"] .grips,
 :root[data-os="macos"] #fw-link { display: none; }
+
+/* "Include port numbers" beside a port's Copy code. */
+.inclports { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--ink-soft); cursor: pointer; white-space: nowrap; }
+.inclports input { margin: 0; accent-color: var(--blue); cursor: pointer; }

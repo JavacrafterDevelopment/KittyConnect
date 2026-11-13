@@ -133,9 +133,12 @@ mod tests {
         let c = parse(&game("minecraft", 25565, A)).unwrap();
         assert_eq!(c, Code { kind: Kind::Game, ports: vec![25565], addr: A.into(), game: Some("minecraft".into()) });
         assert!(parse(&format!("kitty:game.Mine Craft:25565:{A}")).is_err());
-        // Older kitty:port codes still parse.
+        // kitty:port codes (Copy code with "Include port numbers") carry the
+        // ports, backticks and all.
         let c = parse(&format!("kitty:port:25565,8080:{A}")).unwrap();
         assert_eq!(c.ports, vec![25565, 8080]);
+        let c = parse(&format!("`kitty:port:25565:{}`", A.replace('_', "\\_"))).unwrap();
+        assert_eq!((c.kind, c.ports, c.addr.as_str()), (Kind::Port, vec![25565], A));
     }
 
     #[test]
