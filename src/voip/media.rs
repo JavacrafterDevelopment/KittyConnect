@@ -840,6 +840,8 @@ pub struct Thinning {
     /// A step back up, waiting for a frame where it's safe.
     raise: Option<u8>,
     good: u8,
+    /// Bad reports in a row: one bad second (a hiccup) isn't enough.
+    bad: u8,
     /// Reports to wait after a step down before another: what was already on
     /// its way takes a moment to drain.
     hold: u8,
@@ -849,7 +851,7 @@ pub struct Thinning {
 
 impl Default for Thinning {
     fn default() -> Thinning {
-        Thinning { top: 1, level: 4, raise: None, good: 0, hold: 0, decided: VecDeque::new() }
+        Thinning { top: 1, level: 4, raise: None, good: 0, bad: 0, hold: 0, decided: VecDeque::new() }
     }
 }
 
@@ -885,20 +887,24 @@ impl Thinning {
         ok
     }
 
-    /// Takes the watcher's once-a-second report: down a layer when they fall
-    /// behind, up one after a few good seconds.
+    /// Takes the watcher's once-a-second report: down a layer after two bad
+    /// seconds in a row (so every two seconds while it lasts), up one after a
+    /// few good seconds.
     pub fn report(&mut self, r: &Report) {
         self.hold = self.hold.saturating_sub(1);
         if r.delay_ms > THIN_DELAY_MS || r.loss > THIN_LOSS {
             self.good = 0;
+            self.bad = self.bad.saturating_add(1);
             let now = self.level.min(self.top);
-            if self.hold == 0 && now > 0 {
+            if self.hold == 0 && self.bad >= 2 && now > 0 {
                 self.level = now - 1;
                 self.raise = None;
-                // Skips the next two reports: they still show the backlog.
-                self.hold = 3;
+                self.bad = 0;
+                // Skips the next report: it still shows the backlog.
+                self.hold = 2;
             }
         } else if r.delay_ms < FINE_DELAY_MS && r.loss < FINE_LOSS {
+            self.bad = 0;
             self.good += 1;
             if self.good >= GOOD_REPORTS && self.level < self.top && self.raise.is_none() {
                 self.raise = Some(self.level + 1);
@@ -906,6 +912,7 @@ impl Thinning {
             }
         } else {
             self.good = 0;
+            self.bad = 0;
         }
     }
 
@@ -1388,15 +1395,18 @@ mod tests {
         };
         assert_eq!(sent(&mut th, 0..4), vec![0, 1, 2, 3], "everything while it keeps up");
         th.report(&slow);
-        assert_eq!(th.layers(), 2);
-        assert_eq!(sent(&mut th, 4..8), vec![4, 6], "the top layer goes");
+        assert_eq!(th.layers(), 3, "one bad second is a hiccup");
+        th.report(&fine);
         th.report(&slow);
+        assert_eq!(th.layers(), 3, "and so is another, after a good one");
+        th.report(&slow);
+        assert_eq!(th.layers(), 2, "two in a row: down a layer");
+        assert_eq!(sent(&mut th, 4..8), vec![4, 6], "the top layer goes");
         th.report(&slow);
         assert_eq!(th.layers(), 2, "waits for what's on its way to drain");
         th.report(&slow);
         assert_eq!(th.layers(), 1);
         assert_eq!(sent(&mut th, 8..12), vec![8]);
-        th.report(&slow);
         th.report(&slow);
         th.report(&slow);
         assert_eq!(th.layers(), 0);
@@ -1423,7 +1433,9 @@ mod tests {
     fn thinning_a_stream_without_layers() {
         let mut th = Thinning::default();
         assert!(th.pass(0, true, 0) && th.pass(1, false, 0));
-        th.report(&Report { loss: 0.3, delay_ms: 0, shown: 5, dropped: 5 });
+        let lossy = Report { loss: 0.3, delay_ms: 0, shown: 5, dropped: 5 };
+        th.report(&lossy);
+        th.report(&lossy);
         assert_eq!(th.layers(), 0);
         assert!(!th.pass(2, false, 0));
         assert!(th.pass(60, true, 0));

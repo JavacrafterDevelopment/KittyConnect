@@ -220,7 +220,7 @@ runtime into a `WebView2\` folder beside the exe.
     its layer and which frame it builds on, in spare bits of its flags byte,
     so older versions read it as before. For each watcher that understands
     layers, the room sends only the layers they keep up with: down a layer
-    when their delay goes past 400 ms (or loss past 25%; scattered loss is
+    after two seconds of delay past 400 ms (or loss past 25%; scattered loss is
     made good by asking again), up one after four good seconds, and only at
     a frame where nothing sent afterwards builds on a frame they didn't get.
     A watcher shows each frame whose base it has; a lost top-layer frame

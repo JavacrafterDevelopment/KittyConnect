@@ -521,8 +521,10 @@ mod tests {
         }
         // Slow (and Old) say they're falling well behind.
         let behind = media::Report { loss: 0.0, delay_ms: 900, shown: 10, dropped: 0 };
-        ul.send(&behind.datagram(sam_id)).unwrap();
-        uo.send(&behind.datagram(sam_id)).unwrap();
+        for _ in 0..2 {
+            ul.send(&behind.datagram(sam_id)).unwrap();
+            uo.send(&behind.datagram(sam_id)).unwrap();
+        }
         std::thread::sleep(Duration::from_millis(100));
         send(4..12);
         assert_eq!(frames_got(&uf), (4..12).collect::<Vec<_>>(), "a watcher who keeps up gets everything");
@@ -886,14 +888,21 @@ mod tests {
         // 30 frames: a 60 KB key frame, then 8 KB deltas, at 30 fps.
         sender.set_rate(media::Sender::pace_for(4_000_000));
         let frames: Vec<Vec<u8>> = (0..30u32).map(|n| (0..if n == 0 { 60_000 } else { 8_000 }).map(|i| (i as u32 * 7 + n) as u8).collect()).collect();
+        // Stamped with when they really went out, as the encoder's capture
+        // times are: a busy test machine sleeps longer than asked, and made-up
+        // times would read as the watcher falling behind.
+        let start = Instant::now();
+        let mut stamps = Vec::new();
         for (n, f) in frames.iter().enumerate() {
-            assert!(sender.video(n == 0, media::video_pieces(n as u32, n == 0, n as u64 * 33_333, f)));
+            let ts = start.elapsed().as_micros() as u64;
+            stamps.push(ts);
+            assert!(sender.video(n == 0, media::video_pieces(n as u32, n == 0, ts, f)));
             std::thread::sleep(Duration::from_millis(33));
         }
         for (n, f) in frames.iter().enumerate() {
             match wait(&|who, ev| who == 'b' && matches!(ev, VoipEvent::Video { .. })) {
                 VoipEvent::Video { from, key, ts, data } => {
-                    assert_eq!((from, key, ts), (ann_id, n == 0, n as u64 * 33_333), "frame {n} in order");
+                    assert_eq!((from, key, ts), (ann_id, n == 0, stamps[n]), "frame {n} in order");
                     assert!(data == *f, "frame {n} whole");
                 }
                 _ => unreachable!(),
