@@ -3,6 +3,8 @@
 
 mod beacon;
 mod code;
+// Windows Firewall only; on other systems its helpers are used by its tests.
+#[cfg_attr(not(windows), allow(dead_code))]
 mod firewall;
 mod icon;
 mod lan;

@@ -263,6 +263,8 @@ fn name_path(name: &[u8]) -> PathBuf {
 /// The host's side: the WebDAV server for one shared folder. Stops when dropped.
 pub struct MountServer {
     pub port: u16,
+    /// The folder's part of the URL.
+    #[allow(dead_code)]
     pub name: String,
     rt: Option<tokio::runtime::Runtime>,
 }
