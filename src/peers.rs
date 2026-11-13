@@ -4,12 +4,16 @@
 //! every 30 seconds (and again at once when their path or name changes):
 //!
 //!   → {"op":"ping","peer":<random id>,"name":"Sam","path":"direct","rtt":23,"addr":"tc…"}
-//!   ← {"pong":true,"name":"<host's name>"}
+//!   ← {"pong":true,"name":"<host's name>"}             (+ "retry":true, see below)
 //!
 //! and `{"op":"bye","peer":…}` when they disconnect. Only the joiner can tell
 //! whether its own tunnel went direct (TailCat logs it on that side), so each
 //! one reports it, the same way room members do. The host lists everyone it
 //! has heard from recently. Names only ever travel inside the tunnel.
+//!
+//! The host can press "Retry direct" next to someone on a relay: their next
+//! check (every 10 seconds while on a relay) gets `"retry":true`, and they
+//! restart their end of the tunnel, which tries for a direct path from scratch.
 //!
 //! Older versions send a bare `{"op":"ping"}` and get `{"pong":true}`; they
 //! still work, they just aren't listed.
@@ -74,9 +78,30 @@ impl Report<'_> {
     }
 }
 
-/// The host's answer to a check.
-pub fn pong() -> String {
-    format!("{}\n", json!({ "pong": true, "name": my_name() }))
+static RETRY: Mutex<Vec<u64>> = Mutex::new(Vec::new());
+
+/// The host asks `peer` to reconnect, at its next check.
+pub fn ask_retry(peer: u64) {
+    let mut r = RETRY.lock().unwrap();
+    if !r.contains(&peer) {
+        r.push(peer);
+    }
+}
+
+/// The host's answer to a check from `peer` (0 for an older version that
+/// doesn't say who it is).
+pub fn pong(peer: u64) -> String {
+    let retry = {
+        let mut r = RETRY.lock().unwrap();
+        let asked = peer != 0 && r.contains(&peer);
+        r.retain(|p| *p != peer);
+        asked
+    };
+    let mut v = json!({ "pong": true, "name": my_name() });
+    if retry {
+        v["retry"] = json!(true);
+    }
+    format!("{v}\n")
 }
 
 /// A check or goodbye as the host receives it.
@@ -108,7 +133,12 @@ struct Peer {
     path: &'static str,
     rtt: Option<u32>,
     seen: Instant,
+    /// When the host last pressed "Retry direct" for them.
+    retry_asked: Option<Instant>,
 }
+
+/// How long "Retrying…" shows after pressing Retry direct.
+const RETRY_SHOWN: Duration = Duration::from_secs(45);
 
 /// Everyone connected to one thing this PC opened, in the order they came.
 #[derive(Default)]
@@ -134,13 +164,24 @@ impl Peers {
         let now = Instant::now();
         if let Some(p) = self.0.iter_mut().find(|p| p.id == h.peer) {
             let changed = p.name != name || p.path != path || p.rtt != h.rtt;
+            if path == "direct" {
+                p.retry_asked = None;
+            }
             p.name = name;
             p.path = path;
             p.rtt = h.rtt;
             p.seen = now;
             return changed;
         }
-        self.0.push(Peer { id: h.peer, name, path, rtt: h.rtt, seen: now });
+        self.0.push(Peer { id: h.peer, name, path, rtt: h.rtt, seen: now, retry_asked: None });
+        true
+    }
+
+    /// "Retry direct" for one person. Returns true if they're on this list.
+    pub fn retry(&mut self, id: u64) -> bool {
+        let Some(p) = self.0.iter_mut().find(|p| p.id == id) else { return false };
+        p.retry_asked = Some(Instant::now());
+        ask_retry(id);
         true
     }
 
@@ -165,6 +206,7 @@ impl Peers {
                 "path": p.path,
                 "rtt": p.rtt,
                 "checkedAgo": p.seen.elapsed().as_secs(),
+                "retrying": p.retry_asked.is_some_and(|t| t.elapsed() < RETRY_SHOWN),
             }))
             .collect::<Vec<_>>())
     }
@@ -226,6 +268,22 @@ mod tests {
         let h = Heard::parse(&r.ping()).unwrap();
         assert!(h.is_named());
         assert_eq!((h.peer, h.name.as_str(), h.path.as_str(), h.rtt, h.addr.as_str()), (42, "Kit", "relay", Some(31), "tcabc"));
-        assert!(pong().contains("\"Kit\""));
+        assert!(pong(42).contains("\"Kit\""));
+    }
+
+    #[test]
+    fn retry_reaches_only_that_person_once() {
+        let mut peers = Peers::default();
+        peers.heard(&ping(5, "Jo", "relay"));
+        assert!(peers.retry(5));
+        assert!(!peers.retry(6));
+        assert_eq!(peers.json()[0]["retrying"], true);
+        assert!(!pong(7).contains("retry"));
+        assert!(!pong(0).contains("retry"));
+        assert!(pong(5).contains("\"retry\":true"));
+        assert!(!pong(5).contains("retry"));
+        // Going direct clears "Retrying…".
+        peers.heard(&ping(5, "Jo", "direct"));
+        assert_eq!(peers.json()[0]["retrying"], false);
     }
 }

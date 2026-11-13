@@ -7,7 +7,8 @@ top of [TailCat](https://github.com/tailscale/tailcat), Tailscale's open-source
 ## Use it
 
 Copy the `KittyConnect` folder anywhere, such as a USB stick, another PC, or a zip
-sent over Discord, and run `KittyConnect.exe`.
+sent over Discord, and run `KittyConnect.exe` (or `Start KittyConnect.bat`,
+which does the same; the Launcher offers both).
 
 Each time it opens, it asks for your name. The box shows a random suggestion in
 grey: press **OK** to use it, or type your own. Your name is used everywhere
@@ -90,7 +91,20 @@ TailCat forwards **TCP** ports. Games that only use UDP won't work this way.
 peer) or **Relay** (through a TailCat relay, still end-to-end encrypted) with
 the round-trip time, and the name of whoever you joined. When you're the one
 sharing (a file share, a port or a room), everyone connected is listed with
-their own. KittyConnect checks every 30 seconds through the tunnel,
+their own.
+
+**Stuck on Relay?**
+- **Retry direct** shows next to anything on a relay, in File Share and Port
+  Forward. On your own connection it reconnects your end of the tunnel, which
+  tries for a direct path from scratch. Whatever goes through it drops for a
+  moment, so it's hidden while you're downloading. Next to someone connected
+  to you, it asks their KittyConnect to do the same at its next check (every
+  10 seconds while on a relay).
+- **Network permission** (bottom bar): if Windows' "allow on your network?"
+  question for TailCat was cancelled or missed, Windows blocks direct
+  connections and never asks again by itself. This makes Windows forget its
+  answer for KittyConnect and its TailCat programs (after an administrator's
+  OK), so it asks again when you reconnect. Press **Allow**. KittyConnect checks every 30 seconds through the tunnel,
 and when the other side stops sharing, closes the port or ends the room, your
 side disconnects by itself and says so. Downloads show their speed.
 
