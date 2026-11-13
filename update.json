@@ -2,21 +2,21 @@
   "schema": 1,
   "channels": {
     "beta": {
-      "version": "0.6.0",
-      "published": "2026-11-12T22:33:12Z",
-      "notes": "## What's Changed\n* VOIP: voice and screen share over UDP via a TailCat-library helper by @JavacrafterDevelopment in https://github.com/JavacrafterDevelopment/KittyConnect/pull/1\n\n## New Contributors\n* @JavacrafterDevelopment made their first contribution in https://github.com/JavacrafterDevelopment/KittyConnect/pull/1\n\n**Full Changelog**: https://github.com/JavacrafterDevelopment/KittyConnect/compare/v0.5.0...v0.6.0",
-      "page": "https://github.com/JavacrafterDevelopment/KittyConnect/releases/tag/v0.6.0",
+      "version": "0.7.0",
+      "published": "2026-11-13T02:16:10Z",
+      "notes": "**Full Changelog**: https://github.com/JavacrafterDevelopment/KittyConnect/compare/v0.6.0...v0.7.0",
+      "page": "https://github.com/JavacrafterDevelopment/KittyConnect/releases/tag/v0.7.0",
       "package": {
-        "url": "https://github.com/JavacrafterDevelopment/KittyConnect/releases/download/v0.6.0/KittyConnect-windows-x64.zip",
-        "size": 15263059,
-        "sha256": "fcab6143729124866112212e92f0cc2eaef3d678fb2a0391f2364aebe1187373"
+        "url": "https://github.com/JavacrafterDevelopment/KittyConnect/releases/download/v0.7.0/KittyConnect-windows-x64.zip",
+        "size": 15297334,
+        "sha256": "2665abb44e677965bcd32f1f0f8a9ecefc742ff16f3df568079f5abc6b9000a3"
       },
       "exe": "KittyConnect.exe",
       "files": [
         {
           "path": "KittyConnect.exe",
-          "size": 37843456,
-          "sha256": "4a451895dd840cf0eb47b89ee52c7017c073fb7bcc20921f8c58b2500de9f800"
+          "size": 37926912,
+          "sha256": "e955b43f7ead9d3a270421625c61377263c69354f9125cca5e24c20f227ae24e"
         },
         {
           "path": "licenses/kc-voip/github.com_anmitsu_go-shlex/LICENSE",
@@ -381,21 +381,21 @@
       ]
     },
     "stable": {
-      "version": "0.6.0",
-      "published": "2026-11-12T22:33:12Z",
-      "notes": "## What's Changed\n* VOIP: voice and screen share over UDP via a TailCat-library helper by @JavacrafterDevelopment in https://github.com/JavacrafterDevelopment/KittyConnect/pull/1\n\n## New Contributors\n* @JavacrafterDevelopment made their first contribution in https://github.com/JavacrafterDevelopment/KittyConnect/pull/1\n\n**Full Changelog**: https://github.com/JavacrafterDevelopment/KittyConnect/compare/v0.5.0...v0.6.0",
-      "page": "https://github.com/JavacrafterDevelopment/KittyConnect/releases/tag/v0.6.0",
+      "version": "0.7.0",
+      "published": "2026-11-13T02:16:10Z",
+      "notes": "**Full Changelog**: https://github.com/JavacrafterDevelopment/KittyConnect/compare/v0.6.0...v0.7.0",
+      "page": "https://github.com/JavacrafterDevelopment/KittyConnect/releases/tag/v0.7.0",
       "package": {
-        "url": "https://github.com/JavacrafterDevelopment/KittyConnect/releases/download/v0.6.0/KittyConnect-windows-x64.zip",
-        "size": 15263059,
-        "sha256": "fcab6143729124866112212e92f0cc2eaef3d678fb2a0391f2364aebe1187373"
+        "url": "https://github.com/JavacrafterDevelopment/KittyConnect/releases/download/v0.7.0/KittyConnect-windows-x64.zip",
+        "size": 15297334,
+        "sha256": "2665abb44e677965bcd32f1f0f8a9ecefc742ff16f3df568079f5abc6b9000a3"
       },
       "exe": "KittyConnect.exe",
       "files": [
         {
           "path": "KittyConnect.exe",
-          "size": 37843456,
-          "sha256": "4a451895dd840cf0eb47b89ee52c7017c073fb7bcc20921f8c58b2500de9f800"
+          "size": 37926912,
+          "sha256": "e955b43f7ead9d3a270421625c61377263c69354f9125cca5e24c20f227ae24e"
         },
         {
           "path": "licenses/kc-voip/github.com_anmitsu_go-shlex/LICENSE",
