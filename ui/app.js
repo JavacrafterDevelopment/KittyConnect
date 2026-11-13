@@ -79,6 +79,34 @@ setInterval(() => {
   document.querySelectorAll('[data-at]').forEach((el) => { el.textContent = ago(Number(el.dataset.at)); });
 }, 5000);
 
+/* Everyone connected to something you opened, by name, each with Direct or
+   Relay as they report it through the tunnel. */
+function peersHtml(peers, empty) {
+  const rows = peers.map((p) => {
+    const at = Math.round(Date.now() / 1000 - p.checkedAgo);
+    const link = linkPill({ path: p.path, rtt: p.rtt, checkedAgo: p.checkedAgo }, p.name)
+      || `<span class="meta">Connecting… <span class="ago" data-at="${at}">${ago(at)}</span></span>`;
+    return `
+      <div class="person">
+        <span class="avatar" style="--h:${hue(p.name)}">${esc(initials(p.name))}</span>
+        <span class="person-name">${esc(p.name)}</span>
+        <span class="grow"></span>
+        ${link}
+      </div>`;
+  }).join('');
+  return `
+    <div class="peers">
+      <div class="peers-head"><span class="field-label">Connected</span><span class="meta">${peers.length || ''}</span></div>
+      ${rows || `<div class="peers-empty">${esc(empty)}</div>`}
+    </div>`;
+}
+
+/* The name of whoever you joined, next to how you're connected to them. */
+function hostHtml(name, link, fallback) {
+  const who = name ? `<span class="hostname">${esc(fallback.label)} <b>${esc(name)}</b></span>` : '';
+  return who + linkPill(link, name || fallback.who);
+}
+
 function show(el, on) { el.classList.toggle('on', !!on); }
 function hide(el, hidden) { el.classList.toggle('hide', !!hidden); }
 
@@ -214,7 +242,7 @@ function renderShare(s) {
   const busy = s.st === 'starting' || live;
   pill('share-pill', 'share', s.st);
   $('share-card').classList.toggle('live', live);
-  setHtml($('share-link'), live ? linkPill(s.link, 'whoever is downloading') : '');
+  setHtml($('share-peers'), live ? peersHtml(s.peers, 'Nobody yet. They show up here when they connect.') : '');
 
   setHtml($('share-files'), s.files.map((f) => `
     <div class="file">
@@ -250,7 +278,7 @@ function renderRecv(r) {
   const on = r.st === 'starting' || r.st === 'live';
   pill('recv-pill', 'recv', r.st);
   $('recv-card').classList.toggle('live', r.st === 'live');
-  setHtml($('recv-link'), r.st === 'live' ? linkPill(r.link, 'the sharer') : '');
+  setHtml($('recv-link'), r.st === 'live' ? hostHtml(r.hostName, r.link, { label: 'From', who: 'the sharer' }) : '');
   $('recv-code').disabled = on;
   hide($('recv-connect'), on);
   hide($('recv-stop'), !on);
@@ -352,7 +380,7 @@ function renderHosts(hosts, error) {
   $('host-count').textContent = hosts.length ? `${live} open` : '';
   setHtml($('host-list'), hosts.length ? hosts.map((h) => `
     <div class="sess${h.st === 'live' ? ' live' : ''}">
-      ${sessHead(portList(h.ports), 'host', h.st, `data-stop-host="${h.key}"`, linkPill(h.link))}
+      ${sessHead(portList(h.ports), 'host', h.st, `data-stop-host="${h.key}"`)}
       ${h.st === 'starting' ? '<p class="meta">Getting a code from TailCat…</p>' : ''}
       ${h.st === 'live' && h.code ? `
         <div class="sess-code">
@@ -363,6 +391,7 @@ function renderHosts(hosts, error) {
             <span class="meta">Send this code and port ${h.ports.join(', ')} to your friend.</span>
           </div>
         </div>` : ''}
+      ${h.st === 'live' ? peersHtml(h.peers, 'Nobody has joined yet. Everyone who does shows up here.') : ''}
       ${h.warn && h.st !== 'error' ? `<p class="warn on">${esc(h.warn)}</p>` : ''}
       ${h.st === 'error' && h.error ? `<p class="err on">${esc(h.error)}</p>` : ''}
       ${sessLog(`h${h.key}`, h.log)}
@@ -441,7 +470,7 @@ function renderJoins(joins, error) {
   $('join-count').textContent = joins.length ? `${live} connected` : '';
   setHtml($('join-list'), joins.length ? joins.map((j) => `
     <div class="sess${j.st === 'live' ? ' live' : ''}">
-      ${sessHead(portList(j.maps.map((m) => m.remote)), 'join', j.st, `data-stop-join="${j.key}"`, linkPill(j.link))}
+      ${sessHead(portList(j.maps.map((m) => m.remote)), 'join', j.st, `data-stop-join="${j.key}"`, hostHtml(j.hostName, j.link, { label: 'Host', who: 'your friend' }))}
       ${j.st === 'starting' ? '<p class="meta">Reaching your friend through TailCat…</p>' : ''}
       ${j.st === 'live' ? j.maps.map((m) => `
         <div class="addr">
@@ -456,25 +485,12 @@ function renderJoins(joins, error) {
 
 /* ------------------------------------------------------------------- voip */
 
-// The name is remembered for next time, in this app's own (portable) profile.
-try { $('voip-name').value = localStorage.getItem('kc-name') || ''; } catch (_) { /* no storage */ }
-$('voip-name').addEventListener('change', () => {
-  try { localStorage.setItem('kc-name', $('voip-name').value.trim()); } catch (_) { /* no storage */ }
-});
-
-function voipName() {
-  const n = $('voip-name').value.trim();
-  if (!n) $('voip-name').focus();
-  return n;
-}
-
+// Rooms use the name picked when the app opened (the chip, top right).
 $('voip-host').addEventListener('click', () => {
-  const name = voipName();
-  if (name) post({ cmd: 'voip.host', name, room: $('voip-room-name').value.trim() || 'Hangout' });
+  post({ cmd: 'voip.host', room: $('voip-room-name').value.trim() || 'Hangout' });
 });
 $('voip-join').addEventListener('click', () => {
-  const name = voipName();
-  if (name) post({ cmd: 'voip.join', name, code: $('voip-code').value });
+  post({ cmd: 'voip.join', code: $('voip-code').value });
 });
 $('voip-code').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('voip-join').click(); });
 $('voip-room-name').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('voip-host').click(); });
@@ -1131,6 +1147,61 @@ document.querySelectorAll('.page').forEach((p) => p.addEventListener('scroll', c
 
 /* ------------------------------------------------------------ host events */
 
+/* ------------------------------------------------------------------- name */
+
+/* Asked every time the app opens. The input starts empty with a random name
+   as its grey placeholder: OK on its own takes the suggestion, and typing
+   replaces it. It's used everywhere: rooms, and the hosts of ports and file
+   shares you join see it next to how you're connected. */
+const NAME_A = ['Sleepy', 'Fuzzy', 'Sneaky', 'Cosy', 'Zippy', 'Mellow', 'Brave', 'Lucky', 'Jolly', 'Sunny',
+  'Quiet', 'Swift', 'Bouncy', 'Dapper', 'Cheeky', 'Misty', 'Velvet', 'Tiny', 'Clever', 'Breezy'];
+const NAME_B = ['Kitten', 'Tabby', 'Panther', 'Lynx', 'Ocelot', 'Bobcat', 'Tiger', 'Puma', 'Cheetah', 'Jaguar',
+  'Otter', 'Fox', 'Badger', 'Panda', 'Falcon', 'Owl', 'Hedgehog', 'Raccoon', 'Koala', 'Wombat'];
+let myName = '';
+let nameRequired = true;
+
+function randomName() {
+  const pick = (a) => a[Math.floor(Math.random() * a.length)];
+  return `${pick(NAME_A)} ${pick(NAME_B)}`;
+}
+
+function openName(required) {
+  nameRequired = required;
+  const input = $('name-input');
+  input.value = required ? '' : myName;
+  input.placeholder = randomName();
+  hide($('name-modal'), false);
+  setTimeout(() => { input.focus(); input.select(); }, 30);
+}
+
+function setMe(name) {
+  myName = name;
+  $('me-name').textContent = name;
+  $('me-avatar').textContent = initials(name);
+  $('me-avatar').style.setProperty('--h', hue(name));
+  hide($('me-chip'), !name);
+}
+
+$('name-form').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const input = $('name-input');
+  const name = (input.value.trim() || input.placeholder).slice(0, 32);
+  post({ cmd: 'name.set', name });
+  setMe(name);
+  hide($('name-modal'), true);
+});
+$('name-shuffle').addEventListener('click', () => {
+  $('name-input').value = '';
+  $('name-input').placeholder = randomName();
+  $('name-input').focus();
+});
+$('me-chip').addEventListener('click', () => openName(false));
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !nameRequired) hide($('name-modal'), true);
+});
+hide($('me-chip'), true);
+openName(true);
+
 window.onHost = (msg) => {
   switch (msg.type) {
     case 'state': {
@@ -1139,6 +1210,7 @@ window.onHost = (msg) => {
       renderHosts(msg.hosts, msg.hostError);
       renderJoins(msg.joins, msg.joinError);
       renderVoip(msg.voip);
+      if (msg.name && msg.name !== myName) setMe(msg.name);
       $('statusText').textContent = msg.status.text;
       $('lamp').className = msg.status.kind;
       const filesLive = msg.share.st === 'live' || msg.recv.st === 'live';
@@ -1217,11 +1289,14 @@ if (window.ipc) {
         { id: 4, name: 'modpack.mrpack', size: 203685888 },
       ],
       sending: [{ name: 'world-backup.zip', done: 199229440, total: 524288000, speed: 6815744 }],
-      link: { path: 'direct', endpoint: '203.0.113.7:41641', rtt: null, checkedAgo: null },
+      peers: [
+        { id: '1', name: 'Alex Rivera', path: 'direct', rtt: 24, checkedAgo: 8 },
+        { id: '2', name: 'Jo', path: 'relay', rtt: 91, checkedAgo: 20 },
+      ],
       log: ['# Selected bootstrap relay region 302, San Francisco', `# 🐈 Server listening with new address: ${addr}`],
     },
     recv: {
-      st: 'live', error: '', inbox: 'C:\\Users\\you\\Downloads',
+      st: 'live', error: '', inbox: 'C:\\Users\\you\\Downloads', hostName: 'Sam',
       link: { path: 'direct', endpoint: '198.51.100.4:41641', rtt: 23, checkedAgo: 12 },
       files: [
         { id: 7, name: 'song.mp3', size: 8388608, st: 'done', done: 8388608, total: 8388608, error: '' },
@@ -1255,11 +1330,18 @@ if (window.ipc) {
     },
     hostError: '', joinError: '',
     hosts: [
-      { key: 3, st: 'live', error: '', warn: '', ports: [8080], code: addr.slice(0, 70), log: [`# 🐈 Server listening with new address: ${addr.slice(0, 70)}`] },
-      { key: 2, st: 'live', error: '', warn: 'Nothing is running on port 25565 on this PC yet. Start your server; your friend can connect once it\'s up.', ports: [25565], code: addr, log: [] },
+      { key: 3, st: 'live', error: '', warn: '', ports: [8080], code: addr.slice(0, 70), peers: [], log: [`# 🐈 Server listening with new address: ${addr.slice(0, 70)}`] },
+      { key: 2, st: 'live', error: '', warn: 'Nothing is running on port 25565 on this PC yet. Start your server; your friend can connect once it\'s up.', ports: [25565], code: addr, log: [],
+        peers: [
+          { id: '1', name: 'Alex Rivera', path: 'direct', rtt: 24, checkedAgo: 4 },
+          { id: '2', name: 'Jo', path: 'relay', rtt: 88, checkedAgo: 12 },
+          { id: '3', name: 'Mellow Otter', path: 'direct', rtt: 31, checkedAgo: 2 },
+          { id: '4', name: 'Priya', path: 'relay', rtt: 120, checkedAgo: 25 },
+          { id: '5', name: 'Kit', path: 'unknown', rtt: null, checkedAgo: 1 },
+        ] },
     ],
     joins: [
-      { key: 4, st: 'live', error: '', lan: false, maps: [{ local: 7777, remote: 7777 }], link: { path: 'relay', rtt: 91, checkedAgo: 40 }, log: [] },
+      { key: 4, st: 'live', error: '', lan: false, hostName: 'Sam', maps: [{ local: 7777, remote: 7777 }], link: { path: 'relay', rtt: 91, checkedAgo: 40 }, log: [] },
     ],
   });
   voipLive({ speaking: [2], me: 1, level: -24, talking: true });

@@ -1,15 +1,21 @@
 //! The port beacon: a tiny responder that an "Open a port" host serves through
-//! TailCat beside the user's own ports, so the friend who joined can tell
-//! every 30 seconds whether the host is still there.
+//! TailCat beside the user's own ports, so everyone who joined can tell every
+//! 30 seconds whether the host is still there, and the host can list them by
+//! name with how each is connected (see [`crate::peers`]).
 //!
 //! TailCat 0.7 serves local ports under their own numbers (no remapping), so
 //! the beacon listens on a fixed port the joiner knows to ask for. It only ever
-//! answers `{"op":"ping"}` with `{"pong":true}`; it serves nothing else.
+//! answers a ping with a pong (and the host's name); it serves nothing else.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Ipv4Addr, TcpListener};
 use std::sync::OnceLock;
 use std::time::Duration;
+
+use tao::event_loop::EventLoopProxy;
+
+use crate::peers::Heard;
+use crate::UserEvent;
 
 /// The tunnel port the joiner forwards to. If something else on the host
 /// already has it, the host goes without a beacon and the joiner just shows
@@ -17,19 +23,28 @@ use std::time::Duration;
 pub const PORT: u16 = 47474;
 
 /// Starts the beacon once per run. Returns its port if it's listening.
-pub fn ensure() -> Option<u16> {
+pub fn ensure(proxy: &EventLoopProxy<UserEvent>) -> Option<u16> {
     static STARTED: OnceLock<Option<u16>> = OnceLock::new();
     *STARTED.get_or_init(|| {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, PORT)).ok()?;
+        let proxy = proxy.clone();
         std::thread::spawn(move || {
             for stream in listener.incoming().flatten() {
+                let proxy = proxy.clone();
                 std::thread::spawn(move || {
                     let mut stream = stream;
                     stream.set_read_timeout(Some(Duration::from_secs(15))).ok();
                     let mut line = String::new();
                     let Ok(clone) = stream.try_clone() else { return };
-                    if BufReader::new(clone.take(1024)).read_line(&mut line).is_ok() && line.contains("\"ping\"") {
-                        let _ = stream.write_all(b"{\"pong\":true}\n");
+                    if BufReader::new(clone.take(1024)).read_line(&mut line).is_err() {
+                        return;
+                    }
+                    let (reply, heard) = answer(&line);
+                    if let Some(reply) = reply {
+                        let _ = stream.write_all(reply.as_bytes());
+                    }
+                    if let Some(heard) = heard {
+                        let _ = proxy.send_event(UserEvent::Heard { share: false, heard });
                     }
                 });
             }
@@ -38,12 +53,30 @@ pub fn ensure() -> Option<u16> {
     })
 }
 
+/// The reply to one line (a pong for any ping, old or new), and who it was
+/// from if they said.
+fn answer(line: &str) -> (Option<String>, Option<Heard>) {
+    let reply = line.contains("\"ping\"").then(crate::peers::pong);
+    (reply, Heard::parse(line).filter(Heard::is_named))
+}
+
 #[cfg(test)]
 mod tests {
+    use super::answer;
+
     #[test]
-    fn beacon_answers_ping() {
-        let port = super::ensure().expect("beacon port free on the test machine");
-        let rtt = crate::tailcat::ping_port(port, std::time::Duration::from_secs(3)).unwrap();
-        assert!(rtt < std::time::Duration::from_secs(3));
+    fn beacon_answers_old_and_new_pings() {
+        let (reply, heard) = answer("{\"op\":\"ping\"}\n");
+        assert!(reply.unwrap().contains("\"pong\":true") && heard.is_none());
+
+        let line = r#"{"op":"ping","peer":7,"name":"Jo","path":"direct","rtt":12,"addr":"tcabc"}"#;
+        let (reply, heard) = answer(line);
+        assert!(reply.is_some());
+        let h = heard.unwrap();
+        assert_eq!((h.peer, h.addr.as_str(), h.path.as_str()), (7, "tcabc", "direct"));
+
+        let (reply, heard) = answer(r#"{"op":"bye","peer":7,"addr":"tcabc"}"#);
+        assert!(reply.is_none() && heard.unwrap().op == "bye");
+        assert_eq!(answer("GET / HTTP/1.1").0, None);
     }
 }

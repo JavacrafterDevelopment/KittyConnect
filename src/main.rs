@@ -4,6 +4,7 @@
 mod beacon;
 mod code;
 mod icon;
+mod peers;
 mod portable;
 mod share;
 mod tailcat;
@@ -29,6 +30,7 @@ use wry::{DragDropEvent, WebContext, WebView, WebViewBuilder};
 use wry::WebViewBuilderExtWindows;
 
 use code::Kind;
+use peers::{Heard, Peers, Report};
 use portable::data_dir;
 use share::{Library, RecvEvent, Remote, Server, ShareEvent};
 use tailcat::{Link, Proc, Role, TcEvent};
@@ -49,7 +51,10 @@ pub enum UserEvent {
     Tick,
     Voip(u64, VoipEvent),
     /// A 30-second liveness ping came back (or didn't).
-    Ping(PingTarget, Result<Duration, String>),
+    Ping(PingTarget, Result<tailcat::Pong, String>),
+    /// Someone connected to our file share (`share`) or one of our open
+    /// ports checked in or said goodbye.
+    Heard { share: bool, heard: Heard },
 }
 
 #[derive(Clone, Copy)]
@@ -147,6 +152,8 @@ struct ShareHost {
     sending: BTreeMap<u64, Sending>,
     sent: u64,
     link: Link,
+    /// Everyone receiving from us, with how each is connected.
+    peers: Peers,
     log: Log,
 }
 
@@ -172,6 +179,10 @@ struct Recv {
     states: BTreeMap<u64, FileState>,
     inbox: PathBuf,
     link: Link,
+    /// Who we are to the sharer, and who they are to us.
+    peer: u64,
+    addr: String,
+    host_name: Option<String>,
     log: Log,
 }
 
@@ -186,6 +197,8 @@ struct PortHost {
     ports: Vec<u16>,
     addr: Option<String>,
     link: Link,
+    /// Everyone who joined this one, with how each is connected.
+    peers: Peers,
     log: Log,
 }
 
@@ -201,7 +214,16 @@ struct PortJoin {
     started: Instant,
     beacon: Option<u16>,
     link: Link,
+    peer: u64,
+    addr: String,
+    host_name: Option<String>,
     log: Log,
+}
+
+impl PortJoin {
+    fn report(&self) -> Report<'_> {
+        Report { peer: self.peer, addr: &self.addr, path: self.link.path(), rtt: self.link.rtt_ms }
+    }
 }
 
 struct App {
@@ -218,6 +240,9 @@ struct App {
     /// The tab on screen, so a drop lands where the user expects.
     page: String,
     status: (String, &'static str),
+    /// The name picked at startup: shown in rooms, and to whoever's port or
+    /// file share we join. Empty until picked.
+    name: String,
 }
 
 fn main() {
@@ -343,6 +368,7 @@ fn main() {
             }
             Event::UserEvent(UserEvent::Tick) => app.on_tick(),
             Event::UserEvent(UserEvent::Ping(target, result)) => app.on_ping(target, result),
+            Event::UserEvent(UserEvent::Heard { share, heard }) => app.on_heard(share, heard),
             Event::UserEvent(UserEvent::Voip(gen, ev)) => match app.voip.on_event(gen, ev) {
                 // Talking lights and the mic meter go on their own, many times a second.
                 Some(live) => {
@@ -463,6 +489,7 @@ impl App {
                 sending: BTreeMap::new(),
                 sent: 0,
                 link: Link::default(),
+                peers: Peers::default(),
                 log: Log::default(),
             },
             recv: Recv {
@@ -476,6 +503,9 @@ impl App {
                 states: BTreeMap::new(),
                 inbox: portable::default_inbox(),
                 link: Link::default(),
+                peer: 0,
+                addr: String::new(),
+                host_name: None,
                 log: Log::default(),
             },
             hosts: Vec::new(),
@@ -486,6 +516,7 @@ impl App {
             voip: Voip::default(),
             page: "files".into(),
             status: ("Ready. Everything runs from this folder.".into(), "idle"),
+            name: String::new(),
         }
     }
 
@@ -494,11 +525,51 @@ impl App {
     }
 
     fn shutdown(&mut self) {
+        // Say goodbye to everyone we joined, all at once, so closing takes at
+        // most about a second.
+        let mut byes = vec![self.recv_bye()];
+        byes.extend(self.joins.iter_mut().map(join_bye));
+        for t in byes.into_iter().flatten() {
+            let _ = t.join();
+        }
         self.stop_share();
         self.stop_recv();
         self.hosts.clear();
         self.joins.clear();
         self.voip.shutdown();
+    }
+
+    /// Tells the sharer we're leaving, then closes the tunnel.
+    fn recv_bye(&mut self) -> Option<std::thread::JoinHandle<()>> {
+        if self.recv.st != St::Live || !self.recv.link.ok_once {
+            return None;
+        }
+        let proc = self.recv.proc.take()?;
+        let report = Report { peer: self.recv.peer, addr: &self.recv.addr, path: "unknown", rtt: None }.bye();
+        let port = self.recv.port;
+        Some(std::thread::spawn(move || {
+            tailcat::say_bye(port, &report);
+            drop(proc);
+        }))
+    }
+
+    fn set_name(&mut self, name: &str) {
+        let name = peers::clean_name(name);
+        if name.is_empty() || name == self.name {
+            return;
+        }
+        self.name = name;
+        peers::set_my_name(&self.name);
+        // Everyone we're connected to hears the new name now.
+        let now = Instant::now();
+        if self.recv.link.ok_once && !self.recv.link.pinging {
+            self.recv.link.next_ping = Some(now);
+        }
+        for j in &mut self.joins {
+            if !j.link.pinging {
+                j.link.next_ping = Some(now);
+            }
+        }
     }
 
     /// Returns true when the app should exit.
@@ -571,6 +642,7 @@ impl App {
             // ---------------------------------------------- file receive
             "recv.connect" => self.start_recv(&s("code")),
             "recv.stop" => {
+                self.recv_bye();
                 self.stop_recv();
                 self.set_status("Disconnected", "idle");
             }
@@ -628,17 +700,21 @@ impl App {
             }
             "port.joinStop" => {
                 let key = msg["key"].as_u64().unwrap_or(0);
+                if let Some(j) = self.joins.iter_mut().find(|j| j.key == key) {
+                    join_bye(j);
+                }
                 self.joins.retain(|j| j.key != key);
                 self.set_status("Disconnected", "idle");
             }
 
             // ------------------------------------------------------- voip
+            "name.set" => self.set_name(&s("name")),
             "voip.host" => {
-                self.voip.host(&s("room"), &s("name"), &self.proxy);
+                self.voip.host(&s("room"), &self.name, &self.proxy);
                 self.set_status("Opening your room…", "busy");
             }
             "voip.join" => {
-                self.voip.join(&s("code"), &s("name"), &self.proxy);
+                self.voip.join(&s("code"), &self.name, &self.proxy);
                 self.set_status("Joining the room through TailCat…", "busy");
             }
             "voip.leave" => {
@@ -718,6 +794,7 @@ impl App {
         self.share.error.clear();
         self.share.log = Log::default();
         self.share.link = Link::default();
+        self.share.peers.clear();
         let server = match Server::start(self.share.lib.clone(), self.proxy.clone()) {
             Ok(s) => s,
             Err(e) => return self.fail_share(e),
@@ -747,6 +824,7 @@ impl App {
         self.share.server = None;
         self.share.addr = None;
         self.share.sending.clear();
+        self.share.peers.clear();
     }
 
     // ---------------------------------------------------------- receiving
@@ -756,6 +834,7 @@ impl App {
         self.recv.error.clear();
         self.recv.log = Log::default();
         self.recv.link = Link::default();
+        self.recv.host_name = None;
         let c = match code::parse(input) {
             Ok(c) if c.kind == Kind::File => c,
             Ok(c) if c.kind == Kind::Port => return self.fail_recv("That's a port code. Paste it in the Ports tab.".into()),
@@ -774,6 +853,8 @@ impl App {
                 let cancel = Arc::new(AtomicBool::new(false));
                 self.recv.proc = Some(p);
                 self.recv.port = local;
+                self.recv.peer = peers::new_id();
+                self.recv.addr = c.addr.clone();
                 self.recv.cancel = cancel.clone();
                 self.recv.jobs = Some(share::downloader(local, cancel.clone(), self.proxy.clone()));
                 self.recv.st = St::Starting;
@@ -852,7 +933,7 @@ impl App {
         };
         let mut list: Vec<String> = ports.iter().map(|p| p.to_string()).collect();
         // The beacon rides in the same tunnel so the friend can tell we're still here.
-        if let Some(b) = beacon::ensure().filter(|b| !ports.contains(b)) {
+        if let Some(b) = beacon::ensure(&self.proxy).filter(|b| !ports.contains(b)) {
             list.push(b.to_string());
         }
         let args = vec!["serve".into(), "--key=new".into(), list.join(",")];
@@ -868,6 +949,7 @@ impl App {
                     ports,
                     addr: None,
                     link: Link::default(),
+                    peers: Peers::default(),
                     log: Log::default(),
                 });
                 self.set_status("Starting TailCat…", "busy");
@@ -914,7 +996,7 @@ impl App {
         if lan {
             args.push("--bind=0.0.0.0".into());
         }
-        args.push(c.addr);
+        args.push(c.addr.clone());
         args.extend(maps.iter().map(|(l, r)| format!("{l}:{r}")));
         // A private local port to the host's beacon, for the 30-second check.
         let beacon = (!remotes.contains(&beacon::PORT)).then(free_port).and_then(Result::ok);
@@ -935,6 +1017,9 @@ impl App {
                     started: Instant::now(),
                     beacon,
                     link,
+                    peer: peers::new_id(),
+                    addr: c.addr,
+                    host_name: None,
                     log: Log::default(),
                 });
                 self.set_status("Connecting through TailCat…", "busy");
@@ -1120,42 +1205,60 @@ impl App {
             }
         }
 
-        // Every 30 seconds, ping the far end through each tunnel we joined.
+        // Everyone gone quiet drops off the lists of who's connected.
+        changed |= self.share.peers.expire();
+        for h in &mut self.hosts {
+            changed |= h.peers.expire();
+        }
+
+        // Every 30 seconds, ping the far end through each tunnel we joined,
+        // and at once when our path changed, so the host's list stays right.
         let now = Instant::now();
+        for link in std::iter::once(&mut self.recv.link).chain(self.joins.iter_mut().map(|j| &mut j.link)) {
+            if link.report_due() && !link.pinging {
+                link.next_ping = Some(now);
+            }
+        }
         if self.recv.st == St::Live && self.recv.link.ok_once && self.recv.link.ping_due(now) {
             self.recv.link.ping_started();
-            self.spawn_ping(PingTarget::Recv(self.recv.port), self.recv.port);
+            let r = Report { peer: self.recv.peer, addr: &self.recv.addr, path: self.recv.link.path(), rtt: self.recv.link.rtt_ms };
+            self.spawn_ping(PingTarget::Recv(self.recv.port), self.recv.port, r.ping());
         }
-        let due: Vec<(u64, u16)> = self
+        let due: Vec<(u64, u16, String)> = self
             .joins
             .iter_mut()
             .filter(|j| j.proc.is_some() && j.link.ping_due(now))
             .filter_map(|j| {
                 let b = j.beacon?;
                 j.link.ping_started();
-                Some((j.key, b))
+                Some((j.key, b, j.report().ping()))
             })
             .collect();
-        for (key, port) in due {
-            self.spawn_ping(PingTarget::Join(key), port);
+        for (key, port, request) in due {
+            self.spawn_ping(PingTarget::Join(key), port, request);
         }
         changed |= self.voip.tick();
         changed
     }
 
-    fn spawn_ping(&self, target: PingTarget, port: u16) {
+    fn spawn_ping(&self, target: PingTarget, port: u16, request: String) {
         let proxy = self.proxy.clone();
         std::thread::spawn(move || {
-            let result = tailcat::ping_port(port, Duration::from_secs(10));
+            let result = tailcat::ping_port(port, &request, Duration::from_secs(10));
             let _ = proxy.send_event(UserEvent::Ping(target, result));
         });
     }
 
-    fn on_ping(&mut self, target: PingTarget, result: Result<Duration, String>) -> bool {
+    fn on_ping(&mut self, target: PingTarget, result: Result<tailcat::Pong, String>) -> bool {
+        let name = result.as_ref().ok().and_then(|p| p.name.clone());
+        let result = result.map(|p| p.rtt);
         match target {
             PingTarget::Recv(port) => {
                 if self.recv.port != port || self.recv.st != St::Live {
                     return false;
+                }
+                if name.is_some() {
+                    self.recv.host_name = name;
                 }
                 if self.recv.link.ping_result(result) {
                     self.fail_recv("The sharer stopped sharing or went offline.".into());
@@ -1165,6 +1268,9 @@ impl App {
                 let Some(j) = self.joins.iter_mut().find(|j| j.key == key) else { return false };
                 if j.proc.is_none() {
                     return false;
+                }
+                if name.is_some() {
+                    j.host_name = name;
                 }
                 if j.link.ping_result(result) {
                     j.proc = None;
@@ -1179,6 +1285,21 @@ impl App {
             }
         }
         true
+    }
+
+    /// Someone connected to what we opened checked in or left.
+    fn on_heard(&mut self, share: bool, heard: Heard) -> bool {
+        if !heard.is_named() {
+            return false;
+        }
+        if share {
+            return self.share.st == St::Live && self.share.peers.heard(&heard);
+        }
+        // All open ports share one beacon; the code they joined with says which.
+        match self.hosts.iter_mut().find(|h| h.proc.is_some() && h.addr.as_deref() == Some(heard.addr.as_str())) {
+            Some(h) => h.peers.heard(&heard),
+            None => false,
+        }
     }
 
     fn snapshot(&self) -> Value {
@@ -1207,6 +1328,7 @@ impl App {
         json!({
             "type": "state",
             "status": { "text": self.status.0, "kind": self.status.1 },
+            "name": self.name,
             "share": {
                 "st": self.share.st.name(),
                 "error": self.share.error,
@@ -1217,7 +1339,7 @@ impl App {
                     "name": s.name, "done": s.done, "total": s.total, "speed": s.speed.bps as u64,
                 })).collect::<Vec<_>>(),
                 "sent": self.share.sent,
-                "link": self.share.link.json(),
+                "peers": self.share.peers.json(),
                 "log": self.share.log.json(),
             },
             "recv": {
@@ -1226,6 +1348,7 @@ impl App {
                 "files": recv_files,
                 "inbox": self.recv.inbox.display().to_string(),
                 "link": self.recv.link.json(),
+                "hostName": self.recv.host_name,
                 "log": self.recv.log.json(),
             },
             "voip": self.voip.json(),
@@ -1238,7 +1361,7 @@ impl App {
                 "warn": h.warn,
                 "ports": h.ports,
                 "code": h.addr,
-                "link": h.link.json(),
+                "peers": h.peers.json(),
                 "log": h.log.json(),
             })).collect::<Vec<_>>(),
             "joins": self.joins.iter().map(|j| json!({
@@ -1248,11 +1371,23 @@ impl App {
                 "lan": j.lan,
                 "maps": j.maps.iter().map(|(l, r)| json!({ "local": l, "remote": r })).collect::<Vec<_>>(),
                 "link": j.link.json(),
+                "hostName": j.host_name,
                 "checks": j.beacon.is_some(),
                 "log": j.log.json(),
             })).collect::<Vec<_>>(),
         })
     }
+}
+
+/// Tells a port host we're leaving, then closes the tunnel.
+fn join_bye(j: &mut PortJoin) -> Option<std::thread::JoinHandle<()>> {
+    let port = j.beacon.filter(|_| j.link.ok_once)?;
+    let report = j.report().bye();
+    let proc = j.proc.take()?;
+    Some(std::thread::spawn(move || {
+        tailcat::say_bye(port, &report);
+        drop(proc);
+    }))
 }
 
 pub(crate) fn open_in_shell(target: impl AsRef<std::ffi::OsStr>) {
