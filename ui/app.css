@@ -1112,3 +1112,71 @@ select.input { padding: 7px 9px; }
 }
 :root.theater .stage-view:hover .stage-bar { opacity: 1; }
 :root.theater .grips { display: none; }
+
+/* ------------------------------------------------------------ port forward */
+
+/* The two choices on the Port Forward page. */
+.choice {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 20px 22px;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  transition: border-color .12s ease, background .12s ease, transform .12s ease;
+}
+.choice:hover { border-color: var(--blue); background: var(--card-hover); }
+.choice:active { transform: translateY(1px); }
+.choice-ico {
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  border-radius: 12px;
+  background: var(--blue-wash);
+  color: var(--blue-deep);
+}
+.choice-title { font-family: var(--serif); font-size: 19px; color: var(--walnut-deep); letter-spacing: .02em; }
+.choice .set-desc { line-height: 1.5; }
+
+.backlink {
+  align-self: center;
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 9px;
+  border: 1px solid var(--rule-strong);
+  background: var(--card);
+  color: var(--blue-deep);
+  cursor: pointer;
+}
+.backlink:hover { background: var(--blue-wash); }
+.backlink.hide { display: none; }
+
+/* One-click games: name and note, port (the default in grey), Host. */
+.games { display: flex; flex-direction: column; }
+.game { display: flex; align-items: center; gap: 10px; padding: 11px 0; border-bottom: 1px solid var(--rule); }
+.game:last-child { border-bottom: 0; }
+.game-ico {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 9px;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 700;
+  background: hsl(var(--h) 45% 45%);
+}
+.game-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.game-name { font-size: 13.5px; color: var(--ink); font-weight: 600; }
+.game-desc { font-size: 11.5px; color: var(--ink-faint); line-height: 1.4; }
+.game .input.port { width: 84px; flex: 0 0 auto; text-align: center; font-variant-numeric: tabular-nums; }
+.game .input.port::placeholder { color: var(--ink-ghost); }
+.game-tip { margin: 6px 0 0; line-height: 1.5; }
+.okline { margin: 0; font-size: 12.5px; color: var(--ok); }

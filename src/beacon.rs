@@ -56,8 +56,13 @@ pub fn ensure(proxy: &EventLoopProxy<UserEvent>) -> Option<u16> {
 /// The reply to one line (a pong for any ping, old or new), and who it was
 /// from if they said.
 fn answer(line: &str) -> (Option<String>, Option<Heard>) {
+    let heard = Heard::parse(line);
+    // A Minecraft joiner asking which LAN worlds to show (see `crate::lan`).
+    if let Some(h) = heard.as_ref().filter(|h| h.op == "lan") {
+        return (Some(crate::lan::reply(&h.addr)), None);
+    }
     let reply = line.contains("\"ping\"").then(crate::peers::pong);
-    (reply, Heard::parse(line).filter(Heard::is_named))
+    (reply, heard.filter(Heard::is_named))
 }
 
 #[cfg(test)]
@@ -78,5 +83,9 @@ mod tests {
         let (reply, heard) = answer(r#"{"op":"bye","peer":7,"addr":"tcabc"}"#);
         assert!(reply.is_none() && heard.unwrap().op == "bye");
         assert_eq!(answer("GET / HTTP/1.1").0, None);
+        // Asking for LAN worlds on a code that isn't a Minecraft host: none.
+        let (reply, heard) = answer(r#"{"op":"lan","addr":"tcnothing"}"#);
+        assert_eq!(reply.unwrap().trim(), r#"{"lan":[]}"#);
+        assert!(heard.is_none());
     }
 }

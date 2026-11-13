@@ -1,6 +1,7 @@
 //! Share codes: one line of text that carries everything a peer needs.
 //!
 //!   kitty:file:<port>:<tailcat address>   file sharing
+//!   kitty:game.<id>:<port>:<address>      a one-click game server (Port Forward)
 //!   <tailcat address>                     ports (the port numbers are told separately)
 //!
 //! Older `kitty:port:<ports>:<address>` codes are still accepted.
@@ -16,6 +17,8 @@ pub enum Kind {
     File,
     Port,
     Voip,
+    /// A one-click game server: a port with a known game behind it.
+    Game,
     /// A bare `tc…` address with no KittyConnect wrapper.
     Bare,
 }
@@ -25,6 +28,8 @@ pub struct Code {
     pub kind: Kind,
     pub ports: Vec<u16>,
     pub addr: String,
+    /// For [`Kind::Game`]: which game ("minecraft").
+    pub game: Option<String>,
 }
 
 pub fn file(port: u16, addr: &str) -> String {
@@ -33,6 +38,15 @@ pub fn file(port: u16, addr: &str) -> String {
 
 pub fn voip(port: u16, addr: &str) -> String {
     format!("kitty:voip:{port}:{addr}")
+}
+
+pub fn game(id: &str, port: u16, addr: &str) -> String {
+    format!("kitty:game.{id}:{port}:{addr}")
+}
+
+/// A game id is short lowercase letters and digits.
+pub fn is_game_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 24 && id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
 }
 
 pub fn parse(input: &str) -> Result<Code, String> {
@@ -47,16 +61,21 @@ pub fn parse(input: &str) -> Result<Code, String> {
     let Some(start) = cleaned.find("kitty:") else {
         // A bare TailCat address still works; the caller supplies the ports.
         if let Some(addr) = cleaned.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-')).find(|t| is_addr(t)) {
-            return Ok(Code { kind: Kind::Bare, ports: vec![], addr: addr.to_string() });
+            return Ok(Code { kind: Kind::Bare, ports: vec![], addr: addr.to_string(), game: None });
         }
         return Err("That doesn't look like a KittyConnect code. It should start with kitty:".into());
     };
 
     let mut parts = cleaned[start + "kitty:".len()..].splitn(3, ':');
+    let mut game = None;
     let kind = match parts.next() {
         Some("file") => Kind::File,
         Some("port") => Kind::Port,
         Some("voip") => Kind::Voip,
+        Some(g) if g.strip_prefix("game.").is_some_and(is_game_id) => {
+            game = g.strip_prefix("game.").map(str::to_string);
+            Kind::Game
+        }
         _ => return Err("Unknown code type. Expected kitty:file:… or kitty:voip:…".into()),
     };
     let ports = parts
@@ -78,7 +97,7 @@ pub fn parse(input: &str) -> Result<Code, String> {
     if !is_addr(&addr) {
         return Err("The code is cut off. Ask your friend to copy it again.".into());
     }
-    Ok(Code { kind, ports, addr })
+    Ok(Code { kind, ports, addr, game })
 }
 
 /// "25565, 8080" → [25565, 8080], no duplicates, in the order given.
@@ -108,9 +127,12 @@ mod tests {
     #[test]
     fn round_trips() {
         let c = parse(&file(41234, A)).unwrap();
-        assert_eq!(c, Code { kind: Kind::File, ports: vec![41234], addr: A.into() });
+        assert_eq!(c, Code { kind: Kind::File, ports: vec![41234], addr: A.into(), game: None });
         let c = parse(&voip(50001, A)).unwrap();
-        assert_eq!(c, Code { kind: Kind::Voip, ports: vec![50001], addr: A.into() });
+        assert_eq!(c, Code { kind: Kind::Voip, ports: vec![50001], addr: A.into(), game: None });
+        let c = parse(&game("minecraft", 25565, A)).unwrap();
+        assert_eq!(c, Code { kind: Kind::Game, ports: vec![25565], addr: A.into(), game: Some("minecraft".into()) });
+        assert!(parse(&format!("kitty:game.Mine Craft:25565:{A}")).is_err());
         // Older kitty:port codes still parse.
         let c = parse(&format!("kitty:port:25565,8080:{A}")).unwrap();
         assert_eq!(c.ports, vec![25565, 8080]);

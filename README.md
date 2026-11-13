@@ -22,9 +22,25 @@ you're connected. It only travels inside the encrypted TailCat tunnel.
   Files go to your Downloads folder unless you pick another one (folders keep
   their layout inside it).
 
-**Ports**
-- *Open a port*: enter the port your server listens on (e.g. `25565`) and press
-  **Open ports**. Send your friend the TailCat code (`tc…`) and the port number.
+**Port Forward** opens on two choices:
+
+*Game servers*: one click to host or join.
+- *Host*: press **Host** next to the game. The port box shows the game's usual
+  port in grey (25565 for Minecraft); leave it, or type another. Send your
+  friends the code (`kitty:game.minecraft:25565:tc…`).
+- *Join*: paste the code and press **Join**. The code says which game and port.
+- **Minecraft: Java Edition** shows up like a LAN world. The host opens their
+  world to LAN (Esc → Open to LAN, Port Number 25565, Start LAN World), and
+  everyone who joined sees it under LAN in Multiplayer and joins from there.
+  The host's card says what friends see, or what to fix (such as Minecraft
+  having picked a different port). A dedicated server on that port shows up
+  the same way, as "*name*'s Minecraft server".
+- Terraria/tModLoader (7777), Starbound (21025) and Vintage Story (42420) open
+  their port; friends join with the address KittyConnect shows them.
+
+*Manual port forward*: any TCP port by number.
+- *Open a port*: enter the port your server listens on (e.g. `8080`) and press
+  **Open port**. Send your friend the TailCat code (`tc…`) and the port number.
   Everyone who joins is listed under that port by name, each with **Direct** or
   **Relay**.
 - *Join a port*: paste the TailCat code, type the port number, and press **Connect**. Then connect your game or
@@ -88,7 +104,7 @@ share kills its code for good, and the next start gets a new one.
 - Two TailCat programs are embedded in the exe and unpacked to `data\bin\` on
   first use:
   - **TailCat 0.7.0, the official Windows build** (hash-pinned), for File Share
-    and Ports. Keeping the official build means those get TailCat's security
+    and Port Forward. Keeping the official build means those get TailCat's security
     updates by bumping one version.
   - **`kc-voip`**, for VOIP rooms only. It's built from `voip-helper\` on the
     TailCat *library*, the same version 0.7.0, and takes the same `serve` and
@@ -112,7 +128,7 @@ runtime into a `WebView2\` folder beside the exe.
 
 ## How it works
 
-- **Ports**: the host runs `tailcat serve <ports>`, and the joiner runs
+- **Port Forward**: the host runs `tailcat serve <ports>`, and the joiner runs
   `tailcat forward <addr> <local>:<remote>`.
 - **Files**: the sharer runs a small file server on `127.0.0.1` and exposes
   only that port with `tailcat serve`. The receiver forwards a local port to it
@@ -146,6 +162,14 @@ runtime into a `WebView2\` folder beside the exe.
     second), skips to the next key frame and asks for one, so the picture
     stays live instead of freezing. Each watcher reports its loss and delay
     once a second, and the sharer's bitrate follows the worst.
+- **Minecraft LAN worlds**: Minecraft announces a LAN world with a UDP message
+  on port 4445 every 1.5 seconds (`[MOTD]name[/MOTD][AD]port[/AD]`). The host's
+  KittyConnect listens on 4445 (sharing it with Minecraft) for messages from
+  this PC's own addresses only. Joiners ask the host's beacon every 3 seconds,
+  through the tunnel, which worlds are open on the port they joined, and send
+  the same message to their own Minecraft on `127.0.0.1:4445`, pointing at the
+  local end of the tunnel. Nothing about it leaves either PC except through
+  the tunnel.
 - The UI is served from `kc://localhost` (WebView2 loads it as
   `https://kc.localhost`, a secure origin, which screen capture and WebCodecs
   need). Nothing is fetched from the network; the page and image previews come
