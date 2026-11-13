@@ -4,15 +4,19 @@
 #   2. tag that commit v0.1.1 and push (GitHub Desktop pushes annotated tags
 #      along with the commits; or: git push origin main v0.1.1)
 #
-# The MSVC build links the C runtime and the WebView2 loader statically, so the
-# folder is just KittyConnect.exe plus licenses. TailCat is fetched from its
-# official release (hash-pinned) and embedded in the exe, for Ports and File
-# Share; VOIP rooms use kc-voip.exe, built here from voip-helper/ on the same
-# TailCat version (the library, which can carry UDP) and embedded too. The
-# release carries
-# KittyConnect-windows-x64.zip: the program folder plus a manifest of every
-# file's SHA-256. The workflow also writes update.json to the `updates` branch,
-# which is how the Javacrafter Launcher finds and verifies KittyConnect updates.
+# Windows: the MSVC build links the C runtime and the WebView2 loader
+# statically, so the folder is just KittyConnect.exe, Start KittyConnect.bat
+# and licenses. The official tailcat.exe (hash-pinned) and kc-voip.exe, built
+# here from voip-helper/ on the same TailCat version, are embedded in the exe.
+#
+# macOS: one universal app (Apple Silicon and Intel). TailCat publishes no Mac
+# build, so both TailCat programs are built here from source at the same
+# version (tools/build-tailcat-macos.sh) and embedded in the app.
+#
+# The release carries KittyConnect-windows-x64.zip and KittyConnect-macos.zip
+# (each the program folder plus a manifest of every file's SHA-256) and a
+# .dmg. update.json and update-macos.json on the `updates` branch are how the
+# Javacrafter Launcher finds and verifies KittyConnect updates.
 
 name: Release
 
@@ -27,7 +31,7 @@ permissions:
   contents: write
 
 jobs:
-  release:
+  build-windows:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -88,6 +92,86 @@ jobs:
         shell: pwsh
         run: ./tools/release-package.ps1 -Folder dist/KittyConnect -Name KittyConnect -Exe KittyConnect.exe -Version ${{ steps.version.outputs.version }} -Out release
 
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-windows
+          path: |
+            release/KittyConnect-windows-x64.zip
+            release/release-entry.json
+
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the tag matches Cargo.toml
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          ver="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)"
+          if [ "$tag" != "$ver" ]; then
+            echo "Tag v$tag doesn't match Cargo.toml version $ver" >&2
+            exit 1
+          fi
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: voip-helper/go.mod
+          cache-dependency-path: voip-helper/go.sum
+
+      - name: Test the VOIP helper
+        working-directory: voip-helper
+        run: |
+          go vet ./...
+          go test ./...
+
+      - name: Build both TailCat programs for macOS
+        run: ./tools/build-tailcat-macos.sh universal
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Build (Apple Silicon and Intel, universal)
+        run: |
+          cargo build --release --locked --target aarch64-apple-darwin
+          cargo build --release --locked --target x86_64-apple-darwin
+          mkdir -p target/release-universal
+          lipo -create -output target/release-universal/KittyConnect \
+            target/aarch64-apple-darwin/release/KittyConnect \
+            target/x86_64-apple-darwin/release/KittyConnect
+
+      - name: Package
+        run: ./tools/package-macos.sh target/release-universal/KittyConnect dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-macos
+          path: |
+            dist/KittyConnect-macos.zip
+            dist/KittyConnect-macos.dmg
+            dist/release-entry-macos.json
+
+  publish:
+    needs: [build-windows, build-macos]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist-windows
+          path: release
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist-macos
+          path: dist
+
       - name: Publish release
         shell: pwsh
         env:
@@ -95,12 +179,15 @@ jobs:
         run: |
           $tag = '${{ github.ref_name }}'
           $pre = if ($tag -match '-') { '--prerelease' } else { $null }
-          gh release create $tag release/KittyConnect-windows-x64.zip `
+          $assets = @('release/KittyConnect-windows-x64.zip', 'dist/KittyConnect-macos.zip')
+          if (Test-Path 'dist/KittyConnect-macos.dmg') { $assets += 'dist/KittyConnect-macos.dmg' }
+          gh release create $tag @assets `
             --title "KittyConnect $($tag.TrimStart('v'))" --generate-notes $pre
 
-      # update.json lives on its own `updates` branch so releases never add commits
-      # to main. The launcher reads it from raw.githubusercontent.com.
-      - name: Publish update.json
+      # update.json (Windows) and update-macos.json (macOS) live on their own
+      # `updates` branch so releases never add commits to main. The launcher
+      # reads them from raw.githubusercontent.com.
+      - name: Publish update.json and update-macos.json
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -127,6 +214,10 @@ jobs:
             -UpdateJson updates-branch/update.json -Prerelease:$info.isPrerelease `
             -Notes "$($info.body)" -Published $published
 
-          git -C updates-branch add update.json
-          git -C updates-branch commit -m "update.json for $tag"
+          ./tools/publish-update.ps1 -Entry dist/release-entry-macos.json -Repo $repo -Tag $tag `
+            -UpdateJson updates-branch/update-macos.json -Prerelease:$info.isPrerelease `
+            -Notes "$($info.body)" -Published $published
+
+          git -C updates-branch add update.json update-macos.json
+          git -C updates-branch commit -m "update.json and update-macos.json for $tag"
           git -C updates-branch push origin HEAD:refs/heads/updates

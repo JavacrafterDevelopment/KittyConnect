@@ -1,18 +1,22 @@
 //! Runs TailCat.
 //!
-//! Two TailCat programs are embedded in KittyConnect.exe and unpacked into
-//! `data\bin\` on first use:
+//! Two TailCat programs are embedded in KittyConnect and unpacked into
+//! `data/bin/` on first use:
 //!
-//! - the official `tailcat.exe` (hash-pinned), for Ports and File Share, so
-//!   those get TailCat's security updates by bumping its version;
-//! - `kc-voip.exe`, built from `voip-helper/` on the TailCat library (the same
+//! - TailCat itself, for Port Forward and File Share, so those get TailCat's
+//!   security updates by bumping its version. On Windows it's the official
+//!   `tailcat.exe` (hash-pinned); TailCat publishes no macOS build, so on a Mac
+//!   it's built from TailCat's source at the same version with its official
+//!   build tags (`tools/build-tailcat-macos.sh`), as Homebrew does;
+//! - `kc-voip`, built from `voip-helper/` on the TailCat library (the same
 //!   TailCat version), for VOIP rooms only. It takes the same commands but
 //!   carries UDP as well as TCP, which voice and screen video need. When the
 //!   official tailcat can serve UDP itself, rooms can go back to it.
 //!
-//! Each gets its own home folder (`data\tailcat-home\`, `data\voip-home\`), so
-//! neither reads or writes keys in the user's profile or in the other's, and
-//! every child is tied to a job object so it dies with us.
+//! Each gets its own home folder (`data/tailcat-home/`, `data/voip-home/`), so
+//! neither reads or writes keys in the user's profile or in the other's. Every
+//! child dies with us: on Windows through a job object, on macOS through a
+//! small watchdog (see `reaper`), even if KittyConnect crashes.
 
 use std::io::{BufRead, BufReader, Read};
 use std::path::PathBuf;
@@ -27,8 +31,22 @@ use crate::UserEvent;
 /// The TailCat version of both programs. The VOIP helper's `go.mod` must name
 /// the same one (the build checks).
 pub const VERSION: &str = "0.7.0";
+#[cfg(windows)]
 static OFFICIAL: &[u8] = include_bytes!("../vendor/tailcat.exe");
+#[cfg(windows)]
 static VOIP: &[u8] = include_bytes!("../vendor/kc-voip.exe");
+#[cfg(target_os = "macos")]
+static OFFICIAL: &[u8] = include_bytes!("../vendor/macos/tailcat");
+#[cfg(target_os = "macos")]
+static VOIP: &[u8] = include_bytes!("../vendor/macos/kc-voip");
+// Other systems aren't shipped; a build there (for the tests) embeds nothing.
+#[cfg(not(any(windows, target_os = "macos")))]
+static OFFICIAL: &[u8] = &[];
+#[cfg(not(any(windows, target_os = "macos")))]
+static VOIP: &[u8] = &[];
+
+/// Program files end in `.exe` on Windows and have no extension elsewhere.
+const EXE: &str = if cfg!(windows) { ".exe" } else { "" };
 
 /// Which of the two embedded programs to run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -49,9 +67,9 @@ impl Binary {
 
     fn file_name(self) -> String {
         match self {
-            Binary::Official => format!("tailcat-{VERSION}.exe"),
+            Binary::Official => format!("tailcat-{VERSION}{EXE}"),
             // Rebuilt with each KittyConnect version, so named by both.
-            Binary::Voip => format!("kc-voip-{}-tc{VERSION}.exe", env!("CARGO_PKG_VERSION")),
+            Binary::Voip => format!("kc-voip-{}-tc{VERSION}{EXE}", env!("CARGO_PKG_VERSION")),
         }
     }
 
@@ -121,8 +139,14 @@ fn exe_path(bin: Binary) -> Result<PathBuf, String> {
         return Ok(exe);
     }
     std::fs::create_dir_all(&dir).map_err(|e| format!("Couldn't create {}: {e}", dir.display()))?;
-    let tmp = exe.with_extension("exe.part");
+    let tmp = dir.join(format!("{}.part", bin.file_name()));
     std::fs::write(&tmp, bytes).map_err(|e| format!("Couldn't unpack TailCat: {e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))
+            .map_err(|e| format!("Couldn't unpack TailCat: {e}"))?;
+    }
     let _ = std::fs::remove_file(&exe);
     std::fs::rename(&tmp, &exe).map_err(|e| format!("Couldn't unpack TailCat: {e}"))?;
     Ok(exe)
@@ -172,6 +196,8 @@ pub fn spawn(role: Role, args: &[String], proxy: &EventLoopProxy<UserEvent>) -> 
     let mut child = cmd.spawn().map_err(|e| format!("Couldn't start TailCat: {e}"))?;
     #[cfg(windows)]
     job::adopt(&child);
+    #[cfg(unix)]
+    reaper::adopt(child.id());
 
     let id = NEXT.fetch_add(1, Ordering::Relaxed);
     if let Some(out) = child.stdout.take() {
@@ -402,6 +428,111 @@ pub fn say_bye(port: u16, request: &str) {
     }
 }
 
+/// Ends TailCat children left behind by an earlier run that crashed (and whose
+/// watchdog didn't get to them). Nothing to do on Windows, where the job
+/// object ends them with us.
+pub fn sweep_leftovers() {
+    #[cfg(unix)]
+    reaper::sweep();
+}
+
+/// macOS has no job objects, so a watchdog stands in: a tiny `sh` in its own
+/// process group that waits for KittyConnect to exit, however it exits, then
+/// ends every TailCat child it started (listed in `data/run/<pid>.pids`).
+/// Only processes whose program is in `data/bin/` are ever ended, so a reused
+/// process id can't take anything else down. A crash would otherwise leave an
+/// opened port reachable through its code.
+#[cfg(unix)]
+mod reaper {
+    use std::io::Write;
+    use std::path::{Path, PathBuf};
+    use std::process::{Command, Stdio};
+    use std::sync::OnceLock;
+
+    pub(super) const SCRIPT: &str = r#"while kill -0 "$1" 2>/dev/null; do sleep 1; done
+[ -f "$2" ] || exit 0
+while read -r p; do
+  case "$(ps -p "$p" -o command= 2>/dev/null)" in
+    "$3"/*) kill -9 "$p" 2>/dev/null ;;
+  esac
+done < "$2"
+rm -f "$2""#;
+
+    fn run_dir() -> PathBuf {
+        crate::portable::data_dir().join("run")
+    }
+
+    fn bin_dir() -> PathBuf {
+        crate::portable::data_dir().join("bin")
+    }
+
+    fn list(pid: u32) -> PathBuf {
+        run_dir().join(format!("{pid}.pids"))
+    }
+
+    pub(super) fn watch(parent: u32, list: &Path, bin: &Path) -> std::io::Result<std::process::Child> {
+        use std::os::unix::process::CommandExt;
+        Command::new("/bin/sh")
+            .arg("-c")
+            .arg(SCRIPT)
+            .arg("kittyconnect-watchdog")
+            .arg(parent.to_string())
+            .arg(list)
+            .arg(bin)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            // Its own group, so a Ctrl+C meant for KittyConnect doesn't end it too.
+            .process_group(0)
+            .spawn()
+    }
+
+    /// Notes a TailCat child, starting the watchdog with the first one.
+    pub fn adopt(pid: u32) {
+        static WATCHDOG: OnceLock<()> = OnceLock::new();
+        let me = std::process::id();
+        let _ = std::fs::create_dir_all(run_dir());
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(list(me)) {
+            let _ = writeln!(f, "{pid}");
+        }
+        WATCHDOG.get_or_init(|| {
+            let _ = watch(me, &list(me), &bin_dir());
+        });
+    }
+
+    fn alive(pid: &str) -> bool {
+        Command::new("kill").args(["-0", pid]).stderr(Stdio::null()).status().is_ok_and(|s| s.success())
+    }
+
+    /// Ends the TailCat children of earlier runs that are gone.
+    pub fn sweep() {
+        let Ok(entries) = std::fs::read_dir(run_dir()) else { return };
+        let me = std::process::id().to_string();
+        let bin = format!("{}/", bin_dir().display());
+        for e in entries.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            let Some(owner) = name.strip_suffix(".pids") else { continue };
+            if owner == me || !owner.chars().all(|c| c.is_ascii_digit()) || alive(owner) {
+                continue;
+            }
+            for pid in std::fs::read_to_string(e.path()).unwrap_or_default().lines().map(str::trim) {
+                if pid.is_empty() || !pid.chars().all(|c| c.is_ascii_digit()) {
+                    continue;
+                }
+                let command = Command::new("ps")
+                    .args(["-p", pid, "-o", "command="])
+                    .output()
+                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                    .unwrap_or_default();
+                if command.starts_with(&bin) {
+                    let _ = Command::new("kill").args(["-9", pid]).status();
+                }
+            }
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+}
+
 /// A job object with kill-on-close: when KittyConnect exits, however it exits,
 /// Windows ends every TailCat it started.
 #[cfg(windows)]
@@ -460,6 +591,45 @@ mod tests {
         }
         assert_ne!(Binary::Voip.file_name(), Binary::Official.file_name());
         assert_ne!(Binary::Voip.home_name(), Binary::Official.home_name());
+    }
+
+    /// The watchdog ends a child in `bin/` once its parent is gone, and
+    /// leaves anything else alone.
+    #[cfg(unix)]
+    #[test]
+    fn watchdog_ends_children_when_the_app_dies() {
+        use std::process::Command;
+        let dir = std::env::temp_dir().join(format!("kc-reaper-{}", std::process::id()));
+        let bin = dir.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let sleeper = bin.join("tailcat-test");
+        std::fs::copy("/bin/sleep", &sleeper).unwrap();
+
+        let mut ours = Command::new(&sleeper).arg("60").spawn().unwrap();
+        let mut other = Command::new("/bin/sleep").arg("60").spawn().unwrap();
+        // Stands in for KittyConnect: exits after a moment.
+        let mut app = Command::new("/bin/sleep").arg("1").spawn().unwrap();
+        let list = dir.join("app.pids");
+        std::fs::write(&list, format!("{}\n{}\n", ours.id(), other.id())).unwrap();
+        let mut dog = reaper::watch(app.id(), &list, &bin).unwrap();
+
+        app.wait().unwrap();
+        // The watchdog notices within a second and ends only the program in bin/.
+        let _ = dog.wait();
+        let gone = ours.wait().unwrap();
+        assert!(!gone.success(), "the child in bin/ was ended");
+        assert!(other.try_wait().unwrap().is_none(), "anything else is left running");
+        assert!(!list.exists());
+        let _ = other.kill();
+        let _ = other.wait();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn program_names_fit_the_system() {
+        let name = Binary::Official.file_name();
+        assert_eq!(name.ends_with(".exe"), cfg!(windows), "{name}");
+        assert!(name.starts_with("tailcat-") && Binary::Voip.file_name().starts_with("kc-voip-"));
     }
 
     #[test]

@@ -40,6 +40,10 @@ try {
     $env:GOARCH = 'amd64'
     $env:CGO_ENABLED = '0'
 
+    # The modules (TailCat's source included) must be downloaded before Go can
+    # say where TailCat's build tags are.
+    & go mod download
+    if ($LASTEXITCODE -ne 0) { throw 'go mod download failed' }
     $tcDir = (& go list -m -f '{{.Dir}}' github.com/tailscale/tailcat).Trim()
     if ($LASTEXITCODE -ne 0) { throw 'go list failed' }
     $tags = (Get-Content (Join-Path $tcDir 'build-tags.txt') -Raw).Trim()

@@ -1,6 +1,6 @@
 # KittyConnect
 
-Portable peer-to-peer file sharing, port opening and voice/text rooms for Windows, built in Rust on
+Portable peer-to-peer file sharing, port opening and voice/text rooms for Windows and macOS, built in Rust on
 top of [TailCat](https://github.com/tailscale/tailcat), Tailscale's open-source
 "netcat over WireGuard". It needs no account, no install, and no router setup.
 
@@ -9,6 +9,27 @@ top of [TailCat](https://github.com/tailscale/tailcat), Tailscale's open-source
 Copy the `KittyConnect` folder anywhere, such as a USB stick, another PC, or a zip
 sent over Discord, and run `KittyConnect.exe` (or `Start KittyConnect.bat`,
 which does the same; the Launcher offers both).
+
+**On a Mac** (macOS 11 or newer, Apple Silicon or Intel): install it from the
+Launcher, or open `KittyConnect-macos.dmg` and drag KittyConnect to
+Applications (or unzip `KittyConnect-macos.zip` anywhere and open
+`KittyConnect.app` or `Start KittyConnect.command`). The app isn't notarized by
+Apple, so the first time macOS says it can't check it: right-click
+KittyConnect.app and choose **Open** (on macOS 15, open it once, then press
+**Open Anyway** in System Settings → Privacy & Security). The Launcher does
+this for you. Everything works as on Windows, except:
+
+- **Going live** (sharing your screen) isn't available yet: Apple's web view
+  doesn't let apps capture the screen. You can still **watch** others
+  (macOS 13.3 or newer).
+- **Network permission** is a Windows Firewall fix and isn't shown. The Mac
+  firewall is off unless you turned it on; if it is, macOS asks the first time
+  KittyConnect connects. macOS 15 may also ask to let KittyConnect find
+  devices on your local network: allow it, or direct connections between
+  people on the same network fall back to Relay.
+- macOS asks before KittyConnect uses the microphone (the first time you join
+  voice) and before it saves into Downloads (the first download).
+- Shortcuts use ⌘ instead of Ctrl.
 
 Each time it opens, it asks for your name. The box shows a random suggestion in
 grey: press **OK** to use it, or type your own. Your name is used everywhere
@@ -117,9 +138,12 @@ share kills its code for good, and the next start gets a new one.
 
 - Two TailCat programs are embedded in the exe and unpacked to `data\bin\` on
   first use:
-  - **TailCat 0.7.0, the official Windows build** (hash-pinned), for File Share
-    and Port Forward. Keeping the official build means those get TailCat's security
-    updates by bumping one version.
+  - **TailCat 0.7.0** itself, for File Share and Port Forward, so those get
+    TailCat's security updates by bumping one version. On Windows it's **the
+    official build** (hash-pinned). TailCat publishes no macOS build, so on a
+    Mac it's built from TailCat's source at the same version, with the official
+    build tags and flags, the way Homebrew builds it
+    (`tools/build-tailcat-macos.sh`).
   - **`kc-voip`**, for VOIP rooms only. It's built from `voip-helper\` on the
     TailCat *library*, the same version 0.7.0, and takes the same `serve` and
     `forward` commands. The difference is that it carries UDP as well as TCP
@@ -134,7 +158,16 @@ share kills its code for good, and the next start gets a new one.
   two never share any.
 - The WebView2 profile lives in `data\webview\`.
 - Every TailCat process is tied to a Windows job object, so they all close when
-  KittyConnect does, even if it crashes.
+  KittyConnect does, even if it crashes. macOS has no job objects, so a small
+  watchdog (`sh`, in its own process group) waits for KittyConnect to exit,
+  however it exits, and then ends the TailCat programs it started. Only
+  programs in `data/bin/` are ever ended. Leftovers from a run whose watchdog
+  was stopped too are ended at the next start.
+- **On a Mac**, the data folder is `KittyConnectData` beside `KittyConnect.app`
+  (writing inside the app would break its signature), or wherever the Launcher
+  says. When there's nowhere writable beside it, such as when macOS runs an app
+  opened straight from Downloads from a read-only copy, it's
+  `~/Library/Application Support/KittyConnect`.
 
 It needs the Microsoft Edge WebView2 runtime, which comes with Windows 11 and
 most Windows 10 installs. For machines without it, drop a fixed-version
@@ -222,6 +255,15 @@ VOIP helper (`kc-voip.exe`, with the licenses of everything in it) from
 the unit tests; `go test ./...` in `voip-helper\` runs the helper's, including
 a real tunnel through a local relay.
 
+**macOS**: `./build-macos.sh` (this Mac's chip) or `./build-macos.sh
+universal` (Apple Silicon and Intel in one app). It needs Rust, Go and Xcode's
+command line tools (`xcode-select --install`). It builds both TailCat programs
+from source with `tools/build-tailcat-macos.sh`, the app, and
+`dist/KittyConnect/` (KittyConnect.app, `Start KittyConnect.command`,
+licenses) with `dist/KittyConnect-macos.zip` and a `.dmg`. The Mac icon is
+`assets/KittyConnect.icns`, drawn by `tools/make-icns.py` (the same cat as
+`src/icon.rs`).
+
 To move to a newer TailCat, change the version and hash in
 `tools\fetch-tailcat.ps1`, `VERSION` in `src\tailcat.rs`, and run
 `go get github.com/tailscale/tailcat@v<version>` then `go mod tidy` in
@@ -237,9 +279,12 @@ it. To publish a version:
    annotated tags along with the commits.
 
 [`.github/workflows/release.yml`](.github/workflows/release.yml) then builds
-on GitHub, attaches `KittyConnect-windows-x64.zip` (with a SHA-256 manifest of
-every file) to the release, and updates `update.json` on the `updates` branch,
-which is where the Launcher looks for new versions.
+both on GitHub, attaches `KittyConnect-windows-x64.zip` and
+`KittyConnect-macos.zip` (each with a SHA-256 manifest of every file) and
+`KittyConnect-macos.dmg` to the release, and updates `update.json` and
+`update-macos.json` on the `updates` branch, which is where the Launcher looks
+for new versions. [`check.yml`](.github/workflows/check.yml) builds and tests
+both on every push to a work branch, and keeps the Mac app as a download.
 
 TailCat is © Tailscale Inc & contributors, BSD 3-Clause (`TAILCAT-LICENSE`).
 The licenses of everything compiled into `kc-voip` (TailCat, Tailscale,

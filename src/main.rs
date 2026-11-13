@@ -24,6 +24,8 @@ use serde_json::{json, Value};
 use tao::dpi::LogicalSize;
 use tao::event::{Event, WindowEvent};
 use tao::event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy};
+#[cfg(target_os = "macos")]
+use tao::platform::macos::WindowBuilderExtMacOS;
 #[cfg(windows)]
 use tao::platform::windows::WindowBuilderExtWindows;
 use tao::window::{Icon, ResizeDirection, Window, WindowBuilder};
@@ -46,6 +48,9 @@ const LOG_LINES: usize = 200;
 
 pub enum UserEvent {
     Ipc(String),
+    /// A menu bar item (macOS).
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    Menu(String),
     Tc(Role, u64, TcEvent),
     Share(ShareEvent),
     Recv(RecvEvent),
@@ -296,6 +301,7 @@ fn main() {
     let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
     let proxy = event_loop.create_proxy();
 
+    #[cfg_attr(not(any(windows, target_os = "macos")), allow(unused_mut))]
     let mut window_builder = WindowBuilder::new()
         .with_title("KittyConnect")
         .with_inner_size(LogicalSize::new(1060.0, 720.0))
@@ -307,7 +313,21 @@ fn main() {
     {
         window_builder = window_builder.with_undecorated_shadow(true);
     }
+    // A real titled window under a see-through title bar: macOS draws the
+    // traffic lights, rounded corners and shadow and resizes from the edges,
+    // and the page runs up underneath (the masthead leaves the lights room).
+    #[cfg(target_os = "macos")]
+    {
+        window_builder = window_builder
+            .with_decorations(true)
+            .with_titlebar_transparent(true)
+            .with_title_hidden(true)
+            .with_fullsize_content_view(true)
+            .with_traffic_light_inset(tao::dpi::LogicalPosition::new(18.0, 22.0));
+    }
     let window = window_builder.build(&event_loop).expect("create window");
+    #[cfg(target_os = "macos")]
+    let menu = menu_bar(proxy.clone());
 
     let mut web_context = WebContext::new(Some(data_dir().join("webview")));
     let ipc_proxy = proxy.clone();
@@ -320,6 +340,7 @@ fn main() {
     // browser's video encoder and decoder require. Nothing here is fetched
     // from the network; the handler answers from memory and the preview cache.
     let html = std::sync::Arc::new(page_html());
+    #[cfg_attr(not(windows), allow(unused_mut))]
     let mut webview_builder = WebViewBuilder::new_with_web_context(&mut web_context)
         .with_custom_protocol("kc".into(), move |_id, req| serve_page(&html, req.uri().path()))
         .with_url("kc://localhost/")
@@ -346,8 +367,10 @@ fn main() {
         }
     };
 
-    // Unpack TailCat in the background so the first Start is quick.
+    // Unpack TailCat in the background so the first Start is quick, and end
+    // any TailCat an earlier run that crashed left behind (macOS).
     std::thread::spawn(|| {
+        tailcat::sweep_leftovers();
         let _ = tailcat::prepare();
     });
     let ticker = proxy.clone();
@@ -369,6 +392,19 @@ fn main() {
         *flow = ControlFlow::Wait;
         let _ = &web_context;
         let changed = match event {
+            // NSApp only exists once the loop is running.
+            #[cfg(target_os = "macos")]
+            Event::NewEvents(tao::event::StartCause::Init) => {
+                menu.init_for_nsapp();
+                false
+            }
+            Event::UserEvent(UserEvent::Menu(id)) => {
+                if id == MENU_QUIT {
+                    app.shutdown();
+                    *flow = ControlFlow::Exit;
+                }
+                false
+            }
             Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => {
                 app.shutdown();
                 *flow = ControlFlow::Exit;
@@ -436,11 +472,65 @@ fn main() {
     });
 }
 
+/// The menu bar's Quit, the one item KittyConnect handles itself.
+const MENU_QUIT: &str = "quit";
+
+/// The macOS menu bar. The app menu is shown under the app's name; Edit is
+/// there because WebKit only gets ⌘C/⌘V/⌘X/⌘A/⌘Z through menu items.
+#[cfg(target_os = "macos")]
+fn menu_bar(proxy: EventLoopProxy<UserEvent>) -> muda::Menu {
+    use muda::accelerator::{Accelerator, Code, Modifiers};
+    use muda::{Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
+
+    let quit = Accelerator::new(Modifiers::META, Code::KeyQ);
+    let app_menu = Submenu::with_items(
+        "KittyConnect",
+        true,
+        &[
+            &PredefinedMenuItem::hide(None),
+            &PredefinedMenuItem::hide_others(None),
+            &PredefinedMenuItem::show_all(None),
+            &PredefinedMenuItem::separator(),
+            &MenuItem::with_id(MENU_QUIT, "Quit KittyConnect", true, Some(quit)),
+        ],
+    )
+    .expect("app menu");
+    let edit_menu = Submenu::with_items(
+        "Edit",
+        true,
+        &[
+            &PredefinedMenuItem::undo(None),
+            &PredefinedMenuItem::redo(None),
+            &PredefinedMenuItem::separator(),
+            &PredefinedMenuItem::cut(None),
+            &PredefinedMenuItem::copy(None),
+            &PredefinedMenuItem::paste(None),
+            &PredefinedMenuItem::select_all(None),
+        ],
+    )
+    .expect("edit menu");
+    let window_menu = Submenu::with_items(
+        "Window",
+        true,
+        &[&PredefinedMenuItem::minimize(None), &PredefinedMenuItem::maximize(None), &PredefinedMenuItem::close_window(None)],
+    )
+    .expect("window menu");
+    let menu = Menu::with_items(&[&app_menu, &edit_menu, &window_menu]).expect("menu bar");
+    MenuEvent::set_event_handler(Some(move |e: MenuEvent| {
+        let _ = proxy.send_event(UserEvent::Menu(e.id.0));
+    }));
+    menu
+}
+
+/// "windows" or "macos", for the page.
+const OS: &str = if cfg!(target_os = "macos") { "macos" } else { "windows" };
+
 fn page_html() -> String {
     let boot = json!({
         "version": VERSION,
         "tailcat": tailcat::VERSION,
         "dataDir": data_dir().display().to_string(),
+        "os": OS,
     });
     INDEX_HTML
         .replace("/*{{CSS}}*/", APP_CSS)
@@ -728,7 +818,7 @@ impl App {
             "recv.reveal" => {
                 let id = msg["id"].as_u64().unwrap_or(0);
                 if let Some(path) = self.recv.states.get(&id).and_then(|s| s.path.clone()) {
-                    let _ = std::process::Command::new("explorer").arg(format!("/select,{}", path.display())).spawn();
+                    reveal_in_shell(&path);
                 }
             }
 
@@ -777,7 +867,8 @@ impl App {
                     let _ = self.share.peers.retry(id) || self.hosts.iter_mut().any(|h| h.peers.retry(id));
                 }
             }
-            "firewall.reset" => {
+            // Windows Firewall only; the page doesn't offer it elsewhere.
+            "firewall.reset" if cfg!(windows) => {
                 let proxy = self.proxy.clone();
                 self.set_status("Waiting for Windows to allow the change…", "busy");
                 std::thread::spawn(move || {
@@ -819,7 +910,7 @@ impl App {
             "voip.download" => self.voip.download(msg["aid"].as_u64().unwrap_or(0) as u32, self.recv.inbox.clone()),
             "voip.reveal" => {
                 if let Some(path) = self.voip.download_path(msg["aid"].as_u64().unwrap_or(0) as u32) {
-                    let _ = std::process::Command::new("explorer").arg(format!("/select,{}", path.display())).spawn();
+                    reveal_in_shell(&path);
                 }
             }
             "voip.volume" => self.voip.set_volume(msg["id"].as_u64().unwrap_or(0) as u16, msg["gain"].as_f64().unwrap_or(1.0) as f32),
@@ -841,7 +932,11 @@ impl App {
                         "Copied to the clipboard"
                     }, "ok");
                 } else {
-                    self.set_status("Couldn't reach the clipboard. Select the code and press Ctrl+C.", "bad");
+                    self.set_status(if cfg!(target_os = "macos") {
+                        "Couldn't reach the clipboard. Select the code and press \u{2318}C."
+                    } else {
+                        "Couldn't reach the clipboard. Select the code and press Ctrl+C."
+                    }, "bad");
                 }
             }
             "paste" => {
@@ -1641,8 +1736,27 @@ fn join_bye(j: &mut PortJoin) -> Option<std::thread::JoinHandle<()>> {
     }))
 }
 
+/// Opens a folder (or a web page) the way double-clicking it would.
 pub(crate) fn open_in_shell(target: impl AsRef<std::ffi::OsStr>) {
-    let _ = std::process::Command::new("explorer").arg(target).spawn();
+    let opener = if cfg!(windows) {
+        "explorer"
+    } else if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    let _ = std::process::Command::new(opener).arg(target).spawn();
+}
+
+/// Shows a file selected in its folder: Explorer on Windows, Finder on a Mac.
+fn reveal_in_shell(path: &std::path::Path) {
+    if cfg!(windows) {
+        let _ = std::process::Command::new("explorer").arg(format!("/select,{}", path.display())).spawn();
+    } else if cfg!(target_os = "macos") {
+        let _ = std::process::Command::new("open").arg("-R").arg(path).spawn();
+    } else if let Some(dir) = path.parent() {
+        open_in_shell(dir);
+    }
 }
 
 #[cfg(windows)]

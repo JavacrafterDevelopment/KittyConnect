@@ -1,0 +1,98 @@
+# Builds and tests both versions on every push to a work branch (and on pull
+# requests), so a broken build shows up before a release tag. The macOS app is
+# kept as a download (KittyConnect-macos-test) for trying it out.
+
+name: Check
+
+on:
+  push:
+    branches: ['claude/**']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch TailCat
+        shell: pwsh
+        run: ./tools/fetch-tailcat.ps1
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: voip-helper/go.mod
+          cache-dependency-path: voip-helper/go.sum
+
+      - name: Build the VOIP helper
+        shell: pwsh
+        run: ./tools/build-voip-helper.ps1
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test
+        run: cargo test --locked --target x86_64-pc-windows-msvc
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: voip-helper/go.mod
+          cache-dependency-path: voip-helper/go.sum
+
+      - name: Test the VOIP helper
+        working-directory: voip-helper
+        run: |
+          go vet ./...
+          go test ./...
+
+      - name: Build both TailCat programs for macOS
+        run: ./tools/build-tailcat-macos.sh universal
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Build (Apple Silicon and Intel, universal)
+        run: |
+          cargo build --release --locked --target aarch64-apple-darwin
+          cargo build --release --locked --target x86_64-apple-darwin
+          mkdir -p target/release-universal
+          lipo -create -output target/release-universal/KittyConnect \
+            target/aarch64-apple-darwin/release/KittyConnect \
+            target/x86_64-apple-darwin/release/KittyConnect
+
+      - name: Package
+        run: ./tools/package-macos.sh target/release-universal/KittyConnect dist
+
+      - name: Check the app
+        run: |
+          app=dist/KittyConnect/KittyConnect.app
+          plutil -lint "$app/Contents/Info.plist"
+          codesign --verify --deep --strict "$app"
+          lipo -archs "$app/Contents/MacOS/KittyConnect"
+          # Both TailCat programs it embeds, for both chips, signed.
+          for b in vendor/macos/tailcat vendor/macos/kc-voip; do
+            lipo -archs "$b"
+            codesign --verify "$b"
+            "$b" --help >/dev/null 2>&1 || "$b" help >/dev/null 2>&1 || true
+          done
+          vendor/macos/tailcat --version || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: KittyConnect-macos-test
+          path: dist/KittyConnect-macos.zip

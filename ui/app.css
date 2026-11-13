@@ -1182,3 +1182,15 @@ select.input { padding: 7px 9px; }
 .game-tip { margin: 6px 0 0; line-height: 1.5; }
 .okline { margin: 0; font-size: 12.5px; color: var(--ok); }
 #fw-modal .namecard .set-desc + .set-desc { margin-top: -4px; }
+
+/* ------------------------------------------------------------------ macOS */
+
+/* A real titled window: macOS draws the traffic lights over the masthead's
+   left end and resizes from the edges, so the page's own window buttons and
+   grips stand down and the masthead leaves the lights room. Windows Firewall's
+   Network permission has no Mac counterpart. */
+:root[data-os="macos"] #top { padding-left: 96px; }
+:root[data-os="macos"] #brandrow { padding-right: 0; }
+:root[data-os="macos"] #winbtns,
+:root[data-os="macos"] .grips,
+:root[data-os="macos"] #fw-link { display: none; }
