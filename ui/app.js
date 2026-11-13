@@ -944,8 +944,22 @@ $('ss-quality').addEventListener('change', estimate);
 async function pickConfig(w, h, fps) {
   const bitrate = bitrateFor(w, h, fps);
   const base = { width: w, height: h, bitrate, framerate: fps, latencyMode: 'realtime', bitrateMode: 'variable' };
+  const high = w * h > 2073600 || fps > 30 ? 'avc1.640033' : 'avc1.640028';
+  const gpu = { codec: high, avc: { format: 'annexb' }, hardwareAcceleration: 'prefer-hardware' };
+  // Frame-rate layers (L1T3: three of them) let the room send a viewer whose
+  // connection can't keep up fewer frames, without lowering the picture for
+  // everyone else. Best on the graphics card; in software only where it keeps
+  // up easily (1080p at 30 fps or less). Otherwise, no layers: a slow viewer
+  // then gets key frames only until they catch up.
+  const light = w * h <= 2073600 && fps <= 30;
   const candidates = [
-    { ...base, codec: w * h > 2073600 || fps > 30 ? 'avc1.640033' : 'avc1.640028', avc: { format: 'annexb' }, hardwareAcceleration: 'prefer-hardware' },
+    { ...base, ...gpu, scalabilityMode: 'L1T3' },
+    { ...base, ...gpu, scalabilityMode: 'L1T2' },
+    ...(light ? [
+      { ...base, codec: 'avc1.42E033', avc: { format: 'annexb' }, scalabilityMode: 'L1T3' },
+      { ...base, codec: 'vp8', scalabilityMode: 'L1T3' },
+    ] : []),
+    { ...base, ...gpu },
     { ...base, codec: 'avc1.42E033', avc: { format: 'annexb' } },
     { ...base, codec: 'vp8' },
   ];
@@ -1011,11 +1025,14 @@ async function startShare() {
   // Tells the capture and encoder what to protect: sharp edges or smooth motion.
   try { track.contentHint = preset().hint; } catch (_) { /* older runtime */ }
   ss.encoder = new VideoEncoder({
-    output: (chunk) => {
+    output: (chunk, meta) => {
       const buf = new Uint8Array(chunk.byteLength);
       chunk.copyTo(buf);
       ss.bytes += buf.length;
-      post({ cmd: 'voip.video', key: chunk.type === 'key', ts: Math.round(chunk.timestamp), data: b64(buf) });
+      // Its frame-rate layer (0 without layers), so the room can leave the
+      // higher ones out for a viewer who can't keep up.
+      const layer = meta && meta.svc ? meta.svc.temporalLayerId || 0 : 0;
+      post({ cmd: 'voip.video', key: chunk.type === 'key', layer, ts: Math.round(chunk.timestamp), data: b64(buf) });
     },
     error: (e) => stopShare(`The video encoder stopped: ${e.message}`),
   });
@@ -1039,7 +1056,9 @@ async function startShare() {
   ss.tick = setInterval(() => {
     const mbps = ((ss.bytes * 8) / 2 / 1e6).toFixed(1);
     const fitted = ss.rate < ss.maxRate * 0.97 ? ' · lowered to fit a viewer\'s connection' : '';
-    $('ss-stats').textContent = `${w}×${h} · ${Math.round(ss.frames / 2)} fps · ${mbps} Mbit/s · ${config.codec.startsWith('avc') ? 'H.264' : 'VP8'}${fitted}`;
+    // "layered": a viewer who can't keep up can be sent fewer frames on their own.
+    const layered = config.scalabilityMode ? ' · layered' : '';
+    $('ss-stats').textContent = `${w}×${h} · ${Math.round(ss.frames / 2)} fps · ${mbps} Mbit/s · ${config.codec.startsWith('avc') ? 'H.264' : 'VP8'}${layered}${fitted}`;
     ss.bytes = 0;
     ss.frames = 0;
   }, 2000);

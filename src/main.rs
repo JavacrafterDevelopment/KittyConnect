@@ -909,7 +909,8 @@ impl App {
                 use base64::Engine as _;
                 if let Ok(data) = base64::engine::general_purpose::STANDARD.decode(s("data")) {
                     // Fell behind: the page's encoder makes a key frame to recover from.
-                    if self.voip.video(msg["key"].as_bool().unwrap_or(false), msg["ts"].as_u64().unwrap_or(0), &data) {
+                    let layer = msg["layer"].as_u64().unwrap_or(0).min(3) as u8;
+                    if self.voip.video(msg["key"].as_bool().unwrap_or(false), layer, msg["ts"].as_u64().unwrap_or(0), &data) {
                         send(webview, json!({ "type": "keyframe" }));
                     }
                 }

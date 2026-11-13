@@ -115,6 +115,8 @@ pub struct Voip {
     /// Numbers our screen share's frames; carries on across shares, so a
     /// watcher never mistakes a new share for an old one.
     frame_no: u32,
+    /// Which frame each of our frames builds on (frame-rate layers).
+    chain: media::LayerChain,
     /// Our screen share's bitrate, following what watchers report.
     rate: Option<media::RateControl>,
     /// How voice and video are connected (see [`VoipEvent::Media`]).
@@ -163,6 +165,7 @@ impl Default for Voip {
             sharing: None,
             video_gap: None,
             frame_no: 0,
+            chain: media::LayerChain::default(),
             rate: None,
             media: "off",
             watching: None,
@@ -206,6 +209,7 @@ impl Voip {
         self.room_notice.clear();
         self.sharing = None;
         self.video_gap = None;
+        self.chain = media::LayerChain::default();
         self.rate = None;
         self.media = "off";
         self.watching = None;
@@ -387,6 +391,8 @@ impl Voip {
                 }
                 self.rate = Some(media::RateControl::new(max));
                 self.video_gap = None;
+                // A new share starts from a key frame; nothing builds on the old one.
+                self.chain = media::LayerChain::default();
                 self.sharing = Some(i);
             }
             None => {
@@ -401,7 +407,11 @@ impl Voip {
     /// out to the room. When the link is backed up the frame is dropped rather
     /// than queued (so the stream stays live), later frames are skipped until
     /// a key frame, and true is returned: the page should make one now.
-    pub fn video(&mut self, key: bool, ts: u64, data: &[u8]) -> bool {
+    /// One encoded frame of our screen share. `layer` is its frame-rate layer
+    /// (0 without layers). Returns true when the encoder should make a key
+    /// frame: a base-layer frame couldn't go out, so what follows can't be
+    /// decoded until one does.
+    pub fn video(&mut self, key: bool, layer: u8, ts: u64, data: &[u8]) -> bool {
         if self.sharing.is_none() || data.len() > media::MAX_PIECES * media::PIECE {
             return false;
         }
@@ -416,13 +426,27 @@ impl Voip {
                 return again;
             }
         }
+        // A frame whose base never went out can't be decoded: a higher layer
+        // waits for its next base; the base layer needs a key frame.
+        let Some(back) = self.chain.back(self.frame_no, key, layer) else {
+            return layer == 0 && self.gap();
+        };
         // A frame's number is only used once it's queued, so watchers never
         // wait for one that was never sent.
-        if m.video(key, media::video_pieces(self.frame_no, key, ts, data)) {
+        if m.video(key, media::layered_pieces(self.frame_no, key, layer, back, ts, data)) {
+            self.chain.sent(self.frame_no, key, layer);
             self.frame_no = self.frame_no.wrapping_add(1);
             self.video_gap = None;
             return false;
         }
+        // The link is backed up. A higher layer just loses this frame (and
+        // what builds on it); the base layer needs a key frame.
+        self.chain.lost(layer);
+        layer == 0 && self.gap()
+    }
+
+    /// Starts waiting for a key frame. True the first time (ask the encoder).
+    fn gap(&mut self) -> bool {
         let first = self.video_gap.is_none();
         if first {
             self.video_gap = Some(Instant::now());

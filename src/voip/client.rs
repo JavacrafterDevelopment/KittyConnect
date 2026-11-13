@@ -268,7 +268,8 @@ pub fn connect(
             }
         };
         let deadline = Instant::now() + Duration::from_secs(75);
-        let hello = json!({ "t": "hello", "v": super::server::PROTOCOL, "name": name, "host": host_token });
+        // "layers": this version understands frame-rate layers (see media::Thinning).
+        let hello = json!({ "t": "hello", "v": super::server::PROTOCOL, "layers": true, "name": name, "host": host_token });
         let (mut stream, welcome) = loop {
             if !a.load(Ordering::Relaxed) {
                 return;
@@ -443,7 +444,7 @@ mod tests {
     use super::*;
 
     fn hello(name: &str, host: Option<&str>) -> Value {
-        json!({ "t": "hello", "v": PROTOCOL, "name": name, "host": host })
+        json!({ "t": "hello", "v": PROTOCOL, "layers": true, "name": name, "host": host })
     }
 
     fn next_json(s: &mut TcpStream, t: &str) -> Value {
@@ -471,6 +472,63 @@ mod tests {
         let n = u.recv(&mut b).unwrap();
         assert_eq!(&b[..n], &[media::REGISTERED]);
         u
+    }
+
+    /// One slow watcher among several: the room sends them fewer frames (the
+    /// top frame-rate layer goes), while a watcher who keeps up, and one on an
+    /// older version, still get every frame.
+    #[test]
+    fn a_slow_watcher_gets_fewer_frames_and_no_one_else_does() {
+        let room = RoomServer::start("Test", std::env::temp_dir().join(format!("kc-room-thin-{}", std::process::id()))).unwrap();
+        let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, room.port));
+        let (mut sam, ws) = try_join(addr, &hello("Sam", Some(&room.host_token))).unwrap();
+        let (mut fast, wf) = try_join(addr, &hello("Fast", None)).unwrap();
+        let (mut slow, wl) = try_join(addr, &hello("Slow", None)).unwrap();
+        // An older version doesn't say it understands layers.
+        let (mut old, wo) = try_join(addr, &json!({ "t": "hello", "v": PROTOCOL, "name": "Old" })).unwrap();
+        let sam_id = ws["you"].as_u64().unwrap() as u16;
+        let (us, uf, ul, uo) =
+            (udp_member(room.port, &ws), udp_member(room.port, &wf), udp_member(room.port, &wl), udp_member(room.port, &wo));
+        sam.write_all_frame(&json!({ "t": "screen", "on": true, "w": 1280, "h": 720, "fps": 30, "codec": "vp8" })).unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        for s in [&mut fast, &mut slow, &mut old] {
+            s.write_all_frame(&json!({ "t": "watch", "id": sam_id })).unwrap();
+        }
+        std::thread::sleep(Duration::from_millis(100));
+
+        // Frames in three layers (0,2,1,2, ...), one piece each.
+        let mut chain = media::LayerChain::default();
+        let mut send = |frames: std::ops::Range<u32>| {
+            for f in frames {
+                let (key, layer) = (f == 0, [0, 2, 1, 2][(f % 4) as usize]);
+                let back = chain.back(f, key, layer).unwrap();
+                chain.sent(f, key, layer);
+                for p in media::layered_pieces(f, key, layer, back, f as u64 * 33_333, &[f as u8; 500]) {
+                    us.send(&p).unwrap();
+                }
+            }
+        };
+        let frames_got = |u: &UdpSocket| -> Vec<u32> {
+            let mut got = Vec::new();
+            while let Some(d) = udp_within(u, media::VIDEO, Duration::from_millis(400)) {
+                got.push(media::u32_at(&d, 3));
+            }
+            got
+        };
+        send(0..4);
+        for u in [&uf, &ul, &uo] {
+            assert_eq!(frames_got(u), vec![0, 1, 2, 3]);
+        }
+        // Slow (and Old) say they're falling well behind.
+        let behind = media::Report { loss: 0.0, delay_ms: 900, shown: 10, dropped: 0 };
+        ul.send(&behind.datagram(sam_id)).unwrap();
+        uo.send(&behind.datagram(sam_id)).unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        send(4..12);
+        assert_eq!(frames_got(&uf), (4..12).collect::<Vec<_>>(), "a watcher who keeps up gets everything");
+        assert_eq!(frames_got(&ul), vec![4, 6, 8, 10], "the slow one loses only the top layer");
+        assert_eq!(frames_got(&uo), (4..12).collect::<Vec<_>>(), "an older version gets everything, as before");
+        let _ = (&mut fast, &mut slow, &mut old);
     }
 
     /// The next datagram of `kind`, waiting up to `within`. Windows reports
