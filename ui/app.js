@@ -4,7 +4,10 @@
 'use strict';
 
 const $ = (id) => document.getElementById(id);
-const BOOT = window.BOOT || { version: 'dev', tailcat: '?' };
+const BOOT = window.BOOT || { version: 'dev', tailcat: '?', os: /Mac/i.test(navigator.platform || '') ? 'macos' : 'windows' };
+/* "windows" or "macos": the stylesheet hides what only one of them has. */
+const MAC = BOOT.os === 'macos';
+document.documentElement.dataset.os = BOOT.os || 'windows';
 
 function post(msg) {
   if (window.ipc) window.ipc.postMessage(JSON.stringify(msg));
@@ -1081,7 +1084,15 @@ function stopShare(error) {
   if (error) shareError(error);
 }
 
+/* Going live needs screen capture and a frame reader that Apple's web view
+   doesn't give apps; watching works. */
+if (MAC) {
+  $('ss-open').disabled = true;
+  $('ss-open').title = 'Sharing your screen from a Mac isn\'t available yet. You can still watch others.';
+  $('ss-row').insertAdjacentHTML('beforeend', '<span class="meta">Not available on Mac yet. You can watch others.</span>');
+}
 $('ss-open').addEventListener('click', () => {
+  if (MAC) return;
   fillResOptions();
   hide($('ss-box'), false);
   hide($('ss-row'), true);
@@ -1427,12 +1438,14 @@ window.onHost = (msg) => {
 $('data-link').addEventListener('click', () => post({ cmd: 'openData' }));
 $('version').textContent = `v${BOOT.version} · TailCat ${BOOT.tailcat}`;
 
-// Keyboard: Ctrl+1 / Ctrl+2 switch tabs.
+// Keyboard: Ctrl+1 / 2 / 3 (⌘ on a Mac) switch tabs.
 window.addEventListener('keydown', (e) => {
-  if (e.ctrlKey && e.key === '1') page('files');
-  if (e.ctrlKey && e.key === '2') page('ports');
-  if (e.ctrlKey && e.key === '3') page('voip');
+  if (!(MAC ? e.metaKey : e.ctrlKey)) return;
+  if (e.key === '1') page('files');
+  if (e.key === '2') page('ports');
+  if (e.key === '3') page('voip');
 });
+if (MAC) $('data-link').textContent = 'Portable · KittyConnectData';
 document.addEventListener('contextmenu', (e) => { if (!e.target.closest('input, .code, .log-body, .err')) e.preventDefault(); });
 
 /* ------------------------------------------------------ browser preview */

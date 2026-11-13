@@ -76,6 +76,10 @@ fn shared_socket() -> std::io::Result<UdpSocket> {
     use socket2::{Domain, Protocol, Socket, Type};
     let s = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
     s.set_reuse_address(true)?;
+    // macOS (BSD) also wants this for two programs on one UDP port, as
+    // Minecraft's own socket has it.
+    #[cfg(unix)]
+    s.set_reuse_port(true)?;
     s.bind(&SocketAddr::from((Ipv4Addr::UNSPECIFIED, PORT)).into())?;
     let s: UdpSocket = s.into();
     // Both the default interface and loopback, so it works with no network too.
