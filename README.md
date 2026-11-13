@@ -97,9 +97,15 @@ TailCat forwards **TCP** ports. Games that only use UDP won't work this way.
   Like Discord, it's encoded as H.264 on your GPU where available (VP8
   otherwise), at roughly 2.5 Mbit/s for 720p30 and 4.5 Mbit/s for 1080p30, with
   a key frame every 2 seconds, so new viewers and dropped frames recover quickly.
-  If a viewer's connection can't keep up, the bitrate is lowered (down to a
-  fifth of the chosen quality) until it can, then raised again; the stats say
-  so while it's lowered.
+  **One slow viewer doesn't lower the picture for everyone.** Where the
+  encoder can, frames come in three frame-rate layers ("layered" in your
+  stats). A viewer whose connection can't keep up, such as one on a relay or
+  a VPN, is sent fewer frames (15 instead of 30 a second, then 7.5, then key
+  frames only) at the same sharpness, and goes back up a step after a few
+  good seconds, while everyone else keeps the full stream. Only if even the
+  viewer doing best falls behind (your own connection, or the host's, which
+  everyone shares) is the bitrate lowered, down to a fifth of the chosen
+  quality, until it can keep up; the stats say so while it's lowered.
 - **Attach files** in chat with the paperclip, or drop them on the room (up to
   100 MB each). Images up to 8 MB show inline; anything can be downloaded to
   your Downloads folder. Attachments live only as long as the room.
@@ -208,7 +214,18 @@ runtime into a `WebView2\` folder beside the exe.
     pieces, and if a frame still isn't whole in time (about a third of a
     second), skips to the next key frame and asks for one, so the picture
     stays live instead of freezing. Each watcher reports its loss and delay
-    once a second, and the sharer's bitrate follows the worst.
+    once a second.
+  - Frame-rate layers: the sharer's encoder makes L1T3 (on the graphics card
+    where it can; in software up to 1080p30; otherwise none). Each frame says
+    its layer and which frame it builds on, in spare bits of its flags byte,
+    so older versions read it as before. For each watcher that understands
+    layers, the room sends only the layers they keep up with: down a layer
+    after two seconds of delay past 400 ms (or loss past 25%; scattered loss is
+    made good by asking again), up one after four good seconds, and only at
+    a frame where nothing sent afterwards builds on a frame they didn't get.
+    A watcher shows each frame whose base it has; a lost top-layer frame
+    costs only itself, a lost base-layer one is asked for again. The
+    sharer's bitrate follows the watcher doing best.
 - **Minecraft LAN worlds**: Minecraft announces a LAN world with a UDP message
   on port 4445 every 1.5 seconds (`[MOTD]name[/MOTD][AD]port[/AD]`). The host's
   KittyConnect listens on 4445 (sharing it with Minecraft) for messages from

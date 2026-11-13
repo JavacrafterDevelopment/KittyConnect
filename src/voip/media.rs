@@ -18,6 +18,8 @@
 //! VOICE      member → room   [0x20][seq u32][opus]
 //!            room → member   [0x20][from u16][seq u32][opus]
 //! VIDEO      member → room   [0x30][frame u32][piece u16][pieces u16][flags u8][ts u64][data]
+//!            flags: bit 0 key frame; bits 1-2 layer (0-3); bits 3-7 how many
+//!            frames back the frame it builds on is (0 from older versions: 1)
 //!            room → watcher  [0x30][from u16][frame u32][piece u16][pieces u16][flags u8][ts u64][data]
 //! NACK       watcher → room  [0x31][sharer u16][frame u32][piece u16]...   (no pieces: all of it)
 //! REPORT     watcher → room  [0x32][sharer u16][loss ‰ u16][delay ms u16][shown u16][dropped u16]
@@ -34,7 +36,16 @@
 //! puts frames back together ([`Assembler`]), asks the room again for missing
 //! pieces (NACK), and if a frame still isn't whole in time, skips to the next
 //! key frame and asks for one. Once a second each watcher reports its loss and
-//! queueing delay, and the sharer's bitrate follows the worst ([`RateControl`]).
+//! queueing delay.
+//!
+//! Frame-rate layers: the sharer's encoder (where it can) arranges frames in
+//! up to three layers, so the higher ones can be left out and what's left still
+//! decodes (30, 15 or 7.5 frames a second, say). Each frame says its layer and
+//! which frame it builds on. The room sends each watcher only the layers their
+//! connection keeps up with ([`Thinning`]), down to key frames only, so one bad
+//! connection doesn't lower the picture for everyone. The sharer's bitrate
+//! follows the watcher doing best ([`RateControl`]): if even they fall behind,
+//! the trouble is the sharer's or the host's own connection, shared by all.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::net::UdpSocket;
@@ -92,8 +103,35 @@ pub fn voice(seq: u32, opus: &[u8]) -> Vec<u8> {
     d
 }
 
-/// One encoded frame of a screen share, cut into datagrams.
+/// One encoded frame of a screen share, cut into datagrams; no layers (each
+/// frame builds on the one before).
+#[cfg(test)]
 pub fn video_pieces(frame: u32, key: bool, ts: u64, data: &[u8]) -> Vec<Vec<u8>> {
+    layered_pieces(frame, key, 0, 1, ts, data)
+}
+
+/// The flags byte: key frame, layer, and how many frames back the frame it
+/// builds on is (1..=31).
+fn flags(key: bool, layer: u8, back: u8) -> u8 {
+    key as u8 | (layer.min(3) << 1) | (back.clamp(1, 31) << 3)
+}
+
+/// (key, layer, back) from a flags byte. Older versions only set the key bit:
+/// layer 0, building on the frame before.
+fn unflag(f: u8) -> (bool, u8, u8) {
+    (f & 1 == 1, (f >> 1) & 3, (f >> 3).max(1))
+}
+
+/// (key, layer) of a sharer's VIDEO datagram, for the room.
+pub fn video_layer(d: &[u8]) -> (bool, u8) {
+    let (key, layer, _) = unflag(d.get(9).copied().unwrap_or(0));
+    (key, layer)
+}
+
+/// One encoded frame of a screen share, cut into datagrams. `layer` is its
+/// frame-rate layer (0 for a stream without layers), `back` how many frames
+/// back the frame it builds on is.
+pub fn layered_pieces(frame: u32, key: bool, layer: u8, back: u8, ts: u64, data: &[u8]) -> Vec<Vec<u8>> {
     let chunks: Vec<&[u8]> = if data.is_empty() { vec![&[][..]] } else { data.chunks(PIECE).collect() };
     let count = chunks.len().min(MAX_PIECES) as u16;
     chunks
@@ -106,7 +144,7 @@ pub fn video_pieces(frame: u32, key: bool, ts: u64, data: &[u8]) -> Vec<Vec<u8>>
             d.extend_from_slice(&frame.to_be_bytes());
             d.extend_from_slice(&(i as u16).to_be_bytes());
             d.extend_from_slice(&count.to_be_bytes());
-            d.push(key as u8);
+            d.push(flags(key, layer, back));
             d.extend_from_slice(&ts.to_be_bytes());
             d.extend_from_slice(c);
             d
@@ -143,6 +181,12 @@ impl Report {
         d.extend_from_slice(&self.shown.to_be_bytes());
         d.extend_from_slice(&self.dropped.to_be_bytes());
         d
+    }
+
+    /// A watcher's REPORT datagram about `sharer`'s share.
+    #[cfg(test)]
+    pub fn datagram(&self, sharer: u16) -> Vec<u8> {
+        self.encode(REPORT, sharer)
     }
 
     /// (who, report) from a REPORT datagram.
@@ -331,9 +375,13 @@ const MAX_GAP: u32 = 120;
 const NACK_MAX: usize = (MAX_DATAGRAM - 7) / 2;
 
 struct Partial {
-    /// 0: only known to exist (a later frame arrived first).
+    /// 0: only known to exist (a later frame builds on it, or came first).
     count: u16,
     key: bool,
+    /// Frame-rate layer (0 until its pieces come).
+    layer: u8,
+    /// The frame it builds on (None for a key frame).
+    base: Option<u32>,
     ts: u64,
     pieces: Vec<Option<Vec<u8>>>,
     got: u16,
@@ -354,6 +402,8 @@ impl Partial {
         Partial {
             count: 0,
             key: false,
+            layer: 0,
+            base: None,
             ts: 0,
             pieces: Vec::new(),
             got: 0,
@@ -423,6 +473,8 @@ struct Head {
     idx: u16,
     count: u16,
     key: bool,
+    layer: u8,
+    back: u8,
     ts: u64,
 }
 
@@ -433,6 +485,8 @@ pub struct Assembler {
     /// The next frame to hand over; None while waiting for a key frame.
     next: Option<u32>,
     newest: Option<u32>,
+    /// Frames handed over lately, which later frames may build on.
+    shown_recently: VecDeque<u32>,
     key_asked: Option<Instant>,
     expected: u32,
     lost: u32,
@@ -448,6 +502,7 @@ impl Assembler {
             frames: BTreeMap::new(),
             next: None,
             newest: None,
+            shown_recently: VecDeque::new(),
             key_asked: None,
             expected: 0,
             lost: 0,
@@ -465,6 +520,7 @@ impl Assembler {
         self.frames.clear();
         self.next = None;
         self.newest = None;
+        self.shown_recently.clear();
     }
 
     /// One VIDEO datagram from the room (the room's format, with `from`).
@@ -473,12 +529,13 @@ impl Assembler {
             return Vec::new();
         }
         let b = &d[2..]; // the sharer's own format, after [type][from]
-        let head = Head { frame: u32_at(b, 1), idx: u16_at(b, 5), count: u16_at(b, 7), key: b[9] & 1 == 1, ts: u64_at(b, 10) };
+        let (key, layer, back) = unflag(b[9]);
+        let head = Head { frame: u32_at(b, 1), idx: u16_at(b, 5), count: u16_at(b, 7), key, layer, back, ts: u64_at(b, 10) };
         self.piece(head, &b[VIDEO_HEAD..], now)
     }
 
     fn piece(&mut self, head: Head, data: &[u8], now: Instant) -> Vec<Frame> {
-        let Head { frame, idx, count, key, ts } = head;
+        let Head { frame, idx, count, key, layer, back, ts } = head;
         if count == 0 || count as usize > MAX_PIECES || idx >= count || data.len() > PIECE {
             return Vec::new();
         }
@@ -499,16 +556,30 @@ impl Assembler {
         if self.next.is_none() && !key && !self.frames.range(..frame).any(|(_, p)| p.key) {
             return Vec::new();
         }
-        // Frames skipped over are only known to exist, until their pieces come.
-        if let Some(w) = self.newest {
-            for f in w.saturating_add(1)..frame {
-                self.frames.entry(f).or_insert_with(|| Partial::new(now));
+        let base = (!key).then(|| frame.wrapping_sub(back as u32));
+        if !key {
+            // A frame that builds on the one before means every frame is sent
+            // (no layers, or all of them): frames skipped over were lost, and
+            // are only known to exist until their pieces come. With layers,
+            // gaps are frames this watcher isn't sent.
+            if back == 1 {
+                if let Some(w) = self.newest {
+                    for f in w.saturating_add(1)..frame {
+                        self.frames.entry(f).or_insert_with(|| Partial::new(now));
+                    }
+                }
+            }
+            // The frame this one builds on is needed, if it hasn't come.
+            if let Some(b) = base.filter(|b| self.next.is_some_and(|n| *b >= n) && !self.shown_recently.contains(b)) {
+                self.frames.entry(b).or_insert_with(|| Partial::new(now));
             }
         }
         let p = self.frames.entry(frame).or_insert_with(|| Partial::new(now));
         if p.count == 0 {
             p.count = count;
             p.key = key;
+            p.layer = layer;
+            p.base = base;
             p.ts = ts;
             p.pieces = vec![None; count as usize];
             p.asked = vec![false; count as usize];
@@ -551,55 +622,88 @@ impl Assembler {
         Some(p)
     }
 
+    /// Whether a whole frame can be decoded now: a key frame, or one whose base
+    /// was handed over.
+    fn decodable(&self, p: &Partial) -> bool {
+        p.key || p.base.is_some_and(|b| self.shown_recently.contains(&b))
+    }
+
     fn deliver(&mut self) -> Vec<Frame> {
         let mut out = Vec::new();
         loop {
-            match self.next {
+            let n = match self.next {
+                Some(n) => n,
                 None => {
+                    // Waiting for a key frame: everything before the first whole one goes.
                     let Some(k) = self.frames.iter().find(|(_, p)| p.key && p.complete()).map(|(f, _)| *f) else { break };
                     let older: Vec<u32> = self.frames.range(..k).map(|(f, _)| *f).collect();
                     for f in older {
                         self.frames.remove(&f);
                     }
+                    self.shown_recently.clear();
                     self.next = Some(k);
+                    k
                 }
-                Some(n) => {
-                    if self.frames.get(&n).is_some_and(Partial::complete) {
-                        let p = self.finish(n, true).unwrap();
-                        out.push(Frame { key: p.key, ts: p.ts, data: p.pieces.into_iter().flatten().flatten().collect() });
-                        self.next = Some(n + 1);
-                        continue;
-                    }
-                    // A later key frame that's whole makes everything before it unnecessary.
-                    let Some(k) = self.frames.range(n + 1..).find(|(_, p)| p.key && p.complete()).map(|(f, _)| *f) else { break };
-                    for f in n..k {
-                        if self.finish(f, false).is_none() {
-                            self.dropped = self.dropped.saturating_add(1);
-                        }
-                    }
-                    self.next = Some(k);
+            };
+            let Some((&f, p)) = self.frames.range(n..).next() else { break };
+            if p.complete() && self.decodable(p) {
+                let p = self.finish(f, true).unwrap();
+                self.shown_recently.push_back(f);
+                if self.shown_recently.len() > 32 {
+                    self.shown_recently.pop_front();
                 }
+                out.push(Frame { key: p.key, ts: p.ts, data: p.pieces.into_iter().flatten().flatten().collect() });
+                self.next = Some(f + 1);
+                continue;
             }
+            if p.complete() {
+                // Whole, but what it builds on is gone (skipped): it can't be
+                // decoded. In the base layer that breaks everything after it
+                // until a key frame; higher up, only its own layer suffers.
+                let base_layer = p.layer == 0;
+                self.finish(f, false);
+                self.next = if base_layer { None } else { Some(f + 1) };
+                continue;
+            }
+            // `f` is held up. A later whole frame that doesn't need it goes
+            // ahead if it's a key frame, or if `f` is only a higher layer
+            // (nothing in the base layer builds on it). A missing base-layer
+            // frame is worth waiting for: losing it costs a key frame.
+            let held_layer = if p.count == 0 { 0 } else { p.layer };
+            let later = self
+                .frames
+                .range(f + 1..)
+                .find(|(_, q)| q.complete() && self.decodable(q) && (q.key || held_layer > 0))
+                .map(|(g, _)| *g);
+            let Some(g) = later else { break };
+            let skip: Vec<u32> = self.frames.range(f..g).map(|(x, _)| *x).collect();
+            for x in skip {
+                self.finish(x, false);
+            }
+            self.next = Some(g);
         }
         out
     }
 
-    /// Stops waiting for the frame that's holding things up: everything up to
-    /// the next key frame is skipped, and a key frame is wanted.
+    /// Stops waiting for the frame that's holding things up. Frames that build
+    /// on it can't be decoded either: in the base layer that means waiting for
+    /// a key frame (and asking for one); higher up, the next frame of a lower
+    /// layer carries on.
     fn give_up(&mut self) {
-        let from = match self.next {
-            Some(n) => n,
-            None => match self.frames.iter().find(|(_, p)| p.key).map(|(f, _)| *f) {
-                Some(k) => k,
-                None => return,
-            },
+        let Some(n) = self.next else {
+            // The key frame being waited for is broken: skip to a later one.
+            let Some(k) = self.frames.iter().find(|(_, p)| p.key).map(|(f, _)| *f) else { return };
+            let later_key = self.frames.range(k + 1..).find(|(_, p)| p.key).map(|(f, _)| *f);
+            let skip: Vec<u32> = self.frames.range(k..later_key.unwrap_or(u32::MAX)).map(|(f, _)| *f).collect();
+            for f in skip {
+                self.finish(f, false);
+            }
+            self.key_asked = None;
+            return;
         };
-        let later_key = self.frames.range(from + 1..).find(|(_, p)| p.key).map(|(f, _)| *f);
-        let skip: Vec<u32> = self.frames.range(from..later_key.unwrap_or(u32::MAX)).map(|(f, _)| *f).collect();
-        for f in skip {
-            self.finish(f, false);
-        }
-        self.next = None;
+        let Some(f) = self.frames.range(n..).next().map(|(f, _)| *f) else { return };
+        self.finish(f, false);
+        self.next = Some(f + 1);
         self.key_asked = None;
     }
 
@@ -676,13 +780,157 @@ impl Assembler {
     }
 }
 
+/// The sharer's side of layers: which frame each frame builds on. A frame of
+/// layer `n` builds on the latest frame of a lower layer, a base-layer frame on
+/// the latest base-layer frame (the usual temporal-layer pattern, L1T2/L1T3).
+#[derive(Default)]
+pub struct LayerChain {
+    /// The latest frame sent of each layer, since the last key frame.
+    last: [Option<u32>; 4],
+}
+
+impl LayerChain {
+    /// How many frames back `frame`'s base is (for [`layered_pieces`]), or None
+    /// if it can't be sent: its base wasn't, or is too far back to say.
+    pub fn back(&self, frame: u32, key: bool, layer: u8) -> Option<u8> {
+        if key {
+            return Some(1);
+        }
+        let layer = layer.min(3) as usize;
+        let base = if layer == 0 { self.last[0] } else { self.last[..layer].iter().flatten().max().copied() }?;
+        let back = frame.wrapping_sub(base);
+        (1..=31).contains(&back).then_some(back as u8)
+    }
+
+    /// Notes that `frame` went out.
+    pub fn sent(&mut self, frame: u32, key: bool, layer: u8) {
+        if key {
+            self.last = [None; 4];
+        }
+        self.last[layer.min(3) as usize] = Some(frame);
+    }
+
+    /// `frame` (of `layer`) couldn't be sent: frames of that layer and above
+    /// can't build on it, so they wait for a frame of a lower layer (or a key
+    /// frame, for the base layer).
+    pub fn lost(&mut self, layer: u8) {
+        for l in self.last.iter_mut().skip(layer.min(3) as usize) {
+            *l = None;
+        }
+    }
+}
+
+// ---------------------------------------------------------------- thinning
+
+/// What the room sends one watcher of the share they're watching: all of its
+/// frame-rate layers while they keep up, fewer when they fall behind, down to
+/// key frames only. Each watcher has their own, so one slow connection (a
+/// relay, a VPN, bad Wi-Fi) doesn't lower the picture for anyone else.
+///
+/// Leaving out a higher layer is safe at any frame, as nothing below builds
+/// on it. Adding one back waits for a frame where nothing sent afterwards can
+/// build on a frame that wasn't sent: a base-layer frame, or from key frames
+/// only, a key frame.
+#[derive(Debug)]
+pub struct Thinning {
+    /// The share's layers so far (1 without layers).
+    top: u8,
+    /// Layers sent: frames of a lower layer than this; 0 is key frames only.
+    level: u8,
+    /// A step back up, waiting for a frame where it's safe.
+    raise: Option<u8>,
+    good: u8,
+    /// Bad reports in a row: one bad second (a hiccup) isn't enough.
+    bad: u8,
+    /// Reports to wait after a step down before another: what was already on
+    /// its way takes a moment to drain.
+    hold: u8,
+    /// What was decided for each recent frame, so all its pieces go or none.
+    decided: VecDeque<(u32, bool)>,
+}
+
+impl Default for Thinning {
+    fn default() -> Thinning {
+        Thinning { top: 1, level: 4, raise: None, good: 0, bad: 0, hold: 0, decided: VecDeque::new() }
+    }
+}
+
+/// Behind by this much, a watcher steps down a layer; doing this well for
+/// [`GOOD_REPORTS`] seconds, back up one. It goes by delay: a connection that
+/// can't carry the stream (a relay, a VPN) queues it up. Scattered loss (Wi-Fi)
+/// is made good by asking again, and fewer frames wouldn't help it; only loss
+/// this heavy means the connection can't keep up at all.
+const THIN_DELAY_MS: u32 = 400;
+const THIN_LOSS: f32 = 0.25;
+const FINE_DELAY_MS: u32 = 60;
+const FINE_LOSS: f32 = 0.05;
+const GOOD_REPORTS: u8 = 4;
+
+impl Thinning {
+    /// Whether to send this frame (any piece of it) to this watcher.
+    pub fn pass(&mut self, frame: u32, key: bool, layer: u8) -> bool {
+        if let Some(&(_, ok)) = self.decided.iter().rev().find(|(f, _)| *f == frame) {
+            return ok;
+        }
+        self.top = self.top.max(layer + 1);
+        if let Some(up) = self.raise {
+            if key || (self.level > 0 && layer == 0) {
+                self.level = up;
+                self.raise = None;
+            }
+        }
+        let ok = key || layer < self.level;
+        self.decided.push_back((frame, ok));
+        if self.decided.len() > 128 {
+            self.decided.pop_front();
+        }
+        ok
+    }
+
+    /// Takes the watcher's once-a-second report: down a layer after two bad
+    /// seconds in a row (so every two seconds while it lasts), up one after a
+    /// few good seconds.
+    pub fn report(&mut self, r: &Report) {
+        self.hold = self.hold.saturating_sub(1);
+        if r.delay_ms > THIN_DELAY_MS || r.loss > THIN_LOSS {
+            self.good = 0;
+            self.bad = self.bad.saturating_add(1);
+            let now = self.level.min(self.top);
+            if self.hold == 0 && self.bad >= 2 && now > 0 {
+                self.level = now - 1;
+                self.raise = None;
+                self.bad = 0;
+                // Skips the next report: it still shows the backlog.
+                self.hold = 2;
+            }
+        } else if r.delay_ms < FINE_DELAY_MS && r.loss < FINE_LOSS {
+            self.bad = 0;
+            self.good += 1;
+            if self.good >= GOOD_REPORTS && self.level < self.top && self.raise.is_none() {
+                self.raise = Some(self.level + 1);
+                self.good = 0;
+            }
+        } else {
+            self.good = 0;
+            self.bad = 0;
+        }
+    }
+
+    /// How many of the share's layers this watcher gets (0: key frames only).
+    pub fn layers(&self) -> u8 {
+        self.level.min(self.top)
+    }
+}
+
 // ------------------------------------------------------------ rate control
 
 /// The sharer's bitrate, following what the watchers report: down quickly when
 /// pieces are lost or frames queue up, back up slowly once they're fine, never
-/// above the chosen quality nor below a floor that keeps a usable picture. A
-/// watcher whose link can't carry even the floor just loses frames (and skips
-/// to key frames) without dragging everyone else down further.
+/// above the chosen quality nor below a floor that keeps a usable picture.
+/// It follows the watcher doing best: one whose own connection can't keep up
+/// is sent fewer frames by the room ([`Thinning`]) without lowering the
+/// picture for everyone; if even the best one falls behind, the trouble is
+/// the sharer's (or host's) connection, which everyone shares.
 pub struct RateControl {
     max: u32,
     floor: u32,
@@ -714,8 +962,8 @@ impl RateControl {
             return None;
         }
         self.reports.retain(|_, (t, _)| now.duration_since(*t) < REPORT_FRESH);
-        let loss = self.reports.values().map(|(_, r)| r.loss).fold(0.0, f32::max);
-        let delay = self.reports.values().map(|(_, r)| r.delay_ms).max().unwrap_or(0);
+        let loss = self.reports.values().map(|(_, r)| r.loss).fold(1.0, f32::min);
+        let delay = self.reports.values().map(|(_, r)| r.delay_ms).min().unwrap_or(0);
         self.decided = Some(now);
         let r = self.rate as f64;
         let next = if loss > 0.10 || delay > 400 {
@@ -983,29 +1231,214 @@ mod tests {
     }
 
     #[test]
-    fn rate_follows_the_worst_watcher() {
+    fn rate_follows_the_best_watcher() {
         let t0 = Instant::now();
         let mut rc = RateControl::new(4_500_000);
         let bad = Report { loss: 0.2, delay_ms: 0, shown: 30, dropped: 3 };
         let good = Report { loss: 0.0, delay_ms: 5, shown: 30, dropped: 0 };
+        // One watcher struggling while another is fine: their own connection,
+        // handled by thinning, not by lowering everyone's picture.
         rc.report(2, good, t0);
-        let down = rc.report(3, bad, t0 + Duration::from_secs(1)).unwrap();
+        assert_eq!(rc.report(3, bad, t0 + Duration::from_secs(1)), None);
+        assert_eq!(rc.rate(), 4_500_000);
+        // Everyone struggling: the sharer's own connection. Down.
+        rc.report(2, bad, t0 + Duration::from_secs(2));
+        let down = rc.report(3, bad, t0 + Duration::from_secs(3)).unwrap();
         assert!(down < 4_500_000 * 7 / 10, "{down}");
-        assert_eq!(rc.report(3, bad, t0 + Duration::from_millis(1100)), None, "one decision a second");
-        // A lot of queueing delay also slows it.
-        let mut t = t0 + Duration::from_secs(2);
+        assert_eq!(rc.report(3, bad, t0 + Duration::from_millis(3100)), None, "one decision a second");
+        // A lot of queueing delay for everyone also slows it.
+        let mut t = t0 + Duration::from_secs(4);
         for _ in 0..20 {
+            rc.report(2, Report { delay_ms: 500, ..good }, t);
             rc.report(3, Report { delay_ms: 500, ..good }, t);
             t += Duration::from_secs(1);
         }
         assert_eq!(rc.rate(), 900_000, "never below the floor (a fifth of the chosen quality)");
-        // Once everyone is fine it climbs back to the chosen quality, not past it.
+        // Once they're fine it climbs back to the chosen quality, not past it.
         for _ in 0..60 {
             rc.report(2, good, t);
             rc.report(3, good, t);
             t += Duration::from_secs(1);
         }
         assert_eq!(rc.rate(), 4_500_000);
+    }
+
+    /// The L1T3 pattern: layers 0,2,1,2 repeating; each frame's base as the
+    /// sharer works it out.
+    fn l1t3(n: u32) -> Vec<(u32, bool, u8, u8)> {
+        let mut chain = LayerChain::default();
+        (0..n)
+            .map(|f| {
+                let key = f == 0;
+                let layer = [0, 2, 1, 2][(f % 4) as usize];
+                let back = chain.back(f, key, layer).unwrap();
+                chain.sent(f, key, layer);
+                (f, key, layer, back)
+            })
+            .collect()
+    }
+
+    fn feed_layered(a: &mut Assembler, f: (u32, bool, u8, u8), skip: &[usize], now: Instant) -> Vec<Frame> {
+        let (frame, key, layer, back) = f;
+        let mut out = Vec::new();
+        for (i, p) in layered_pieces(frame, key, layer, back, frame as u64 * 33_000, &frame_bytes(2500, frame as u8)).into_iter().enumerate() {
+            if !skip.contains(&i) {
+                let mut d = vec![VIDEO, 0, 7];
+                d.extend_from_slice(&p[1..]);
+                out.extend(a.datagram(&d, now));
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn the_sharer_works_out_each_frames_base() {
+        let frames = l1t3(9);
+        // 0 key; 1 (L2) on 0; 2 (L1) on 0; 3 (L2) on 2; 4 (L0) on 0; 5 (L2) on 4; ...
+        let backs: Vec<u8> = frames.iter().map(|f| f.3).collect();
+        assert_eq!(backs, vec![1, 1, 2, 1, 4, 1, 2, 1, 4]);
+        // A base-layer frame that couldn't go out: nothing can build on it until a key frame.
+        let mut chain = LayerChain::default();
+        chain.sent(0, true, 0);
+        chain.lost(0);
+        assert_eq!(chain.back(4, false, 0), None);
+        assert_eq!(chain.back(5, false, 2), None);
+        assert_eq!(chain.back(8, true, 0), Some(1));
+        // Only the top layer lost: the rest carries on.
+        let mut chain = LayerChain::default();
+        chain.sent(0, true, 0);
+        chain.lost(2);
+        assert_eq!(chain.back(2, false, 1), Some(2));
+        assert_eq!(chain.back(4, false, 0), Some(4));
+    }
+
+    #[test]
+    fn layers_survive_the_older_flags() {
+        assert_eq!(unflag(flags(true, 0, 1)), (true, 0, 1));
+        assert_eq!(unflag(flags(false, 2, 4)), (false, 2, 4));
+        // What an older sharer sends: only the key bit.
+        assert_eq!(unflag(0), (false, 0, 1));
+        assert_eq!(unflag(1), (true, 0, 1));
+    }
+
+    /// A watcher sent only some layers shows every frame it gets, without
+    /// asking for the ones it isn't sent.
+    #[test]
+    fn a_thinned_watcher_shows_what_it_gets() {
+        let t0 = Instant::now();
+        let mut a = Assembler::new(7, t0);
+        let mut shown = Vec::new();
+        for f in l1t3(13).into_iter().filter(|f| f.2 < 2) {
+            shown.extend(feed_layered(&mut a, f, &[], t0).into_iter().map(|fr| fr.ts / 33_000));
+        }
+        assert_eq!(shown, vec![0, 2, 4, 6, 8, 10, 12]);
+        let t = a.tick(t0 + Duration::from_secs(1));
+        assert!(t.nacks.is_empty() && !t.want_key, "{t:?}");
+        let r = Report::decode(&a.report()).unwrap().1;
+        assert_eq!((r.loss, r.dropped), (0.0, 0), "frames it isn't sent aren't losses");
+    }
+
+    /// A lost top-layer frame is skipped: the stream carries on without a key frame.
+    #[test]
+    fn a_lost_top_layer_frame_costs_only_itself() {
+        let t0 = Instant::now();
+        let mut a = Assembler::new(7, t0);
+        let frames = l1t3(9);
+        let mut shown = Vec::new();
+        for f in &frames {
+            // Frame 3 (layer 2) never arrives.
+            if f.0 != 3 {
+                shown.extend(feed_layered(&mut a, *f, &[], t0).into_iter().map(|fr| fr.ts / 33_000));
+            }
+        }
+        assert_eq!(shown, vec![0, 1, 2, 4, 5, 6, 7, 8]);
+        assert!(!a.tick(t0 + Duration::from_secs(1)).want_key);
+    }
+
+    /// A lost base-layer frame is asked for again, and everything waits for it.
+    #[test]
+    fn a_lost_base_layer_frame_is_asked_for() {
+        let t0 = Instant::now();
+        let mut a = Assembler::new(7, t0);
+        let frames = l1t3(9);
+        let mut shown = Vec::new();
+        for f in &frames[..4] {
+            shown.extend(feed_layered(&mut a, *f, &[], t0).into_iter().map(|fr| fr.ts / 33_000));
+        }
+        // Frame 4 (layer 0) loses a piece; frames 5.. build on it.
+        shown.extend(feed_layered(&mut a, frames[4], &[1], t0).into_iter().map(|fr| fr.ts / 33_000));
+        for f in &frames[5..] {
+            shown.extend(feed_layered(&mut a, *f, &[], t0).into_iter().map(|fr| fr.ts / 33_000));
+        }
+        assert_eq!(shown, vec![0, 1, 2, 3]);
+        let t = a.tick(t0 + Duration::from_millis(30));
+        assert!(t.nacks.iter().any(|n| u32_at(n, 3) == 4), "{:?}", t.nacks);
+        // The resend arrives: the rest comes out in order.
+        let (frame, key, layer, back) = frames[4];
+        let resend = &layered_pieces(frame, key, layer, back, frame as u64 * 33_000, &frame_bytes(2500, 4))[1];
+        let mut d = vec![VIDEO, 0, 7];
+        d.extend_from_slice(&resend[1..]);
+        let out: Vec<u64> = a.datagram(&d, t0 + Duration::from_millis(40)).into_iter().map(|fr| fr.ts / 33_000).collect();
+        assert_eq!(out, vec![4, 5, 6, 7, 8]);
+    }
+
+    /// The room steps a slow watcher down a layer at a time, down to key
+    /// frames only, and back up once they keep up, never mid-way through.
+    #[test]
+    fn thinning_follows_the_watcher() {
+        let slow = Report { loss: 0.0, delay_ms: 900, shown: 10, dropped: 0 };
+        let fine = Report { loss: 0.0, delay_ms: 10, shown: 30, dropped: 0 };
+        let mut th = Thinning::default();
+        let frames = l1t3(64);
+        let sent = |th: &mut Thinning, range: std::ops::Range<usize>| -> Vec<u32> {
+            frames[range].iter().filter(|f| th.pass(f.0, f.1, f.2)).map(|f| f.0).collect()
+        };
+        assert_eq!(sent(&mut th, 0..4), vec![0, 1, 2, 3], "everything while it keeps up");
+        th.report(&slow);
+        assert_eq!(th.layers(), 3, "one bad second is a hiccup");
+        th.report(&fine);
+        th.report(&slow);
+        assert_eq!(th.layers(), 3, "and so is another, after a good one");
+        th.report(&slow);
+        assert_eq!(th.layers(), 2, "two in a row: down a layer");
+        assert_eq!(sent(&mut th, 4..8), vec![4, 6], "the top layer goes");
+        th.report(&slow);
+        assert_eq!(th.layers(), 2, "waits for what's on its way to drain");
+        th.report(&slow);
+        assert_eq!(th.layers(), 1);
+        assert_eq!(sent(&mut th, 8..12), vec![8]);
+        th.report(&slow);
+        th.report(&slow);
+        assert_eq!(th.layers(), 0);
+        assert_eq!(sent(&mut th, 12..16), Vec::<u32>::new(), "key frames only");
+        // A frame decided once stays decided, for all its pieces.
+        assert!(!th.pass(12, false, 0));
+        for _ in 0..GOOD_REPORTS {
+            th.report(&fine);
+        }
+        assert_eq!(sent(&mut th, 16..20), Vec::<u32>::new(), "back up only at a key frame");
+        assert!(th.pass(64, true, 0));
+        assert_eq!(th.layers(), 1);
+        for _ in 0..GOOD_REPORTS {
+            th.report(&fine);
+        }
+        // Up again at the next base-layer frame (68), not before.
+        assert!(!th.pass(65, false, 2) && !th.pass(66, false, 1));
+        assert!(th.pass(68, false, 0) && th.pass(70, false, 1) && !th.pass(69, false, 2));
+        assert_eq!(th.layers(), 2);
+    }
+
+    /// Without layers there's nothing between everything and key frames only.
+    #[test]
+    fn thinning_a_stream_without_layers() {
+        let mut th = Thinning::default();
+        assert!(th.pass(0, true, 0) && th.pass(1, false, 0));
+        let lossy = Report { loss: 0.3, delay_ms: 0, shown: 5, dropped: 5 };
+        th.report(&lossy);
+        th.report(&lossy);
+        assert_eq!(th.layers(), 0);
+        assert!(!th.pass(2, false, 0));
+        assert!(th.pass(60, true, 0));
     }
 
     /// Voice goes out at once even while a big frame is being paced out.

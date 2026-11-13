@@ -12,7 +12,9 @@
 //! Voice is relayed, not mixed: each speaker's packets go to everyone else in
 //! voice, and each member mixes what they receive. Screen video goes only to
 //! the members watching that share, and the room keeps the last second of it
-//! to resend pieces a watcher missed.
+//! to resend pieces a watcher missed. Each watcher (from 0.9) gets only the
+//! frame-rate layers their connection keeps up with, so one slow connection
+//! doesn't lower the picture for the others (see `media::Thinning`).
 //!
 //! The host (the member who presented the host token) can mute anyone for
 //! everyone, and disconnect them. Everyone is told when that happens.
@@ -81,6 +83,11 @@ struct Member {
     udp: Option<SocketAddr>,
     /// The last second of their screen share.
     video: VideoBuffer,
+    /// They understand frame-rate layers (0.9 and later), so they can be sent
+    /// fewer frames when they fall behind. Older members get every frame.
+    layers: bool,
+    /// What they're sent of the share they're watching.
+    thin: media::Thinning,
 }
 
 impl Member {
@@ -377,6 +384,10 @@ fn datagram(r: &mut Room, sock: &UdpSocket, src: SocketAddr, d: &[u8]) {
             if r.members[me].watching != Some(sharer) {
                 return;
             }
+            // How this watcher is doing decides what they're sent.
+            if let Some((_, report)) = media::Report::decode(d).filter(|_| r.members[me].layers) {
+                r.members[me].thin.report(&report);
+            }
             if let Some(a) = r.members.iter().find(|m| m.id == sharer && m.screen.is_some()).and_then(|m| m.udp) {
                 let mut out = d[..11].to_vec();
                 out[1..3].copy_from_slice(&id.to_be_bytes());
@@ -394,12 +405,17 @@ fn relay_video(room: &mut Room, sock: &UdpSocket, me: usize, d: &[u8]) {
         return;
     }
     let Some((frame, idx, count)) = media::video_head(d) else { return };
+    let (key, layer) = media::video_layer(d);
     let id = room.members[me].id;
     let mut out = Vec::with_capacity(d.len() + 2);
     out.push(media::VIDEO);
     out.extend_from_slice(&id.to_be_bytes());
     out.extend_from_slice(&d[1..]);
-    for o in room.members.iter().filter(|o| o.watching == Some(id)) {
+    for o in room.members.iter_mut().filter(|o| o.watching == Some(id)) {
+        // Only the layers this watcher keeps up with.
+        if o.layers && !o.thin.pass(frame, key, layer) {
+            continue;
+        }
         if let Some(a) = o.udp {
             let _ = sock.send_to(&out, a);
         }
@@ -600,6 +616,8 @@ fn serve_member(stream: TcpStream, room: &Arc<Mutex<Room>>, host_token: &str) {
             files_tx: None,
             udp: None,
             video: VideoBuffer::default(),
+            layers: hello["layers"] == true,
+            thin: media::Thinning::default(),
         });
         // "udp": voice and video go as UDP datagrams to this port.
         let welcome = json!({ "t": "welcome", "you": id, "name": name, "room": r.name, "history": r.history, "host": host, "key": key, "udp": true, "v": PROTOCOL });
@@ -694,6 +712,7 @@ fn serve_member(stream: TcpStream, room: &Arc<Mutex<Room>>, host_token: &str) {
             "watch" => {
                 let target = msg["id"].as_u64().map(|v| v as u16).filter(|t| *t != id);
                 r.members[me].watching = target;
+                r.members[me].thin = media::Thinning::default();
                 // A new viewer starts from a key frame.
                 if let Some(t) = target {
                     ask_key(&mut r, t, true);

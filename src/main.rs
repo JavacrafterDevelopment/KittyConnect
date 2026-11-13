@@ -12,7 +12,7 @@ mod share;
 mod tailcat;
 mod voip;
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -66,6 +66,8 @@ pub enum UserEvent {
     Lan(u64, Result<Vec<lan::World>, String>),
     /// "Ask for network permission again" finished (how many programs), or didn't.
     Firewall(Result<usize, String>),
+    /// Whether something is listening on each port checked (see `App::probe`).
+    Probed(Vec<(u16, bool)>),
 }
 
 #[derive(Clone, Copy)]
@@ -214,6 +216,8 @@ struct PortHost {
     peers: Peers,
     /// A one-click game server ("minecraft"), or None for a manual port.
     game: Option<String>,
+    /// Its ports have been checked for a server at least once.
+    probed: bool,
     /// For Minecraft: what friends see, once it's showing.
     lan_note: String,
     log: Log,
@@ -285,6 +289,12 @@ struct App {
     name: String,
     /// LAN worlds we're showing in this PC's Minecraft: (local port, MOTD).
     adverts: Vec<(u16, String)>,
+    /// Whether a server is listening on each port we opened, as last checked.
+    /// Checked off the UI thread: on Windows a refused connection to this PC
+    /// takes about a second, which froze the window when done here.
+    listening: HashMap<u16, bool>,
+    probing: bool,
+    probe_at: Instant,
 }
 
 fn main() {
@@ -443,6 +453,7 @@ fn main() {
             Event::UserEvent(UserEvent::Ping(target, result)) => app.on_ping(target, result),
             Event::UserEvent(UserEvent::Heard { share, heard }) => app.on_heard(share, heard),
             Event::UserEvent(UserEvent::Lan(key, result)) => app.on_lan(key, result),
+            Event::UserEvent(UserEvent::Probed(found)) => app.on_probed(found),
             Event::UserEvent(UserEvent::Firewall(result)) => {
                 match result {
                     Ok(_) => app.set_status(
@@ -658,6 +669,9 @@ impl App {
             status: ("Ready. Everything runs from this folder.".into(), "idle"),
             name: String::new(),
             adverts: Vec::new(),
+            listening: HashMap::new(),
+            probing: false,
+            probe_at: Instant::now(),
         }
     }
 
@@ -895,7 +909,8 @@ impl App {
                 use base64::Engine as _;
                 if let Ok(data) = base64::engine::general_purpose::STANDARD.decode(s("data")) {
                     // Fell behind: the page's encoder makes a key frame to recover from.
-                    if self.voip.video(msg["key"].as_bool().unwrap_or(false), msg["ts"].as_u64().unwrap_or(0), &data) {
+                    let layer = msg["layer"].as_u64().unwrap_or(0).min(3) as u8;
+                    if self.voip.video(msg["key"].as_bool().unwrap_or(false), layer, msg["ts"].as_u64().unwrap_or(0), &data) {
                         send(webview, json!({ "type": "keyframe" }));
                     }
                 }
@@ -1103,15 +1118,8 @@ impl App {
         if let Some(p) = ports.iter().find(|p| self.hosts.iter().any(|h| h.proc.is_some() && h.ports.contains(p))) {
             return self.host_error = format!("Port {p} is already open below.");
         }
-        let idle: Vec<String> = ports.iter().filter(|p| !something_listening(**p)).map(|p| p.to_string()).collect();
-        let warn = if idle.is_empty() {
-            String::new()
-        } else {
-            format!(
-                "Nothing is running on port {} on this PC yet. Start your server; your friend can connect once it's up.",
-                idle.join(", ")
-            )
-        };
+        // Whether a server is running there yet is checked in the background (`probe`).
+        let warn = String::new();
         let mut list: Vec<String> = ports.iter().map(|p| p.to_string()).collect();
         // The beacon rides in the same tunnel so the friend can tell we're still here.
         if let Some(b) = beacon::ensure(&self.proxy).filter(|b| !ports.contains(b)) {
@@ -1132,6 +1140,7 @@ impl App {
                     link: Link::default(),
                     peers: Peers::default(),
                     game,
+                    probed: false,
                     lan_note: String::new(),
                     log: Log::default(),
                 });
@@ -1405,13 +1414,8 @@ impl App {
                 changed = true;
             }
         }
-        // Re-check whether each host's server has come up, so its warning clears.
-        for h in &mut self.hosts {
-            if h.st == St::Live && !h.warn.is_empty() && h.ports.iter().all(|p| something_listening(*p)) {
-                h.warn.clear();
-                changed = true;
-            }
-        }
+        // Whether each host's server has come up, checked in the background.
+        self.probe(Instant::now());
 
         // Everyone gone quiet drops off the lists of who's connected.
         changed |= self.share.peers.expire();
@@ -1464,7 +1468,7 @@ impl App {
                     "Minecraft opened your world on port {}, not {port}. Open to LAN again with Port Number set to {port}, or stop this and host on {}.",
                     w.port, w.port
                 ))
-            } else if something_listening(port) {
+            } else if self.listening.get(&port) == Some(&true) {
                 (format!("A server is running on port {port}. Friends who join see it under LAN in Multiplayer."), String::new())
             } else {
                 (String::new(), format!(
@@ -1514,6 +1518,66 @@ impl App {
         if adverts != self.adverts {
             lan::advertise(adverts.clone());
             self.adverts = adverts;
+        }
+        changed
+    }
+
+    /// Checks in the background whether a server is listening on the ports of
+    /// open hosts that need to know: a manual port until its server is up, and
+    /// a Minecraft host (which says whether a server is running) all along.
+    /// Every 2 seconds, and never more than one check at a time.
+    fn probe(&mut self, now: Instant) {
+        if self.probing || now < self.probe_at {
+            return;
+        }
+        let mut ports: Vec<u16> = self
+            .hosts
+            .iter()
+            .filter(|h| h.proc.is_some() && (h.game.is_some() || !h.probed || !h.warn.is_empty()))
+            .flat_map(|h| h.ports.iter().copied())
+            .collect();
+        ports.sort_unstable();
+        ports.dedup();
+        if ports.is_empty() {
+            return;
+        }
+        self.probing = true;
+        let proxy = self.proxy.clone();
+        std::thread::spawn(move || {
+            let found = ports.into_iter().map(|p| (p, something_listening(p))).collect();
+            let _ = proxy.send_event(UserEvent::Probed(found));
+        });
+    }
+
+    fn on_probed(&mut self, found: Vec<(u16, bool)>) -> bool {
+        self.probing = false;
+        self.probe_at = Instant::now() + Duration::from_secs(2);
+        self.listening.extend(found);
+        let mut changed = false;
+        // A manual port warns until something is running on every one of its ports.
+        for h in self.hosts.iter_mut().filter(|h| h.proc.is_some() && h.game.is_none()) {
+            let idle: Vec<String> = h
+                .ports
+                .iter()
+                .filter(|p| self.listening.get(p) == Some(&false))
+                .map(|p| p.to_string())
+                .collect();
+            if !h.ports.iter().all(|p| self.listening.contains_key(p)) {
+                continue;
+            }
+            let warn = if idle.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "Nothing is running on port {} on this PC yet. Start your server; your friend can connect once it's up.",
+                    idle.join(", ")
+                )
+            };
+            h.probed = true;
+            if h.warn != warn {
+                h.warn = warn;
+                changed = true;
+            }
         }
         changed
     }
