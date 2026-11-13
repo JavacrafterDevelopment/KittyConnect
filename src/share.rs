@@ -6,6 +6,7 @@
 //!
 //!   → {"op":"list"}\n              ← {"files":[{"id":1,"name":"a/b.txt","size":3}]}\n
 //!   → {"op":"get","id":1}\n        ← {"ok":true,"size":3}\n  then 3 raw bytes
+//!   → {"op":"ping",…}\n           ← {"pong":true,"name":…}\n  (see [`crate::peers`])
 //!
 //! Only files the sharer added are reachable, by id, never by path.
 
@@ -153,9 +154,13 @@ fn serve_one(
     let Ok(req) = serde_json::from_str::<Request>(&line) else {
         return Ok(());
     };
+    // Who's checking in (or leaving), for the list of who's connected.
+    if let Some(heard) = crate::peers::Heard::parse(&line).filter(crate::peers::Heard::is_named) {
+        let _ = proxy.send_event(UserEvent::Heard { share: true, heard });
+    }
     match req.op.as_str() {
         // The receiver checks every 30 seconds that sharing is still on.
-        "ping" => stream.write_all(b"{\"pong\":true}\n")?,
+        "ping" => stream.write_all(crate::peers::pong().as_bytes())?,
         "list" => {
             let files = lib.lock().unwrap().clone();
             let body = json!({ "v": 1, "files": files });

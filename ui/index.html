@@ -27,12 +27,12 @@
             File Share
             <span class="badge" id="files-badge"></span>
           </button>
-          <button class="chip" data-page="ports" title="Open ports and join them">
+          <button class="chip" data-page="ports" title="Game servers and port forwarding">
             <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
               <rect x="1.5" y="4.5" width="13" height="7" rx="1.6" stroke="currentColor" stroke-width="1.5"/>
               <path d="M4.5 8h1.5M7.3 8h1.5M10 8h1.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
             </svg>
-            Ports
+            Port Forward
             <span class="badge" id="ports-badge"></span>
           </button>
           <button class="chip" data-page="voip" title="Text and voice rooms">
@@ -45,6 +45,12 @@
           </button>
         </nav>
       </div>
+
+      <!-- Your name, picked when the app opens; click to change it. -->
+      <button class="namechip" id="me-chip" title="Your name. Click to change it.">
+        <span class="avatar small" id="me-avatar"></span>
+        <span id="me-name"></span>
+      </button>
 
       <div id="winbtns">
         <button class="winbtn" data-win="minimize" title="Minimise">
@@ -78,7 +84,6 @@
               <div class="card-head">
                 <h3>Send files</h3>
                 <span class="row">
-                  <span id="share-link"></span>
                   <span class="pill" id="share-pill"><span class="dot"></span><span class="pill-text">Off</span></span>
                 </span>
               </div>
@@ -118,6 +123,7 @@
               </div>
 
               <div class="activity" id="share-activity"></div>
+              <div id="share-peers"></div>
               <p class="err" id="share-error"></p>
 
               <div class="actions">
@@ -175,9 +181,82 @@
       <section id="page-ports" class="page">
         <div class="column wide">
           <div class="lib-head">
-            <h1 class="page-title">Ports</h1>
+            <button class="backlink hide" id="pf-back" title="Back to Port Forward">
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M10 3 5 8l5 5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </button>
+            <h1 class="page-title" id="pf-title">Port Forward</h1>
           </div>
-          <p class="lib-note">Let a friend reach a server on your PC (a game server, a web app) as if
+
+          <!-- Pick one: game servers or manual. -->
+          <div id="pf-home">
+            <p class="lib-note">Let friends reach a server on your PC as if it were on their own
+              machine, with no port forwarding on your router. TailCat carries <b>TCP</b>; games
+              that only use UDP won't work this way.</p>
+            <div class="panes">
+              <button class="card pane choice" data-pf="games">
+                <span class="choice-ico">
+                  <svg width="22" height="22" viewBox="0 0 24 24" fill="none"><rect x="2.5" y="7" width="19" height="11" rx="5.5" stroke="currentColor" stroke-width="1.6"/><path d="M7.5 10.5v4M5.5 12.5h4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><circle cx="15.5" cy="11.5" r="1.1" fill="currentColor"/><circle cx="17.8" cy="13.8" r="1.1" fill="currentColor"/></svg>
+                </span>
+                <span class="choice-title">Game servers</span>
+                <span class="set-desc">One click to host or join Minecraft, Terraria and more. Minecraft
+                  worlds show up under LAN in your friends' Multiplayer screen.</span>
+                <span class="meta" id="pf-games-count"></span>
+              </button>
+              <button class="card pane choice" data-pf="manual">
+                <span class="choice-ico">
+                  <svg width="22" height="22" viewBox="0 0 24 24" fill="none"><rect x="2.5" y="7" width="19" height="10" rx="2.4" stroke="currentColor" stroke-width="1.6"/><path d="M7 12h2M11 12h2M15 12h2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+                </span>
+                <span class="choice-title">Manual port forward</span>
+                <span class="set-desc">Open or join any TCP port by number: a web app, a dev server, or
+                  a game that isn't in the list.</span>
+                <span class="meta" id="pf-manual-count"></span>
+              </button>
+            </div>
+          </div>
+
+          <!-- Game servers: one click to host, paste a code to join. -->
+          <div id="pf-games" class="hide">
+            <div class="panes">
+              <div class="card pane">
+                <div class="card-head"><h3>Host a game</h3></div>
+                <div class="games" id="game-list"></div>
+                <p class="err" id="game-host-error"></p>
+              </div>
+              <div class="card pane">
+                <div class="card-head"><h3>Join a game</h3></div>
+                <label class="field-label" for="game-code">Paste the game code your friend sent</label>
+                <div class="codein">
+                  <input id="game-code" class="input mono" spellcheck="false" autocomplete="off" placeholder="kitty:game.…">
+                  <button class="btn small" data-paste="game-code">Paste</button>
+                </div>
+                <p class="err" id="game-join-error"></p>
+                <div class="actions">
+                  <button class="btn primary" id="game-join">Join</button>
+                  <span class="meta">The code says which game and port.</span>
+                </div>
+                <p class="set-desc game-tip">For Minecraft, then open <b>Multiplayer</b>: your friend's
+                  world shows up under LAN, like a world on your own Wi-Fi.</p>
+              </div>
+            </div>
+            <div class="lib-section">
+              <div class="lib-head">
+                <h2 class="section-title">Hosting</h2>
+                <span class="meta" id="game-host-count"></span>
+              </div>
+              <div class="sessions" id="game-host-list"></div>
+            </div>
+            <div class="lib-section">
+              <div class="lib-head">
+                <h2 class="section-title">Joined</h2>
+                <span class="meta" id="game-join-count"></span>
+              </div>
+              <div class="sessions" id="game-join-list"></div>
+            </div>
+          </div>
+
+          <!-- Manual: any port by number. -->
+          <div id="pf-manual" class="hide">
+          <p class="lib-note">Let a friend reach a server on your PC (a web app, a dev server) as if
             it were on their own machine, with no port forwarding on your router. TailCat carries
             <b>TCP</b> ports; games that only use UDP won't work this way.</p>
 
@@ -258,6 +337,7 @@
             </div>
             <div class="sessions" id="join-list"></div>
           </div>
+          </div>
         </div>
       </section>
 
@@ -272,12 +352,8 @@
             tunnel, and nothing is kept once the room ends. Use headphones in voice, so your mic
             doesn't pick up the call.</p>
 
-          <!-- Before joining: pick a name, then host or join. -->
+          <!-- Before joining: host or join. Your name is the one picked when the app opened. -->
           <div id="voip-lobby">
-            <div class="namebar">
-              <label class="field-label" for="voip-name">Your name</label>
-              <input id="voip-name" class="input" maxlength="32" spellcheck="false" autocomplete="off" placeholder="What should people call you?">
-            </div>
             <div class="panes">
               <div class="card pane">
                 <div class="card-head"><h3>Host a room</h3></div>
@@ -454,6 +530,27 @@
   <!-- Right-click a person in a room: their volume for you, mute for you, and
        (for the host) mute for everyone or disconnect. -->
   <div class="ctxmenu hide" id="ctxmenu" role="menu"></div>
+
+  <!-- Your name, asked every time the app opens. The grey suggestion is used
+       if you just press OK; typing replaces it. -->
+  <div class="modal hide" id="name-modal" role="dialog" aria-labelledby="name-title">
+    <form class="modal-card namecard" id="name-form">
+      <div class="card-head">
+        <h3 id="name-title">What should people call you?</h3>
+      </div>
+      <p class="set-desc">Your name shows in VOIP rooms, and to the host of any port or file share
+        you join, next to how you're connected. It only travels inside the encrypted
+        <b>TailCat</b> tunnel.</p>
+      <div class="namerow">
+        <input id="name-input" class="input" maxlength="32" spellcheck="false" autocomplete="off">
+        <button type="button" class="btn small ghost" id="name-shuffle" title="Suggest another name">Shuffle</button>
+      </div>
+      <div class="actions">
+        <button type="submit" class="btn primary" id="name-ok">OK</button>
+        <span class="meta">Press OK to use the grey name, or type your own.</span>
+      </div>
+    </form>
+  </div>
 
   <!-- Voice settings, from the gear in the voice panel. Yours only. -->
   <div class="modal hide" id="vs-modal" role="dialog" aria-labelledby="vs-title">

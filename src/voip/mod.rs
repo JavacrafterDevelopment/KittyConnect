@@ -179,7 +179,7 @@ impl Default for Voip {
 fn clean_name(name: &str) -> Result<String, String> {
     let n = server::clean(name, 32);
     if n.is_empty() {
-        Err("Type your name first.".into())
+        Err("Pick your name first (top right).".into())
     } else {
         Ok(n)
     }

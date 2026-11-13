@@ -4,6 +4,8 @@
 mod beacon;
 mod code;
 mod icon;
+mod lan;
+mod peers;
 mod portable;
 mod share;
 mod tailcat;
@@ -29,6 +31,7 @@ use wry::{DragDropEvent, WebContext, WebView, WebViewBuilder};
 use wry::WebViewBuilderExtWindows;
 
 use code::Kind;
+use peers::{Heard, Peers, Report};
 use portable::data_dir;
 use share::{Library, RecvEvent, Remote, Server, ShareEvent};
 use tailcat::{Link, Proc, Role, TcEvent};
@@ -49,7 +52,12 @@ pub enum UserEvent {
     Tick,
     Voip(u64, VoipEvent),
     /// A 30-second liveness ping came back (or didn't).
-    Ping(PingTarget, Result<Duration, String>),
+    Ping(PingTarget, Result<tailcat::Pong, String>),
+    /// Someone connected to our file share (`share`) or one of our open
+    /// ports checked in or said goodbye.
+    Heard { share: bool, heard: Heard },
+    /// A Minecraft host's beacon said which LAN worlds it has open.
+    Lan(u64, Result<Vec<lan::World>, String>),
 }
 
 #[derive(Clone, Copy)]
@@ -147,6 +155,8 @@ struct ShareHost {
     sending: BTreeMap<u64, Sending>,
     sent: u64,
     link: Link,
+    /// Everyone receiving from us, with how each is connected.
+    peers: Peers,
     log: Log,
 }
 
@@ -172,6 +182,10 @@ struct Recv {
     states: BTreeMap<u64, FileState>,
     inbox: PathBuf,
     link: Link,
+    /// Who we are to the sharer, and who they are to us.
+    peer: u64,
+    addr: String,
+    host_name: Option<String>,
     log: Log,
 }
 
@@ -186,7 +200,28 @@ struct PortHost {
     ports: Vec<u16>,
     addr: Option<String>,
     link: Link,
+    /// Everyone who joined this one, with how each is connected.
+    peers: Peers,
+    /// A one-click game server ("minecraft"), or None for a manual port.
+    game: Option<String>,
+    /// For Minecraft: what friends see, once it's showing.
+    lan_note: String,
     log: Log,
+}
+
+impl PortHost {
+    /// Stops telling joiners about LAN worlds on this code.
+    fn unserve(&mut self) {
+        if let (Some(_), Some(addr)) = (&self.game, &self.addr) {
+            lan::unserve(addr);
+        }
+    }
+}
+
+impl Drop for PortHost {
+    fn drop(&mut self) {
+        self.unserve();
+    }
 }
 
 /// One joined port set: `tailcat forward <addr> <local>:<remote>…`, plus a
@@ -201,7 +236,22 @@ struct PortJoin {
     started: Instant,
     beacon: Option<u16>,
     link: Link,
+    peer: u64,
+    addr: String,
+    host_name: Option<String>,
+    /// A one-click game server, from the code.
+    game: Option<String>,
+    /// Minecraft: the host's LAN worlds, asked for every few seconds.
+    worlds: Vec<lan::World>,
+    lan_next: Instant,
+    lan_asking: bool,
     log: Log,
+}
+
+impl PortJoin {
+    fn report(&self) -> Report<'_> {
+        Report { peer: self.peer, addr: &self.addr, path: self.link.path(), rtt: self.link.rtt_ms }
+    }
 }
 
 struct App {
@@ -218,6 +268,11 @@ struct App {
     /// The tab on screen, so a drop lands where the user expects.
     page: String,
     status: (String, &'static str),
+    /// The name picked at startup: shown in rooms, and to whoever's port or
+    /// file share we join. Empty until picked.
+    name: String,
+    /// LAN worlds we're showing in this PC's Minecraft: (local port, MOTD).
+    adverts: Vec<(u16, String)>,
 }
 
 fn main() {
@@ -343,6 +398,8 @@ fn main() {
             }
             Event::UserEvent(UserEvent::Tick) => app.on_tick(),
             Event::UserEvent(UserEvent::Ping(target, result)) => app.on_ping(target, result),
+            Event::UserEvent(UserEvent::Heard { share, heard }) => app.on_heard(share, heard),
+            Event::UserEvent(UserEvent::Lan(key, result)) => app.on_lan(key, result),
             Event::UserEvent(UserEvent::Voip(gen, ev)) => match app.voip.on_event(gen, ev) {
                 // Talking lights and the mic meter go on their own, many times a second.
                 Some(live) => {
@@ -463,6 +520,7 @@ impl App {
                 sending: BTreeMap::new(),
                 sent: 0,
                 link: Link::default(),
+                peers: Peers::default(),
                 log: Log::default(),
             },
             recv: Recv {
@@ -476,6 +534,9 @@ impl App {
                 states: BTreeMap::new(),
                 inbox: portable::default_inbox(),
                 link: Link::default(),
+                peer: 0,
+                addr: String::new(),
+                host_name: None,
                 log: Log::default(),
             },
             hosts: Vec::new(),
@@ -486,6 +547,8 @@ impl App {
             voip: Voip::default(),
             page: "files".into(),
             status: ("Ready. Everything runs from this folder.".into(), "idle"),
+            name: String::new(),
+            adverts: Vec::new(),
         }
     }
 
@@ -494,11 +557,51 @@ impl App {
     }
 
     fn shutdown(&mut self) {
+        // Say goodbye to everyone we joined, all at once, so closing takes at
+        // most about a second.
+        let mut byes = vec![self.recv_bye()];
+        byes.extend(self.joins.iter_mut().map(join_bye));
+        for t in byes.into_iter().flatten() {
+            let _ = t.join();
+        }
         self.stop_share();
         self.stop_recv();
         self.hosts.clear();
         self.joins.clear();
         self.voip.shutdown();
+    }
+
+    /// Tells the sharer we're leaving, then closes the tunnel.
+    fn recv_bye(&mut self) -> Option<std::thread::JoinHandle<()>> {
+        if self.recv.st != St::Live || !self.recv.link.ok_once {
+            return None;
+        }
+        let proc = self.recv.proc.take()?;
+        let report = Report { peer: self.recv.peer, addr: &self.recv.addr, path: "unknown", rtt: None }.bye();
+        let port = self.recv.port;
+        Some(std::thread::spawn(move || {
+            tailcat::say_bye(port, &report);
+            drop(proc);
+        }))
+    }
+
+    fn set_name(&mut self, name: &str) {
+        let name = peers::clean_name(name);
+        if name.is_empty() || name == self.name {
+            return;
+        }
+        self.name = name;
+        peers::set_my_name(&self.name);
+        // Everyone we're connected to hears the new name now.
+        let now = Instant::now();
+        if self.recv.link.ok_once && !self.recv.link.pinging {
+            self.recv.link.next_ping = Some(now);
+        }
+        for j in &mut self.joins {
+            if !j.link.pinging {
+                j.link.next_ping = Some(now);
+            }
+        }
     }
 
     /// Returns true when the app should exit.
@@ -571,6 +674,7 @@ impl App {
             // ---------------------------------------------- file receive
             "recv.connect" => self.start_recv(&s("code")),
             "recv.stop" => {
+                self.recv_bye();
                 self.stop_recv();
                 self.set_status("Disconnected", "idle");
             }
@@ -610,7 +714,14 @@ impl App {
             }
 
             // ------------------------------------------------------ ports
-            "port.host" => self.start_port_host(&s("ports")),
+            "port.host" => self.start_port_host(&s("ports"), None),
+            "game.host" => {
+                let game = s("game");
+                if code::is_game_id(&game) {
+                    self.start_port_host(&s("port"), Some(game));
+                }
+            }
+            "game.join" => self.start_port_join(&s("code"), "", &[], false, true),
             "port.hostStop" => {
                 let key = msg["key"].as_u64().unwrap_or(0);
                 if let Some(h) = self.hosts.iter().find(|h| h.key == key) {
@@ -624,21 +735,25 @@ impl App {
                     .as_array()
                     .map(|a| a.iter().map(|v| v.as_u64().unwrap_or(0) as u16).collect())
                     .unwrap_or_default();
-                self.start_port_join(&s("code"), &s("ports"), &locals, msg["lan"].as_bool().unwrap_or(false));
+                self.start_port_join(&s("code"), &s("ports"), &locals, msg["lan"].as_bool().unwrap_or(false), false);
             }
             "port.joinStop" => {
                 let key = msg["key"].as_u64().unwrap_or(0);
+                if let Some(j) = self.joins.iter_mut().find(|j| j.key == key) {
+                    join_bye(j);
+                }
                 self.joins.retain(|j| j.key != key);
                 self.set_status("Disconnected", "idle");
             }
 
             // ------------------------------------------------------- voip
+            "name.set" => self.set_name(&s("name")),
             "voip.host" => {
-                self.voip.host(&s("room"), &s("name"), &self.proxy);
+                self.voip.host(&s("room"), &self.name, &self.proxy);
                 self.set_status("Opening your room…", "busy");
             }
             "voip.join" => {
-                self.voip.join(&s("code"), &s("name"), &self.proxy);
+                self.voip.join(&s("code"), &self.name, &self.proxy);
                 self.set_status("Joining the room through TailCat…", "busy");
             }
             "voip.leave" => {
@@ -718,6 +833,7 @@ impl App {
         self.share.error.clear();
         self.share.log = Log::default();
         self.share.link = Link::default();
+        self.share.peers.clear();
         let server = match Server::start(self.share.lib.clone(), self.proxy.clone()) {
             Ok(s) => s,
             Err(e) => return self.fail_share(e),
@@ -747,6 +863,7 @@ impl App {
         self.share.server = None;
         self.share.addr = None;
         self.share.sending.clear();
+        self.share.peers.clear();
     }
 
     // ---------------------------------------------------------- receiving
@@ -756,11 +873,15 @@ impl App {
         self.recv.error.clear();
         self.recv.log = Log::default();
         self.recv.link = Link::default();
+        self.recv.host_name = None;
         let c = match code::parse(input) {
             Ok(c) if c.kind == Kind::File => c,
-            Ok(c) if c.kind == Kind::Port => return self.fail_recv("That's a port code. Paste it in the Ports tab.".into()),
+            Ok(c) if c.kind == Kind::Port => return self.fail_recv("That's a port code. Paste it in the Port Forward tab.".into()),
+            Ok(c) if c.kind == Kind::Game => {
+                return self.fail_recv("That's a game server code. Paste it in Port Forward, under Game servers.".into())
+            }
             Ok(c) if c.kind == Kind::Voip => return self.fail_recv("That's a room code. Paste it in the VOIP tab.".into()),
-            Ok(_) => return self.fail_recv("That's a port code. Paste it in the Ports tab, or ask for the file code (it starts with kitty:file:).".into()),
+            Ok(_) => return self.fail_recv("That's a port code. Paste it in the Port Forward tab, or ask for the file code (it starts with kitty:file:).".into()),
             Err(e) => return self.fail_recv(e),
         };
         let local = match free_port() {
@@ -774,6 +895,8 @@ impl App {
                 let cancel = Arc::new(AtomicBool::new(false));
                 self.recv.proc = Some(p);
                 self.recv.port = local;
+                self.recv.peer = peers::new_id();
+                self.recv.addr = c.addr.clone();
                 self.recv.cancel = cancel.clone();
                 self.recv.jobs = Some(share::downloader(local, cancel.clone(), self.proxy.clone()));
                 self.recv.st = St::Starting;
@@ -832,12 +955,19 @@ impl App {
     }
 
     /// Opens another port set; each one is listed with its own code and Stop.
-    fn start_port_host(&mut self, input: &str) {
+    fn start_port_host(&mut self, input: &str, game: Option<String>) {
         self.host_error.clear();
         let ports = match code::parse_ports(input) {
             Ok(p) => p,
             Err(e) => return self.host_error = e,
         };
+        if game.is_some() && ports.len() != 1 {
+            return self.host_error = "A game server opens one port.".into();
+        }
+        // Minecraft: hear this PC's own "Open to LAN" so friends can see the world.
+        if game.as_deref() == Some("minecraft") && !lan::listen() {
+            self.host_error = "Couldn't listen for Minecraft LAN worlds (UDP 4445). The port still opens; friends can add the server by address.".into();
+        }
         if let Some(p) = ports.iter().find(|p| self.hosts.iter().any(|h| h.proc.is_some() && h.ports.contains(p))) {
             return self.host_error = format!("Port {p} is already open below.");
         }
@@ -852,7 +982,7 @@ impl App {
         };
         let mut list: Vec<String> = ports.iter().map(|p| p.to_string()).collect();
         // The beacon rides in the same tunnel so the friend can tell we're still here.
-        if let Some(b) = beacon::ensure().filter(|b| !ports.contains(b)) {
+        if let Some(b) = beacon::ensure(&self.proxy).filter(|b| !ports.contains(b)) {
             list.push(b.to_string());
         }
         let args = vec!["serve".into(), "--key=new".into(), list.join(",")];
@@ -868,6 +998,9 @@ impl App {
                     ports,
                     addr: None,
                     link: Link::default(),
+                    peers: Peers::default(),
+                    game,
+                    lan_note: String::new(),
                     log: Log::default(),
                 });
                 self.set_status("Starting TailCat…", "busy");
@@ -876,16 +1009,23 @@ impl App {
         }
     }
 
-    fn start_port_join(&mut self, input: &str, ports_input: &str, locals: &[u16], lan: bool) {
+    /// `game_mode`: joined from Game servers, where the code carries the game
+    /// and its port, and a busy local port is swapped for a free one.
+    fn start_port_join(&mut self, input: &str, ports_input: &str, locals: &[u16], lan: bool, game_mode: bool) {
         self.join_error.clear();
         let c = match code::parse(input) {
             Ok(c) if c.kind == Kind::File => {
                 return self.join_error = "That's a file share code. Paste it in the File Share tab.".into()
             }
             Ok(c) if c.kind == Kind::Voip => return self.join_error = "That's a room code. Paste it in the VOIP tab.".into(),
+            Ok(c) if game_mode && c.kind != Kind::Game => {
+                return self.join_error =
+                    "That's a manual port code. Paste it in Manual port forward, or ask for the game code (it starts with kitty:game.).".into()
+            }
             Ok(c) => c,
             Err(e) => return self.join_error = e,
         };
+        let game = c.game.clone();
         // The port numbers come from the box; an older kitty:port code carries its own.
         let remotes = if ports_input.trim().is_empty() && !c.ports.is_empty() {
             c.ports.clone()
@@ -900,9 +1040,16 @@ impl App {
         };
         let mut maps = Vec::new();
         for (i, remote) in remotes.iter().enumerate() {
-            let local = locals.get(i).copied().filter(|p| *p > 0).unwrap_or(*remote);
+            let mut local = locals.get(i).copied().filter(|p| *p > 0).unwrap_or(*remote);
             if maps.iter().any(|(l, _)| *l == local) {
                 return self.join_error = format!("Local port {local} is used twice. Give each one its own number.");
+            }
+            // A game join picks another port itself; Minecraft finds it through LAN anyway.
+            if game_mode && !port_free(local, lan) {
+                local = match free_port() {
+                    Ok(p) => p,
+                    Err(e) => return self.join_error = e,
+                };
             }
             if !port_free(local, lan) {
                 return self.join_error =
@@ -914,7 +1061,7 @@ impl App {
         if lan {
             args.push("--bind=0.0.0.0".into());
         }
-        args.push(c.addr);
+        args.push(c.addr.clone());
         args.extend(maps.iter().map(|(l, r)| format!("{l}:{r}")));
         // A private local port to the host's beacon, for the 30-second check.
         let beacon = (!remotes.contains(&beacon::PORT)).then(free_port).and_then(Result::ok);
@@ -935,6 +1082,13 @@ impl App {
                     started: Instant::now(),
                     beacon,
                     link,
+                    peer: peers::new_id(),
+                    addr: c.addr,
+                    host_name: None,
+                    game,
+                    worlds: Vec::new(),
+                    lan_next: Instant::now() + Duration::from_secs(3),
+                    lan_asking: false,
                     log: Log::default(),
                 });
                 self.set_status("Connecting through TailCat…", "busy");
@@ -982,6 +1136,10 @@ impl App {
                 match ev {
                     TcEvent::Line(line) => {
                         if let Some(addr) = tailcat::find_addr(&line).filter(|_| !tailcat::is_verbose(&line)) {
+                            if h.game.as_deref() == Some("minecraft") {
+                                let who = if self.name.is_empty() { "Your friend".to_string() } else { self.name.clone() };
+                                lan::serve(&addr, &h.ports, &format!("{who}'s Minecraft server"));
+                            }
                             h.addr = Some(addr);
                             h.st = St::Live;
                             self.status = ("Port is open. Send the code and port number to your friend.".into(), "ok");
@@ -990,6 +1148,7 @@ impl App {
                     }
                     TcEvent::Exited => {
                         let why = last_words(&h.log);
+                        h.unserve();
                         h.proc = None;
                         h.addr = None;
                         h.st = St::Error;
@@ -1120,42 +1279,143 @@ impl App {
             }
         }
 
-        // Every 30 seconds, ping the far end through each tunnel we joined.
+        // Everyone gone quiet drops off the lists of who's connected.
+        changed |= self.share.peers.expire();
+        for h in &mut self.hosts {
+            changed |= h.peers.expire();
+        }
+
+        // Every 30 seconds, ping the far end through each tunnel we joined,
+        // and at once when our path changed, so the host's list stays right.
         let now = Instant::now();
+        for link in std::iter::once(&mut self.recv.link).chain(self.joins.iter_mut().map(|j| &mut j.link)) {
+            if link.report_due() && !link.pinging {
+                link.next_ping = Some(now);
+            }
+        }
         if self.recv.st == St::Live && self.recv.link.ok_once && self.recv.link.ping_due(now) {
             self.recv.link.ping_started();
-            self.spawn_ping(PingTarget::Recv(self.recv.port), self.recv.port);
+            let r = Report { peer: self.recv.peer, addr: &self.recv.addr, path: self.recv.link.path(), rtt: self.recv.link.rtt_ms };
+            self.spawn_ping(PingTarget::Recv(self.recv.port), self.recv.port, r.ping());
         }
-        let due: Vec<(u64, u16)> = self
+        let due: Vec<(u64, u16, String)> = self
             .joins
             .iter_mut()
             .filter(|j| j.proc.is_some() && j.link.ping_due(now))
             .filter_map(|j| {
                 let b = j.beacon?;
                 j.link.ping_started();
-                Some((j.key, b))
+                Some((j.key, b, j.report().ping()))
             })
             .collect();
-        for (key, port) in due {
-            self.spawn_ping(PingTarget::Join(key), port);
+        for (key, port, request) in due {
+            self.spawn_ping(PingTarget::Join(key), port, request);
         }
+        changed |= self.games_tick(now);
         changed |= self.voip.tick();
         changed
     }
 
-    fn spawn_ping(&self, target: PingTarget, port: u16) {
+    /// Minecraft: keeps hosts' notes up to date, asks hosts we joined which
+    /// LAN worlds they have open, and shows those in this PC's Minecraft.
+    fn games_tick(&mut self, now: Instant) -> bool {
+        let mut changed = false;
+        let open = lan::local_worlds();
+        for h in self.hosts.iter_mut().filter(|h| h.st == St::Live && h.game.as_deref() == Some("minecraft")) {
+            let port = h.ports[0];
+            let (note, warn) = if let Some(w) = open.iter().find(|w| w.port == port) {
+                (format!("Friends who join see \u{201c}{}\u{201d} under LAN in Multiplayer.", w.motd), String::new())
+            } else if let Some(w) = open.first() {
+                (String::new(), format!(
+                    "Minecraft opened your world on port {}, not {port}. Open to LAN again with Port Number set to {port}, or stop this and host on {}.",
+                    w.port, w.port
+                ))
+            } else if something_listening(port) {
+                (format!("A server is running on port {port}. Friends who join see it under LAN in Multiplayer."), String::new())
+            } else {
+                (String::new(), format!(
+                    "Waiting for Minecraft. In your world press Esc, then Open to LAN, set Port Number to {port}, and press Start LAN World."
+                ))
+            };
+            if h.lan_note != note || h.warn != warn {
+                h.lan_note = note;
+                h.warn = warn;
+                changed = true;
+            }
+        }
+
+        let due: Vec<(u64, u16, String)> = self
+            .joins
+            .iter_mut()
+            .filter(|j| j.proc.is_some() && j.game.as_deref() == Some("minecraft") && !j.lan_asking && now >= j.lan_next)
+            .filter_map(|j| {
+                let b = j.beacon?;
+                j.lan_asking = true;
+                Some((j.key, b, j.addr.clone()))
+            })
+            .collect();
+        for (key, beacon, addr) in due {
+            let proxy = self.proxy.clone();
+            std::thread::spawn(move || {
+                let _ = proxy.send_event(UserEvent::Lan(key, lan::ask(beacon, &addr)));
+            });
+        }
+
+        // Each world on a port we forward shows at the near end of the tunnel.
+        let adverts: Vec<(u16, String)> = self
+            .joins
+            .iter()
+            .filter(|j| j.proc.is_some())
+            .flat_map(|j| {
+                j.worlds.iter().filter_map(|w| {
+                    let local = j.maps.iter().find(|(_, r)| *r == w.port)?.0;
+                    let motd = match &j.host_name {
+                        Some(n) if !w.motd.contains(n.as_str()) => format!("{} ({n})", w.motd),
+                        _ => w.motd.clone(),
+                    };
+                    Some((local, motd))
+                })
+            })
+            .collect();
+        if adverts != self.adverts {
+            lan::advertise(adverts.clone());
+            self.adverts = adverts;
+        }
+        changed
+    }
+
+    fn on_lan(&mut self, key: u64, result: Result<Vec<lan::World>, String>) -> bool {
+        let Some(j) = self.joins.iter_mut().find(|j| j.key == key) else { return false };
+        j.lan_asking = false;
+        j.lan_next = Instant::now() + Duration::from_secs(3);
+        // A failed ask keeps what we had; the 30-second check notices a host that's gone.
+        match result {
+            Ok(worlds) if worlds != j.worlds => {
+                j.worlds = worlds;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn spawn_ping(&self, target: PingTarget, port: u16, request: String) {
         let proxy = self.proxy.clone();
         std::thread::spawn(move || {
-            let result = tailcat::ping_port(port, Duration::from_secs(10));
+            let result = tailcat::ping_port(port, &request, Duration::from_secs(10));
             let _ = proxy.send_event(UserEvent::Ping(target, result));
         });
     }
 
-    fn on_ping(&mut self, target: PingTarget, result: Result<Duration, String>) -> bool {
+    fn on_ping(&mut self, target: PingTarget, result: Result<tailcat::Pong, String>) -> bool {
+        let name = result.as_ref().ok().and_then(|p| p.name.clone());
+        let result = result.map(|p| p.rtt);
         match target {
             PingTarget::Recv(port) => {
                 if self.recv.port != port || self.recv.st != St::Live {
                     return false;
+                }
+                if name.is_some() {
+                    self.recv.host_name = name;
                 }
                 if self.recv.link.ping_result(result) {
                     self.fail_recv("The sharer stopped sharing or went offline.".into());
@@ -1165,6 +1425,9 @@ impl App {
                 let Some(j) = self.joins.iter_mut().find(|j| j.key == key) else { return false };
                 if j.proc.is_none() {
                     return false;
+                }
+                if name.is_some() {
+                    j.host_name = name;
                 }
                 if j.link.ping_result(result) {
                     j.proc = None;
@@ -1179,6 +1442,21 @@ impl App {
             }
         }
         true
+    }
+
+    /// Someone connected to what we opened checked in or left.
+    fn on_heard(&mut self, share: bool, heard: Heard) -> bool {
+        if !heard.is_named() {
+            return false;
+        }
+        if share {
+            return self.share.st == St::Live && self.share.peers.heard(&heard);
+        }
+        // All open ports share one beacon; the code they joined with says which.
+        match self.hosts.iter_mut().find(|h| h.proc.is_some() && h.addr.as_deref() == Some(heard.addr.as_str())) {
+            Some(h) => h.peers.heard(&heard),
+            None => false,
+        }
     }
 
     fn snapshot(&self) -> Value {
@@ -1207,6 +1485,7 @@ impl App {
         json!({
             "type": "state",
             "status": { "text": self.status.0, "kind": self.status.1 },
+            "name": self.name,
             "share": {
                 "st": self.share.st.name(),
                 "error": self.share.error,
@@ -1217,7 +1496,7 @@ impl App {
                     "name": s.name, "done": s.done, "total": s.total, "speed": s.speed.bps as u64,
                 })).collect::<Vec<_>>(),
                 "sent": self.share.sent,
-                "link": self.share.link.json(),
+                "peers": self.share.peers.json(),
                 "log": self.share.log.json(),
             },
             "recv": {
@@ -1226,6 +1505,7 @@ impl App {
                 "files": recv_files,
                 "inbox": self.recv.inbox.display().to_string(),
                 "link": self.recv.link.json(),
+                "hostName": self.recv.host_name,
                 "log": self.recv.log.json(),
             },
             "voip": self.voip.json(),
@@ -1237,8 +1517,13 @@ impl App {
                 "error": h.error,
                 "warn": h.warn,
                 "ports": h.ports,
-                "code": h.addr,
-                "link": h.link.json(),
+                "code": match (&h.game, &h.addr) {
+                    (Some(g), Some(a)) => Some(code::game(g, h.ports[0], a)),
+                    _ => h.addr.clone(),
+                },
+                "game": h.game,
+                "lanNote": h.lan_note,
+                "peers": h.peers.json(),
                 "log": h.log.json(),
             })).collect::<Vec<_>>(),
             "joins": self.joins.iter().map(|j| json!({
@@ -1248,11 +1533,25 @@ impl App {
                 "lan": j.lan,
                 "maps": j.maps.iter().map(|(l, r)| json!({ "local": l, "remote": r })).collect::<Vec<_>>(),
                 "link": j.link.json(),
+                "hostName": j.host_name,
+                "game": j.game,
+                "worlds": j.worlds,
                 "checks": j.beacon.is_some(),
                 "log": j.log.json(),
             })).collect::<Vec<_>>(),
         })
     }
+}
+
+/// Tells a port host we're leaving, then closes the tunnel.
+fn join_bye(j: &mut PortJoin) -> Option<std::thread::JoinHandle<()>> {
+    let port = j.beacon.filter(|_| j.link.ok_once)?;
+    let report = j.report().bye();
+    let proc = j.proc.take()?;
+    Some(std::thread::spawn(move || {
+        tailcat::say_bye(port, &report);
+        drop(proc);
+    }))
 }
 
 pub(crate) fn open_in_shell(target: impl AsRef<std::ffi::OsStr>) {

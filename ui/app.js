@@ -79,6 +79,34 @@ setInterval(() => {
   document.querySelectorAll('[data-at]').forEach((el) => { el.textContent = ago(Number(el.dataset.at)); });
 }, 5000);
 
+/* Everyone connected to something you opened, by name, each with Direct or
+   Relay as they report it through the tunnel. */
+function peersHtml(peers, empty) {
+  const rows = peers.map((p) => {
+    const at = Math.round(Date.now() / 1000 - p.checkedAgo);
+    const link = linkPill({ path: p.path, rtt: p.rtt, checkedAgo: p.checkedAgo }, p.name)
+      || `<span class="meta">Connecting… <span class="ago" data-at="${at}">${ago(at)}</span></span>`;
+    return `
+      <div class="person">
+        <span class="avatar" style="--h:${hue(p.name)}">${esc(initials(p.name))}</span>
+        <span class="person-name">${esc(p.name)}</span>
+        <span class="grow"></span>
+        ${link}
+      </div>`;
+  }).join('');
+  return `
+    <div class="peers">
+      <div class="peers-head"><span class="field-label">Connected</span><span class="meta">${peers.length || ''}</span></div>
+      ${rows || `<div class="peers-empty">${esc(empty)}</div>`}
+    </div>`;
+}
+
+/* The name of whoever you joined, next to how you're connected to them. */
+function hostHtml(name, link, fallback) {
+  const who = name ? `<span class="hostname">${esc(fallback.label)} <b>${esc(name)}</b></span>` : '';
+  return who + linkPill(link, name || fallback.who);
+}
+
 function show(el, on) { el.classList.toggle('on', !!on); }
 function hide(el, hidden) { el.classList.toggle('hide', !!hidden); }
 
@@ -214,7 +242,7 @@ function renderShare(s) {
   const busy = s.st === 'starting' || live;
   pill('share-pill', 'share', s.st);
   $('share-card').classList.toggle('live', live);
-  setHtml($('share-link'), live ? linkPill(s.link, 'whoever is downloading') : '');
+  setHtml($('share-peers'), live ? peersHtml(s.peers, 'Nobody yet. They show up here when they connect.') : '');
 
   setHtml($('share-files'), s.files.map((f) => `
     <div class="file">
@@ -250,7 +278,7 @@ function renderRecv(r) {
   const on = r.st === 'starting' || r.st === 'live';
   pill('recv-pill', 'recv', r.st);
   $('recv-card').classList.toggle('live', r.st === 'live');
-  setHtml($('recv-link'), r.st === 'live' ? linkPill(r.link, 'the sharer') : '');
+  setHtml($('recv-link'), r.st === 'live' ? hostHtml(r.hostName, r.link, { label: 'From', who: 'the sharer' }) : '');
   $('recv-code').disabled = on;
   hide($('recv-connect'), on);
   hide($('recv-stop'), !on);
@@ -296,7 +324,7 @@ function renderRecv(r) {
 
 /* ------------------------------------------------------------------ ports */
 
-$('host-start').addEventListener('click', () => post({ cmd: 'port.host', ports: $('host-ports').value }));
+$('host-start').addEventListener('click', () => { pfFrom = 'manual'; post({ cmd: 'port.host', ports: $('host-ports').value }); });
 $('host-ports').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('host-start').click(); });
 document.querySelectorAll('[data-preset]').forEach((b) => {
   b.addEventListener('click', () => {
@@ -311,7 +339,9 @@ document.querySelectorAll('[data-preset]').forEach((b) => {
 /* Each open port set and each joined one is its own entry in the lists below
    the forms, with its own status, code, log and Stop. */
 const openLogs = new Set();
-let lastHosts = 0, lastJoins = 0;
+let lastHosts = 0, lastJoins = 0, lastGameHosts = 0, lastGameJoins = 0;
+/* Which Port Forward view the last Host/Join press came from, so its error shows there. */
+let pfFrom = 'manual';
 
 function sessLog(id, lines) {
   const last = lines.length ? lines[lines.length - 1].replace(/^#\s*/, '') : 'Nothing yet';
@@ -343,16 +373,17 @@ function portList(ports) {
   return `Port${ports.length === 1 ? '' : 's'} <b>${ports.join(', ')}</b>`;
 }
 
-function renderHosts(hosts, error) {
-  $('host-error').textContent = error;
-  show($('host-error'), error);
-  if (hosts.length > lastHosts) $('host-ports').value = '';
-  lastHosts = hosts.length;
-  const live = hosts.filter((h) => h.st === 'live').length;
-  $('host-count').textContent = hosts.length ? `${live} open` : '';
-  setHtml($('host-list'), hosts.length ? hosts.map((h) => `
+/* One open port (manual) or game server, with its code, who's connected, and
+   for Minecraft what friends see. */
+function hostCard(h) {
+  const g = h.game ? gameInfo(h.game) : null;
+  const title = g ? `${esc(g.name)} · port <b>${h.ports[0]}</b>` : portList(h.ports);
+  const hint = g
+    ? 'Send this code to your friends. They paste it in Port Forward → Game servers → Join.'
+    : `Send this code and port ${h.ports.join(', ')} to your friend.`;
+  return `
     <div class="sess${h.st === 'live' ? ' live' : ''}">
-      ${sessHead(portList(h.ports), 'host', h.st, `data-stop-host="${h.key}"`, linkPill(h.link))}
+      ${sessHead(title, 'host', h.st, `data-stop-host="${h.key}"`)}
       ${h.st === 'starting' ? '<p class="meta">Getting a code from TailCat…</p>' : ''}
       ${h.st === 'live' && h.code ? `
         <div class="sess-code">
@@ -360,13 +391,35 @@ function renderHosts(hosts, error) {
           <div class="row">
             <button class="btn small primary" data-copytext="${esc(h.code)}" data-discord="1">Copy for Discord</button>
             <button class="btn small" data-copytext="${esc(h.code)}">Copy code</button>
-            <span class="meta">Send this code and port ${h.ports.join(', ')} to your friend.</span>
+            <span class="meta">${hint}</span>
           </div>
         </div>` : ''}
+      ${h.st === 'live' && h.lanNote ? `<p class="okline">${esc(h.lanNote)}</p>` : ''}
+      ${h.st === 'live' ? peersHtml(h.peers, 'Nobody has joined yet. Everyone who does shows up here.') : ''}
       ${h.warn && h.st !== 'error' ? `<p class="warn on">${esc(h.warn)}</p>` : ''}
       ${h.st === 'error' && h.error ? `<p class="err on">${esc(h.error)}</p>` : ''}
       ${sessLog(`h${h.key}`, h.log)}
-    </div>`).join('') : '<div class="empty">No ports open. Open one above and it shows up here with its code.</div>');
+    </div>`;
+}
+
+function renderHosts(hosts, error) {
+  const manual = hosts.filter((h) => !h.game);
+  const games = hosts.filter((h) => h.game);
+  $('host-error').textContent = pfFrom === 'manual' ? error : '';
+  show($('host-error'), pfFrom === 'manual' && error);
+  $('game-host-error').textContent = pfFrom === 'games' ? error : '';
+  show($('game-host-error'), pfFrom === 'games' && error);
+  if (manual.length > lastHosts) $('host-ports').value = '';
+  if (games.length > lastGameHosts) document.querySelectorAll('#game-list .input.port').forEach((i) => { i.value = ''; });
+  lastHosts = manual.length;
+  lastGameHosts = games.length;
+  const count = (list) => (list.length ? `${list.filter((h) => h.st === 'live').length} open` : '');
+  $('host-count').textContent = count(manual);
+  $('game-host-count').textContent = count(games);
+  setHtml($('host-list'), manual.length ? manual.map(hostCard).join('')
+    : '<div class="empty">No ports open. Open one above and it shows up here with its code.</div>');
+  setHtml($('game-host-list'), games.length ? games.map(hostCard).join('')
+    : '<div class="empty">Not hosting a game. Press Host next to one above.</div>');
 }
 
 /* Join: each port typed gets a row where the local port can be changed (if
@@ -403,9 +456,10 @@ function renderMaps() {
 
 $('join-start').addEventListener('click', () => {
   const locals = [...document.querySelectorAll('#join-maps input')].map((i) => Number(i.value) || 0);
+  pfFrom = 'manual';
   post({ cmd: 'port.join', code: $('join-code').value, ports: joinPorts().join(','), locals, lan: $('join-lan').checked });
 });
-['host-list', 'join-list'].forEach((id) => $(id).addEventListener('click', (e) => {
+function sessClick(e) {
   const t = e.target;
   const sh = t.closest('[data-stop-host]');
   if (sh) return post({ cmd: 'port.hostStop', key: Number(sh.dataset.stopHost) });
@@ -426,55 +480,138 @@ $('join-start').addEventListener('click', () => {
     const key = box.dataset.sessLog;
     if (box.classList.contains('open')) openLogs.add(key); else openLogs.delete(key);
   }
-}));
+}
+['host-list', 'join-list'].forEach((id) => $(id).addEventListener('click', sessClick));
+
+/* One joined port set or game server: where to connect, and for Minecraft
+   whether the host's world is showing under LAN. */
+function joinCard(j) {
+  const g = j.game ? gameInfo(j.game) : null;
+  const title = g ? `${esc(g.name)}` : portList(j.maps.map((m) => m.remote));
+  const host = j.hostName ? esc(j.hostName) : 'your friend';
+  let body = '';
+  if (j.st === 'live') {
+    const addrs = j.maps.map((m) => `
+        <div class="addr">
+          <code>127.0.0.1:${m.local}</code>
+          <span class="meta">${g ? (g.lan ? 'or add it as a server by this address' : `connect ${esc(g.name)} to this address`) : `their port ${m.remote}`}${j.lan ? ` · also this PC's network IP, port ${m.local}` : ''}</span>
+          <button class="btn small" data-copytext="127.0.0.1:${m.local}">Copy</button>
+        </div>`).join('');
+    if (g && g.lan) {
+      body = j.worlds.length
+        ? j.worlds.map((w) => `<p class="okline">Open <b>Multiplayer</b> in Minecraft: \u201c${esc(w.motd)}\u201d is under LAN. Join it from there.</p>`).join('')
+        : `<p class="meta">Waiting for ${host} to open their world to LAN. It shows up in your Multiplayer screen as soon as they do.</p>`;
+    }
+    body += addrs;
+  }
+  return `
+    <div class="sess${j.st === 'live' ? ' live' : ''}">
+      ${sessHead(title, 'join', j.st, `data-stop-join="${j.key}"`, hostHtml(j.hostName, j.link, { label: 'Host', who: 'your friend' }))}
+      ${j.st === 'starting' ? '<p class="meta">Reaching your friend through TailCat…</p>' : ''}
+      ${body}
+      ${j.st === 'error' && j.error ? `<p class="err on">${esc(j.error)}</p>` : ''}
+      ${sessLog(`j${j.key}`, j.log)}
+    </div>`;
+}
 
 function renderJoins(joins, error) {
-  $('join-error').textContent = error;
-  show($('join-error'), error);
-  if (joins.length > lastJoins) {
+  const manual = joins.filter((j) => !j.game);
+  const games = joins.filter((j) => j.game);
+  $('join-error').textContent = pfFrom === 'manual' ? error : '';
+  show($('join-error'), pfFrom === 'manual' && error);
+  $('game-join-error').textContent = pfFrom === 'games' ? error : '';
+  show($('game-join-error'), pfFrom === 'games' && error);
+  if (manual.length > lastJoins) {
     $('join-code').value = '';
     $('join-ports').value = '';
     renderMaps();
   }
-  lastJoins = joins.length;
-  const live = joins.filter((j) => j.st === 'live').length;
-  $('join-count').textContent = joins.length ? `${live} connected` : '';
-  setHtml($('join-list'), joins.length ? joins.map((j) => `
-    <div class="sess${j.st === 'live' ? ' live' : ''}">
-      ${sessHead(portList(j.maps.map((m) => m.remote)), 'join', j.st, `data-stop-join="${j.key}"`, linkPill(j.link))}
-      ${j.st === 'starting' ? '<p class="meta">Reaching your friend through TailCat…</p>' : ''}
-      ${j.st === 'live' ? j.maps.map((m) => `
-        <div class="addr">
-          <code>127.0.0.1:${m.local}</code>
-          <span class="meta">their port ${m.remote}${j.lan ? ` · also this PC's network IP, port ${m.local}` : ''}</span>
-          <button class="btn small" data-copytext="127.0.0.1:${m.local}">Copy</button>
-        </div>`).join('') : ''}
-      ${j.st === 'error' && j.error ? `<p class="err on">${esc(j.error)}</p>` : ''}
-      ${sessLog(`j${j.key}`, j.log)}
-    </div>`).join('') : '<div class="empty">Not connected to any ports. Paste a code above to join one.</div>');
+  if (games.length > lastGameJoins) $('game-code').value = '';
+  lastJoins = manual.length;
+  lastGameJoins = games.length;
+  const count = (list) => (list.length ? `${list.filter((j) => j.st === 'live').length} connected` : '');
+  $('join-count').textContent = count(manual);
+  $('game-join-count').textContent = count(games);
+  setHtml($('join-list'), manual.length ? manual.map(joinCard).join('')
+    : '<div class="empty">Not connected to any ports. Paste a code above to join one.</div>');
+  setHtml($('game-join-list'), games.length ? games.map(joinCard).join('')
+    : '<div class="empty">Not in any game. Paste a game code above to join.</div>');
+}
+
+/* ----------------------------------------------------------- game servers */
+
+/* One-click games. TCP only, since that's what TailCat carries. Minecraft also
+   gets its LAN discovery carried through the tunnel (`lan` in the app). */
+const GAMES = [
+  { id: 'minecraft', name: 'Minecraft: Java Edition', short: 'MC', port: 25565, h: 110, lan: true,
+    desc: 'Open your world to LAN on this port. Friends see it under LAN in Multiplayer.' },
+  { id: 'terraria', name: 'Terraria / tModLoader', short: 'TR', port: 7777, h: 150,
+    desc: 'Host &amp; Play in Terraria. Friends join via IP with the address they get.' },
+  { id: 'starbound', name: 'Starbound', short: 'SB', port: 21025, h: 265,
+    desc: 'Run your server, then friends join by the address they get.' },
+  { id: 'vintagestory', name: 'Vintage Story', short: 'VS', port: 42420, h: 30,
+    desc: 'Run your server, then friends join by the address they get.' },
+];
+
+function gameInfo(id) {
+  return GAMES.find((g) => g.id === id) || { id, name: id, short: id.slice(0, 2).toUpperCase(), port: 0, h: 210, desc: '' };
+}
+
+$('game-list').innerHTML = GAMES.map((g) => `
+  <div class="game">
+    <span class="game-ico" style="--h:${g.h}">${g.short}</span>
+    <div class="game-main">
+      <span class="game-name">${esc(g.name)}</span>
+      <span class="game-desc">${g.desc}</span>
+    </div>
+    <input class="input small port" data-game-port="${g.id}" inputmode="numeric" maxlength="5" placeholder="${g.port}" title="Port (${g.port} unless you change it)">
+    <button class="btn small primary" data-game-host="${g.id}">Host</button>
+  </div>`).join('');
+
+$('game-list').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-game-host]');
+  if (!b) return;
+  const g = gameInfo(b.dataset.gameHost);
+  const input = document.querySelector(`[data-game-port="${g.id}"]`);
+  pfFrom = 'games';
+  post({ cmd: 'game.host', game: g.id, port: input.value.trim() || String(g.port) });
+});
+$('game-list').addEventListener('keydown', (e) => {
+  const i = e.target.closest('[data-game-port]');
+  if (i && e.key === 'Enter') document.querySelector(`[data-game-host="${i.dataset.gamePort}"]`).click();
+});
+$('game-join').addEventListener('click', () => {
+  pfFrom = 'games';
+  post({ cmd: 'game.join', code: $('game-code').value });
+});
+$('game-code').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('game-join').click(); });
+['game-host-list', 'game-join-list'].forEach((id) => $(id).addEventListener('click', sessClick));
+
+/* Port Forward opens on a choice between game servers and manual; the arrow
+   goes back to it. */
+function pfView(name) {
+  for (const v of ['home', 'games', 'manual']) hide($(`pf-${v}`), v !== name);
+  hide($('pf-back'), name === 'home');
+  $('pf-title').textContent = { home: 'Port Forward', games: 'Game servers', manual: 'Manual port forward' }[name];
+  pfFrom = name === 'home' ? pfFrom : name;
+}
+document.querySelectorAll('[data-pf]').forEach((b) => b.addEventListener('click', () => pfView(b.dataset.pf)));
+$('pf-back').addEventListener('click', () => pfView('home'));
+
+function renderPfCounts(hosts, joins) {
+  const sum = (h, j) => [h.length && `${h.length} hosting`, j.length && `${j.length} joined`].filter(Boolean).join(' · ');
+  $('pf-games-count').textContent = sum(hosts.filter((h) => h.game), joins.filter((j) => j.game));
+  $('pf-manual-count').textContent = sum(hosts.filter((h) => !h.game), joins.filter((j) => !j.game));
 }
 
 /* ------------------------------------------------------------------- voip */
 
-// The name is remembered for next time, in this app's own (portable) profile.
-try { $('voip-name').value = localStorage.getItem('kc-name') || ''; } catch (_) { /* no storage */ }
-$('voip-name').addEventListener('change', () => {
-  try { localStorage.setItem('kc-name', $('voip-name').value.trim()); } catch (_) { /* no storage */ }
-});
-
-function voipName() {
-  const n = $('voip-name').value.trim();
-  if (!n) $('voip-name').focus();
-  return n;
-}
-
+// Rooms use the name picked when the app opened (the chip, top right).
 $('voip-host').addEventListener('click', () => {
-  const name = voipName();
-  if (name) post({ cmd: 'voip.host', name, room: $('voip-room-name').value.trim() || 'Hangout' });
+  post({ cmd: 'voip.host', room: $('voip-room-name').value.trim() || 'Hangout' });
 });
 $('voip-join').addEventListener('click', () => {
-  const name = voipName();
-  if (name) post({ cmd: 'voip.join', name, code: $('voip-code').value });
+  post({ cmd: 'voip.join', code: $('voip-code').value });
 });
 $('voip-code').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('voip-join').click(); });
 $('voip-room-name').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('voip-host').click(); });
@@ -1131,6 +1268,61 @@ document.querySelectorAll('.page').forEach((p) => p.addEventListener('scroll', c
 
 /* ------------------------------------------------------------ host events */
 
+/* ------------------------------------------------------------------- name */
+
+/* Asked every time the app opens. The input starts empty with a random name
+   as its grey placeholder: OK on its own takes the suggestion, and typing
+   replaces it. It's used everywhere: rooms, and the hosts of ports and file
+   shares you join see it next to how you're connected. */
+const NAME_A = ['Sleepy', 'Fuzzy', 'Sneaky', 'Cosy', 'Zippy', 'Mellow', 'Brave', 'Lucky', 'Jolly', 'Sunny',
+  'Quiet', 'Swift', 'Bouncy', 'Dapper', 'Cheeky', 'Misty', 'Velvet', 'Tiny', 'Clever', 'Breezy'];
+const NAME_B = ['Kitten', 'Tabby', 'Panther', 'Lynx', 'Ocelot', 'Bobcat', 'Tiger', 'Puma', 'Cheetah', 'Jaguar',
+  'Otter', 'Fox', 'Badger', 'Panda', 'Falcon', 'Owl', 'Hedgehog', 'Raccoon', 'Koala', 'Wombat'];
+let myName = '';
+let nameRequired = true;
+
+function randomName() {
+  const pick = (a) => a[Math.floor(Math.random() * a.length)];
+  return `${pick(NAME_A)} ${pick(NAME_B)}`;
+}
+
+function openName(required) {
+  nameRequired = required;
+  const input = $('name-input');
+  input.value = required ? '' : myName;
+  input.placeholder = randomName();
+  hide($('name-modal'), false);
+  setTimeout(() => { input.focus(); input.select(); }, 30);
+}
+
+function setMe(name) {
+  myName = name;
+  $('me-name').textContent = name;
+  $('me-avatar').textContent = initials(name);
+  $('me-avatar').style.setProperty('--h', hue(name));
+  hide($('me-chip'), !name);
+}
+
+$('name-form').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const input = $('name-input');
+  const name = (input.value.trim() || input.placeholder).slice(0, 32);
+  post({ cmd: 'name.set', name });
+  setMe(name);
+  hide($('name-modal'), true);
+});
+$('name-shuffle').addEventListener('click', () => {
+  $('name-input').value = '';
+  $('name-input').placeholder = randomName();
+  $('name-input').focus();
+});
+$('me-chip').addEventListener('click', () => openName(false));
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !nameRequired) hide($('name-modal'), true);
+});
+hide($('me-chip'), true);
+openName(true);
+
 window.onHost = (msg) => {
   switch (msg.type) {
     case 'state': {
@@ -1138,7 +1330,9 @@ window.onHost = (msg) => {
       renderRecv(msg.recv);
       renderHosts(msg.hosts, msg.hostError);
       renderJoins(msg.joins, msg.joinError);
+      renderPfCounts(msg.hosts, msg.joins);
       renderVoip(msg.voip);
+      if (msg.name && msg.name !== myName) setMe(msg.name);
       $('statusText').textContent = msg.status.text;
       $('lamp').className = msg.status.kind;
       const filesLive = msg.share.st === 'live' || msg.recv.st === 'live';
@@ -1217,11 +1411,14 @@ if (window.ipc) {
         { id: 4, name: 'modpack.mrpack', size: 203685888 },
       ],
       sending: [{ name: 'world-backup.zip', done: 199229440, total: 524288000, speed: 6815744 }],
-      link: { path: 'direct', endpoint: '203.0.113.7:41641', rtt: null, checkedAgo: null },
+      peers: [
+        { id: '1', name: 'Alex Rivera', path: 'direct', rtt: 24, checkedAgo: 8 },
+        { id: '2', name: 'Jo', path: 'relay', rtt: 91, checkedAgo: 20 },
+      ],
       log: ['# Selected bootstrap relay region 302, San Francisco', `# 🐈 Server listening with new address: ${addr}`],
     },
     recv: {
-      st: 'live', error: '', inbox: 'C:\\Users\\you\\Downloads',
+      st: 'live', error: '', inbox: 'C:\\Users\\you\\Downloads', hostName: 'Sam',
       link: { path: 'direct', endpoint: '198.51.100.4:41641', rtt: 23, checkedAgo: 12 },
       files: [
         { id: 7, name: 'song.mp3', size: 8388608, st: 'done', done: 8388608, total: 8388608, error: '' },
@@ -1255,11 +1452,25 @@ if (window.ipc) {
     },
     hostError: '', joinError: '',
     hosts: [
-      { key: 3, st: 'live', error: '', warn: '', ports: [8080], code: addr.slice(0, 70), log: [`# 🐈 Server listening with new address: ${addr.slice(0, 70)}`] },
-      { key: 2, st: 'live', error: '', warn: 'Nothing is running on port 25565 on this PC yet. Start your server; your friend can connect once it\'s up.', ports: [25565], code: addr, log: [] },
+      { key: 9, st: 'live', error: '', warn: '', ports: [25565], game: 'minecraft', code: `kitty:game.minecraft:25565:${addr.slice(0, 60)}`,
+        lanNote: 'Friends who join see \u201cSam - Survival Island\u201d under LAN in Multiplayer.', log: [],
+        peers: [{ id: '7', name: 'Alex Rivera', path: 'direct', rtt: 22, checkedAgo: 3 }, { id: '8', name: 'Jo', path: 'relay', rtt: 95, checkedAgo: 9 }] },
+      { key: 3, st: 'live', error: '', warn: '', ports: [8080], code: addr.slice(0, 70), peers: [], log: [`# 🐈 Server listening with new address: ${addr.slice(0, 70)}`] },
+      { key: 2, st: 'live', error: '', warn: 'Nothing is running on port 25565 on this PC yet. Start your server; your friend can connect once it\'s up.', ports: [25565], code: addr, log: [],
+        peers: [
+          { id: '1', name: 'Alex Rivera', path: 'direct', rtt: 24, checkedAgo: 4 },
+          { id: '2', name: 'Jo', path: 'relay', rtt: 88, checkedAgo: 12 },
+          { id: '3', name: 'Mellow Otter', path: 'direct', rtt: 31, checkedAgo: 2 },
+          { id: '4', name: 'Priya', path: 'relay', rtt: 120, checkedAgo: 25 },
+          { id: '5', name: 'Kit', path: 'unknown', rtt: null, checkedAgo: 1 },
+        ] },
     ],
     joins: [
-      { key: 4, st: 'live', error: '', lan: false, maps: [{ local: 7777, remote: 7777 }], link: { path: 'relay', rtt: 91, checkedAgo: 40 }, log: [] },
+      { key: 6, st: 'live', error: '', lan: false, hostName: 'Priya', game: 'minecraft', worlds: [{ port: 25565, motd: 'Priya - Skyblock' }],
+        maps: [{ local: 25565, remote: 25565 }], link: { path: 'direct', rtt: 18, checkedAgo: 5 }, log: [] },
+      { key: 5, st: 'live', error: '', lan: false, hostName: 'Kit', game: 'terraria', worlds: [],
+        maps: [{ local: 7777, remote: 7777 }], link: { path: 'relay', rtt: 70, checkedAgo: 5 }, log: [] },
+      { key: 4, st: 'live', error: '', lan: false, hostName: 'Sam', maps: [{ local: 7777, remote: 7777 }], link: { path: 'relay', rtt: 91, checkedAgo: 40 }, log: [] },
     ],
   });
   voipLive({ speaking: [2], me: 1, level: -24, talking: true });

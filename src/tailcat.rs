@@ -249,6 +249,9 @@ pub struct Link {
     pub fails: u8,
     pub pinging: bool,
     pub next_ping: Option<std::time::Instant>,
+    /// The path we last told the far end about (see [`crate::peers`]); when
+    /// it changes, the next check goes at once.
+    pub reported: &'static str,
 }
 
 pub const PING_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
@@ -280,6 +283,7 @@ impl Link {
 
     pub fn ping_started(&mut self) {
         self.pinging = true;
+        self.reported = self.path();
     }
 
     /// Records a ping result. Returns true when the far end should be treated
@@ -305,12 +309,22 @@ impl Link {
         }
     }
 
-    pub fn json(&self) -> serde_json::Value {
-        let kind = match (&self.direct, self.peer_seen) {
+    /// "direct", "relay", or "unknown" until the far end has been seen.
+    pub fn path(&self) -> &'static str {
+        match (&self.direct, self.peer_seen) {
             (Some(_), _) => "direct",
             (None, true) => "relay",
             (None, false) => "unknown",
-        };
+        }
+    }
+
+    /// The far end should hear about a change of path now, not in 30 seconds.
+    pub fn report_due(&self) -> bool {
+        self.ok_once && self.path() != self.reported
+    }
+
+    pub fn json(&self) -> serde_json::Value {
+        let kind = self.path();
         serde_json::json!({
             "path": kind,
             "endpoint": self.direct,
@@ -320,22 +334,46 @@ impl Link {
     }
 }
 
-/// One request/reply ping through a forwarded port: `{"op":"ping"}` →
-/// a line containing `"pong"`. Answered by the file server and the port
-/// beacon on the far side, so a reply means the whole tunnel is up.
-pub fn ping_port(port: u16, timeout: std::time::Duration) -> Result<std::time::Duration, String> {
+/// What came back from a check.
+pub struct Pong {
+    pub rtt: std::time::Duration,
+    /// The host's name; older versions don't send one.
+    pub name: Option<String>,
+}
+
+/// One request/reply check through a forwarded port: `request` (a
+/// [`crate::peers::Report`] line) → a line containing `"pong"`. Answered by
+/// the file server and the port beacon on the far side, so a reply means the
+/// whole tunnel is up.
+pub fn ping_port(port: u16, request: &str, timeout: std::time::Duration) -> Result<Pong, String> {
     use std::io::Write;
     let t0 = std::time::Instant::now();
     let addr = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port));
     let mut s = std::net::TcpStream::connect_timeout(&addr, timeout).map_err(|e| e.to_string())?;
     s.set_read_timeout(Some(timeout)).ok();
-    s.write_all(b"{\"op\":\"ping\"}\n").map_err(|e| e.to_string())?;
+    s.write_all(format!("{}\n", request.trim_end()).as_bytes()).map_err(|e| e.to_string())?;
     let mut line = String::new();
     BufReader::new(s.take(4096)).read_line(&mut line).map_err(|e| e.to_string())?;
-    if line.contains("pong") {
-        Ok(t0.elapsed())
-    } else {
-        Err("no answer".into())
+    if !line.contains("pong") {
+        return Err("no answer".into());
+    }
+    let name = serde_json::from_str::<serde_json::Value>(line.trim())
+        .ok()
+        .and_then(|v| v["name"].as_str().map(crate::peers::clean_name))
+        .filter(|n| !n.is_empty());
+    Ok(Pong { rtt: t0.elapsed(), name })
+}
+
+/// Tells the far end we're leaving, so we drop off its list at once. Best
+/// effort: a short timeout, and no answer is expected.
+pub fn say_bye(port: u16, request: &str) {
+    use std::io::Write;
+    let addr = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port));
+    if let Ok(mut s) = std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(800)) {
+        let _ = s.write_all(format!("{}\n", request.trim_end()).as_bytes());
+        let _ = s.flush();
+        s.set_read_timeout(Some(std::time::Duration::from_millis(800))).ok();
+        let _ = s.read(&mut [0u8; 64]);
     }
 }
 
@@ -427,6 +465,10 @@ mod tests {
         assert!(!l.ping_result(Err("x".into())));
         assert!(!l.ping_result(Ok(std::time::Duration::from_millis(20))));
         assert_eq!(l.json()["path"], "relay");
+        // Told the far end "unknown" when the check went out: tell it "relay" now.
+        assert!(l.report_due());
+        l.ping_started();
+        assert!(!l.report_due());
         assert!(!l.ping_result(Err("x".into())));
         assert!(l.ping_result(Err("x".into())));
     }
