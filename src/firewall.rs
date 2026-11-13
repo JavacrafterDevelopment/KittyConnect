@@ -89,11 +89,6 @@ pub fn command(programs: &[PathBuf]) -> String {
 /// UI thread. Err if the UAC prompt was declined or it couldn't run.
 #[cfg(windows)]
 pub fn reset() -> Result<usize, String> {
-    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError};
-    use windows_sys::Win32::System::Threading::{WaitForSingleObject, INFINITE};
-    use windows_sys::Win32::UI::Shell::{ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW};
-    use windows_sys::Win32::UI::WindowsAndMessaging::SW_HIDE;
-
     // Both TailCat programs unpacked, even if this is pressed the moment the app opens.
     let _ = crate::tailcat::prepare();
     let programs = programs();
@@ -103,9 +98,23 @@ pub fn reset() -> Result<usize, String> {
     }
     // /d: skip any AutoRun command; /v:off: no !var! expansion; /s: strip only
     // the outer quotes, keeping the quoted paths inside.
-    let params = format!("/d /v:off /s /c \"{command}\"");
+    run_elevated("cmd.exe", &format!("/d /v:off /s /c \"{command}\""), "change firewall rules")?;
+    Ok(programs.len())
+}
+
+/// Runs `file` with `params` as administrator (the UAC prompt), hidden, and
+/// waits for it to finish. Returns its exit code. Blocks: call it off the UI
+/// thread. `what` finishes "Windows needs an administrator's OK to …".
+#[cfg(windows)]
+pub fn run_elevated(file: &str, params: &str, what: &str) -> Result<u32, String> {
+    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError};
+    use windows_sys::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject, INFINITE};
+    use windows_sys::Win32::UI::Shell::{ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW};
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_HIDE;
+
     let wide = |s: &str| s.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
-    let (verb, file, params) = (wide("runas"), wide("cmd.exe"), wide(&params));
+    let (verb, file, params) = (wide("runas"), wide(file), wide(params));
+    let mut code = 0u32;
     unsafe {
         let mut info: SHELLEXECUTEINFOW = std::mem::zeroed();
         info.cbSize = std::mem::size_of::<SHELLEXECUTEINFOW>() as u32;
@@ -117,17 +126,18 @@ pub fn reset() -> Result<usize, String> {
         if ShellExecuteExW(&mut info) == 0 {
             const ERROR_CANCELLED: u32 = 1223;
             return Err(if GetLastError() == ERROR_CANCELLED {
-                "Cancelled. Windows needs an administrator's OK to change firewall rules.".into()
+                format!("Cancelled. Windows needs an administrator's OK to {what}.")
             } else {
                 format!("Couldn't run it: {}", std::io::Error::last_os_error())
             });
         }
         if !info.hProcess.is_null() {
             WaitForSingleObject(info.hProcess, INFINITE);
+            GetExitCodeProcess(info.hProcess, &mut code);
             CloseHandle(info.hProcess);
         }
     }
-    Ok(programs.len())
+    Ok(code)
 }
 
 #[cfg(not(windows))]

@@ -917,6 +917,7 @@ impl Thinning {
     }
 
     /// How many of the share's layers this watcher gets (0: key frames only).
+    #[cfg(test)]
     pub fn layers(&self) -> u8 {
         self.level.min(self.top)
     }

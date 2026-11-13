@@ -2,6 +2,7 @@
 //!
 //!   kitty:file:<port>:<tailcat address>   file sharing
 //!   kitty:game.<id>:<port>:<address>      a one-click game server (Port Forward)
+//!   kitty:mount:<port>:<address>          a shared folder (Mounts)
 //!   <tailcat address>                     ports (the port numbers are told separately)
 //!
 //! Older `kitty:port:<ports>:<address>` codes are still accepted.
@@ -19,6 +20,8 @@ pub enum Kind {
     Voip,
     /// A one-click game server: a port with a known game behind it.
     Game,
+    /// A shared folder, opened as a drive.
+    Mount,
     /// A bare `tc…` address with no KittyConnect wrapper.
     Bare,
 }
@@ -38,6 +41,10 @@ pub fn file(port: u16, addr: &str) -> String {
 
 pub fn voip(port: u16, addr: &str) -> String {
     format!("kitty:voip:{port}:{addr}")
+}
+
+pub fn mount(port: u16, addr: &str) -> String {
+    format!("kitty:mount:{port}:{addr}")
 }
 
 pub fn game(id: &str, port: u16, addr: &str) -> String {
@@ -72,6 +79,7 @@ pub fn parse(input: &str) -> Result<Code, String> {
         Some("file") => Kind::File,
         Some("port") => Kind::Port,
         Some("voip") => Kind::Voip,
+        Some("mount") => Kind::Mount,
         Some(g) if g.strip_prefix("game.").is_some_and(is_game_id) => {
             game = g.strip_prefix("game.").map(str::to_string);
             Kind::Game
@@ -133,6 +141,8 @@ mod tests {
         let c = parse(&game("minecraft", 25565, A)).unwrap();
         assert_eq!(c, Code { kind: Kind::Game, ports: vec![25565], addr: A.into(), game: Some("minecraft".into()) });
         assert!(parse(&format!("kitty:game.Mine Craft:25565:{A}")).is_err());
+        let c = parse(&format!("`{}`", mount(50123, A))).unwrap();
+        assert_eq!(c, Code { kind: Kind::Mount, ports: vec![50123], addr: A.into(), game: None });
         // kitty:port codes (Copy code with "Include port numbers") carry the
         // ports, backticks and all.
         let c = parse(&format!("kitty:port:25565,8080:{A}")).unwrap();

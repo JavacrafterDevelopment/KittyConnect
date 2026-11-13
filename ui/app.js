@@ -126,6 +126,7 @@ const PILL = {
   recv:  { off: ['', 'Off'], starting: ['busy', 'Connecting'], live: ['ok', 'Connected'], error: ['bad', 'Failed'] },
   host:  { off: ['', 'Closed'], starting: ['busy', 'Opening'], live: ['ok', 'Open'], error: ['bad', 'Stopped'] },
   join:  { off: ['', 'Off'], starting: ['busy', 'Reaching'], live: ['ok', 'Connected'], unreachable: ['bad', 'Not reached'], error: ['bad', 'Failed'] },
+  mount: { off: ['', 'Stopped'], starting: ['busy', 'Starting'], live: ['ok', 'Sharing'], error: ['bad', 'Stopped'] },
 };
 
 function pill(id, kind, st) {
@@ -378,7 +379,7 @@ function sessLog(id, lines) {
 
 function sessHead(title, kind, st, stopAttr, link = '') {
   const [cls, text] = PILL[kind][st] || PILL[kind].off;
-  const stop = st === 'error' ? 'Remove' : (kind === 'host' ? 'Stop' : 'Disconnect');
+  const stop = st === 'error' ? 'Remove' : (kind === 'host' || kind === 'mount' ? 'Stop' : 'Disconnect');
   return `
     <div class="sess-head">
       <span class="sess-title">${title}</span>
@@ -437,7 +438,7 @@ let shownHosts = [], shownHostError = '';
 function renderHosts(hosts, error) {
   shownHosts = hosts;
   shownHostError = error;
-  const manual = hosts.filter((h) => !h.game);
+  const manual = hosts.filter((h) => !h.game && !h.mount);
   const games = hosts.filter((h) => h.game);
   $('host-error').textContent = pfFrom === 'manual' ? error : '';
   show($('host-error'), pfFrom === 'manual' && error);
@@ -559,7 +560,7 @@ function joinCard(j) {
 }
 
 function renderJoins(joins, error) {
-  const manual = joins.filter((j) => !j.game);
+  const manual = joins.filter((j) => !j.game && !j.mount);
   const games = joins.filter((j) => j.game);
   $('join-error').textContent = pfFrom === 'manual' ? error : '';
   show($('join-error'), pfFrom === 'manual' && error);
@@ -645,7 +646,7 @@ $('pf-back').addEventListener('click', () => pfView('home'));
 function renderPfCounts(hosts, joins) {
   const sum = (h, j) => [h.length && `${h.length} hosting`, j.length && `${j.length} joined`].filter(Boolean).join(' · ');
   $('pf-games-count').textContent = sum(hosts.filter((h) => h.game), joins.filter((j) => j.game));
-  $('pf-manual-count').textContent = sum(hosts.filter((h) => !h.game), joins.filter((j) => !j.game));
+  $('pf-manual-count').textContent = sum(hosts.filter((h) => !h.game && !h.mount), joins.filter((j) => !j.game && !j.mount));
 }
 
 /* ------------------------------------------------------------------- voip */
@@ -1364,6 +1365,193 @@ $('fw-go').addEventListener('click', () => {
   post({ cmd: 'firewall.reset' });
 });
 
+/* ----------------------------------------------------------------- mounts */
+
+/* Sharing a folder: choose it, choose read only or read and write (the
+   checkbox), start. Opening one: paste the code, then map it as a drive
+   (Windows) or mount it (Mac), or browse it here. */
+const ICON_DIR = '<svg width="15" height="15" viewBox="0 0 16 16" fill="none"><path d="M1.8 4.2c0-.7.5-1.2 1.2-1.2h3l1.5 1.6H13c.7 0 1.2.5 1.2 1.2v6.4c0 .7-.5 1.2-1.2 1.2H3c-.7 0-1.2-.5-1.2-1.2z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg>';
+const ICON_UP = '<svg width="13" height="13" viewBox="0 0 16 16" fill="none"><path d="M8 13.5v-8M4.6 8.7 8 5.3l3.4 3.4M3 2.5h10" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+let lastMountJoins = 0, mountState = { os: BOOT.os, limit: null };
+
+$('mount-pick').addEventListener('click', () => post({ cmd: 'mount.pick' }));
+$('mount-write').addEventListener('change', () => {
+  $('mount-write-desc').textContent = $('mount-write').checked
+    ? 'On: read and write. They can also add, rename, change and delete files and folders in it.'
+    : 'Off: read only. They can open and copy files, nothing else.';
+});
+$('mount-start').addEventListener('click', () => post({ cmd: 'mount.host', write: $('mount-write').checked }));
+$('mount-join').addEventListener('click', () => post({ cmd: 'mount.join', code: $('mount-code').value }));
+$('mount-code').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('mount-join').click(); });
+if (MAC) $('mount-tip').textContent = 'Then mount it (it shows in Finder\'s sidebar), or browse it here.';
+
+function mountHostCard(h) {
+  const m = h.mount;
+  const tag = m.write ? '<span class="tag-sm rw">Read &amp; write</span>' : '<span class="tag-sm">Read only</span>';
+  return `
+    <div class="sess${h.st === 'live' ? ' live' : ''}">
+      ${sessHead(`<span class="mount-title">${ICON_DIR}<b>${esc(m.name)}</b></span> ${tag}`, 'mount', h.st, `data-stop-host="${h.key}"`)}
+      <p class="meta mount-path" title="${esc(m.folder)}">${esc(m.folder)}</p>
+      ${h.st === 'starting' ? '<p class="meta">Getting a code from TailCat…</p>' : ''}
+      ${h.st === 'live' && h.code ? `
+        <div class="sess-code">
+          <code class="code">${esc(h.code)}</code>
+          <div class="row">
+            <button class="btn small primary" data-copytext="${esc(h.code)}" data-code="1">Copy code</button>
+            <span class="meta">Send this code to your friends. They paste it in Mounts → Open a shared folder.</span>
+          </div>
+        </div>` : ''}
+      ${h.st === 'live' ? peersHtml(h.peers, 'Nobody has it open yet. Everyone who does shows up here.') : ''}
+      ${h.st === 'error' && h.error ? `<p class="err on">${esc(h.error)}</p>` : ''}
+      ${sessLog(`h${h.key}`, h.log)}
+    </div>`;
+}
+
+/* The path parts of the browser's place, as a clickable trail. */
+function crumbs(key, path) {
+  const parts = path.split('/').filter(Boolean);
+  let at = '';
+  const links = [`<a class="crumb" data-mount-cd="${key}" data-path="">Top</a>`];
+  for (const p of parts) {
+    at = at ? `${at}/${p}` : p;
+    links.push(`<a class="crumb" data-mount-cd="${key}" data-path="${esc(at)}">${esc(p)}</a>`);
+  }
+  return links.join('<span class="crumb-sep">/</span>');
+}
+
+function browserHtml(j, m) {
+  const b = m.browse;
+  const key = j.key;
+  const join = (name) => (b.path ? `${b.path}/${name}` : name);
+  let rows = '';
+  if (b.loading && !b.entries.length) rows = '<div class="empty small">Loading…</div>';
+  else if (b.error) rows = `<p class="err on">${esc(b.error)}</p>`;
+  else if (!b.entries.length) rows = '<div class="empty small">This folder is empty.</div>';
+  else {
+    rows = b.entries.map((e) => `
+      <div class="file">
+        <span class="file-ico ${e.dir ? 'dir' : ''}">${e.dir ? ICON_DIR : esc(ext(e.name).slice(0, 4))}</span>
+        <div class="file-main">
+          ${e.dir
+            ? `<a class="file-name link" data-mount-cd="${key}" data-path="${esc(join(e.name))}">${esc(e.name)}</a>`
+            : `<span class="file-name">${esc(e.name)}</span>`}
+          <span class="file-meta">${e.dir ? 'Folder' : size(e.size)}</span>
+        </div>
+        <button class="iconbtn" data-mount-get="${key}" data-path="${esc(join(e.name))}" data-dir="${e.dir ? 1 : 0}"
+          title="${e.dir ? 'Download this folder and everything in it' : 'Download'}">${ICON_DL}</button>
+      </div>`).join('');
+  }
+  return `
+    <div class="browser">
+      <div class="browser-head">
+        <span class="crumbs">${crumbs(key, b.path)}</span>
+        <span class="grow"></span>
+        ${m.write ? `<button class="btn small" data-mount-put="${key}" data-path="${esc(b.path)}">${ICON_UP} Upload here</button>` : ''}
+        <button class="btn small ghost" data-mount-close="${key}">Close</button>
+      </div>
+      <div class="filelist remote on">${rows}</div>
+    </div>`;
+}
+
+function transfersHtml(j, m) {
+  if (!m.transfers.length) return '';
+  return `<div class="activity">${m.transfers.map((t) => {
+    const what = `${t.up ? 'Uploading' : 'Downloading'} <b>${esc(t.name)}</b>`;
+    let meta = t.total ? `${size(t.done)} of ${size(t.total)}${t.speed ? ` · ${speed(t.speed)}` : ''}` : (t.done ? size(t.done) : '');
+    let btn = `<button class="btn small ghost" data-mount-cancel="${j.key}" data-id="${t.id}">Cancel</button>`;
+    if (t.st === 'done') { meta = t.up ? 'Uploaded' : 'Saved'; btn = t.saved ? `<button class="iconbtn" data-mount-reveal="${j.key}" data-id="${t.id}" title="Show in folder">${ICON_FOLDER}</button>` : ''; }
+    if (t.st === 'error') { meta = t.error; btn = ''; }
+    return `
+      <div class="act">
+        <div class="act-row"><span>${t.st === 'done' ? (t.up ? 'Uploaded' : 'Downloaded') + ` <b>${esc(t.name)}</b>` : what}</span>
+          <span class="meta ${t.st === 'error' ? 'bad' : ''}">${esc(meta)}</span>${btn}</div>
+        ${t.st === 'going' ? `<div class="bar-wrap"><div class="bar" style="width:${pct(t.done, t.total)}%"></div></div>` : ''}
+      </div>`;
+  }).join('')}</div>`;
+}
+
+function mountJoinCard(j) {
+  const m = j.mount;
+  const name = m.name || 'Shared folder';
+  const tag = m.name ? (m.write ? '<span class="tag-sm rw">Read &amp; write</span>' : '<span class="tag-sm">Read only</span>') : '';
+  let body = '';
+  if (j.st === 'live') {
+    if (!m.name) {
+      body = `<p class="meta">Getting the folder's details…</p>${m.error ? `<p class="warn on">${esc(m.error)}</p>` : ''}`;
+    } else {
+      const mapLabel = MAC ? 'Mount' : 'Map as drive';
+      const actions = m.mounted
+        ? `<span class="okline">Open as <b>${esc(m.mounted)}</b></span>
+           <button class="btn small primary" data-mount-open="${j.key}">${MAC ? 'Show in Finder' : 'Open in Explorer'}</button>
+           <button class="btn small" data-mount-unmap="${j.key}" ${m.busy ? 'disabled' : ''}>${m.busy === 'unmounting' ? 'Unmounting…' : 'Unmount'}</button>`
+        : `<button class="btn small primary" data-mount-map="${j.key}" ${m.busy ? 'disabled' : ''}>${m.busy === 'mounting' ? (MAC ? 'Mounting…' : 'Mapping…') : mapLabel}</button>`;
+      // Windows' WebDAV only opens files up to 50 MB unless that's raised.
+      const lim = mountState.limit;
+      const limitNote = mountState.os === 'windows' && lim != null && lim < 1e9
+        ? `<p class="meta limit">Windows opens files up to ${Math.round(lim / 1e6)} MB from a drive like this.
+             <a class="link" data-big-files="1">Allow big files (up to 4 GB)</a>, or download bigger ones below.</p>`
+        : '';
+      body = `
+        <div class="mount-actions">
+          ${actions}
+          <button class="btn small" data-mount-browse="${j.key}">${m.browse ? 'Refresh' : 'Browse here'}</button>
+        </div>
+        ${m.error ? `<p class="warn on">${esc(m.error)}</p>` : ''}
+        ${limitNote}
+        ${m.browse ? browserHtml(j, m) : ''}
+        ${transfersHtml(j, m)}`;
+    }
+  }
+  return `
+    <div class="sess${j.st === 'live' ? ' live' : ''}">
+      ${sessHead(`<span class="mount-title">${ICON_DIR}<b>${esc(name)}</b></span> ${tag}`, 'join', j.st, `data-stop-join="${j.key}"`, hostHtml(j.hostName, j.link, { label: 'From', who: 'your friend' }, `data-join-retry="${j.key}"`))}
+      ${j.st === 'starting' ? '<p class="meta">Reaching your friend through TailCat…</p>' : ''}
+      ${j.st === 'unreachable' ? '<p class="warn on">Can\'t reach your friend. Check the code, and that they\'re still sharing the folder. KittyConnect keeps trying.</p>' : ''}
+      ${body}
+      ${j.st === 'error' && j.error ? `<p class="err on">${esc(j.error)}</p>` : ''}
+      ${sessLog(`j${j.key}`, j.log)}
+    </div>`;
+}
+
+function renderMounts(state, hosts, joins) {
+  mountState = state || mountState;
+  $('mount-picked').textContent = state.pick || 'No folder chosen';
+  $('mount-picked').title = state.pick || '';
+  $('mount-picked').classList.toggle('chosen', !!state.pick);
+  $('mount-start').disabled = !state.pick;
+  $('mount-host-error').textContent = state.hostError;
+  show($('mount-host-error'), state.hostError);
+  $('mount-join-error').textContent = state.joinError;
+  show($('mount-join-error'), state.joinError);
+  if (joins.length > lastMountJoins) $('mount-code').value = '';
+  lastMountJoins = joins.length;
+  const count = (list, word) => (list.length ? `${list.filter((x) => x.st === 'live').length} ${word}` : '');
+  $('mount-host-count').textContent = count(hosts, 'sharing');
+  $('mount-join-count').textContent = count(joins, 'connected');
+  setHtml($('mount-host-list'), hosts.length ? hosts.map(mountHostCard).join('')
+    : '<div class="empty">Not sharing a folder. Choose one above and it shows up here with its code.</div>');
+  setHtml($('mount-join-list'), joins.length ? joins.map(mountJoinCard).join('')
+    : '<div class="empty">No shared folders open. Paste a mount code above to open one.</div>');
+}
+
+['mount-host-list', 'mount-join-list'].forEach((id) => $(id).addEventListener('click', (e) => {
+  const t = e.target;
+  const on = (attr) => t.closest(`[${attr}]`);
+  let el;
+  if ((el = on('data-mount-map'))) return post({ cmd: 'mount.map', key: Number(el.dataset.mountMap) });
+  if ((el = on('data-mount-unmap'))) return post({ cmd: 'mount.unmap', key: Number(el.dataset.mountUnmap) });
+  if ((el = on('data-mount-open'))) return post({ cmd: 'mount.open', key: Number(el.dataset.mountOpen) });
+  if ((el = on('data-mount-browse'))) return post({ cmd: 'mount.browse', key: Number(el.dataset.mountBrowse), path: null });
+  if ((el = on('data-mount-close'))) return post({ cmd: 'mount.browseClose', key: Number(el.dataset.mountClose) });
+  if ((el = on('data-mount-cd'))) return post({ cmd: 'mount.browse', key: Number(el.dataset.mountCd), path: el.dataset.path });
+  if ((el = on('data-mount-get'))) return post({ cmd: 'mount.get', key: Number(el.dataset.mountGet), path: el.dataset.path, dir: el.dataset.dir === '1' });
+  if ((el = on('data-mount-put'))) return post({ cmd: 'mount.put', key: Number(el.dataset.mountPut), path: el.dataset.path });
+  if ((el = on('data-mount-cancel'))) return post({ cmd: 'mount.cancel', key: Number(el.dataset.mountCancel), id: Number(el.dataset.id) });
+  if ((el = on('data-mount-reveal'))) return post({ cmd: 'mount.reveal', key: Number(el.dataset.mountReveal), id: Number(el.dataset.id) });
+  if (on('data-big-files')) return post({ cmd: 'mount.bigFiles' });
+  return sessClick(e);
+}));
+
 /* ------------------------------------------------------------------- name */
 
 /* Asked every time the app opens. The input starts empty with a random name
@@ -1433,17 +1621,21 @@ window.onHost = (msg) => {
       renderHosts(msg.hosts, msg.hostError);
       renderJoins(msg.joins, msg.joinError);
       renderPfCounts(msg.hosts, msg.joins);
+      renderMounts(msg.mounts, msg.hosts.filter((h) => h.mount), msg.joins.filter((j) => j.mount));
       renderVoip(msg.voip);
       if (msg.name && msg.name !== myName) setMe(msg.name);
       $('statusText').textContent = msg.status.text;
       $('lamp').className = msg.status.kind;
       const filesLive = msg.share.st === 'live' || msg.recv.st === 'live';
-      const portsLive = msg.hosts.some((h) => h.st === 'live') || msg.joins.some((j) => j.st === 'live');
+      const live = (x) => x.st === 'live';
+      const portsLive = msg.hosts.some((h) => !h.mount && live(h)) || msg.joins.some((j) => !j.mount && live(j));
+      const mountsLive = msg.hosts.some((h) => h.mount && live(h)) || msg.joins.some((j) => j.mount && live(j));
       const voipLiveNow = msg.voip.st === 'live';
       show($('files-badge'), filesLive);
       show($('ports-badge'), portsLive);
       show($('voip-badge'), voipLiveNow);
-      document.documentElement.classList.toggle('live', filesLive || portsLive || voipLiveNow);
+      show($('mounts-badge'), mountsLive);
+      document.documentElement.classList.toggle('live', filesLive || portsLive || voipLiveNow || mountsLive);
       break;
     }
     case 'voipLive':
@@ -1555,7 +1747,11 @@ if (window.ipc) {
       log: [],
     },
     hostError: '', joinError: '',
+    mounts: { pick: 'C:\\Users\\you\\Documents\\Minecraft Worlds', hostError: '', joinError: '', limit: 50000000, os: 'windows' },
     hosts: [
+      { key: 11, st: 'live', error: '', warn: '', ports: [50123], game: null, code: `kitty:mount:50123:${addr.slice(0, 60)}`, lanNote: '', log: [],
+        mount: { folder: 'C:\\Users\\you\\Pictures\\Trip 2026', name: 'Trip 2026', write: false },
+        peers: [{ id: '9', name: 'Alex Rivera', path: 'direct', rtt: 21, checkedAgo: 4 }] },
       { key: 9, st: 'live', error: '', warn: '', ports: [25565], game: 'minecraft', code: `kitty:game.minecraft:25565:${addr.slice(0, 60)}`,
         lanNote: 'Friends who join see \u201cSam - Survival Island\u201d under LAN in Multiplayer.', log: [],
         peers: [{ id: '7', name: 'Alex Rivera', path: 'direct', rtt: 22, checkedAgo: 3 }, { id: '8', name: 'Jo', path: 'relay', rtt: 95, checkedAgo: 9 }] },
@@ -1570,6 +1766,22 @@ if (window.ipc) {
         ] },
     ],
     joins: [
+      { key: 12, st: 'live', error: '', lan: false, hostName: 'Priya', game: null, worlds: [], maps: [{ local: 51999, remote: 50200 }],
+        link: { path: 'direct', rtt: 19, checkedAgo: 6 }, log: [],
+        mount: { name: 'Shared Projects', write: true, mounted: 'Z:', busy: '', error: '',
+          browse: { path: 'Designs/2026', loading: false, error: '', entries: [
+            { name: 'Drafts', dir: true, size: 0, modified: 0 },
+            { name: 'logo-final.png', dir: false, size: 482133, modified: 0 },
+            { name: 'brief.docx', dir: false, size: 38912, modified: 0 },
+            { name: 'promo.mp4', dir: false, size: 214748364, modified: 0 },
+          ] },
+          transfers: [
+            { id: 2, name: 'promo.mp4', up: false, done: 90000000, total: 214748364, st: 'going', error: '', speed: 6815744, saved: false },
+            { id: 1, name: 'notes.txt', up: true, done: 2048, total: 2048, st: 'done', error: '', speed: 0, saved: false },
+          ] } },
+      { key: 13, st: 'live', error: '', lan: false, hostName: 'Sam', game: null, worlds: [], maps: [{ local: 52000, remote: 50300 }],
+        link: { path: 'relay', rtt: 80, checkedAgo: 6 }, log: [],
+        mount: { name: 'Trip Photos', write: false, mounted: null, busy: '', error: '', browse: null, transfers: [] } },
       { key: 6, st: 'live', error: '', lan: false, hostName: 'Priya', game: 'minecraft', worlds: [{ port: 25565, motd: 'Priya - Skyblock' }],
         maps: [{ local: 25565, remote: 25565 }], link: { path: 'direct', rtt: 18, checkedAgo: 5 }, log: [] },
       { key: 5, st: 'live', error: '', lan: false, hostName: 'Kit', game: 'terraria', worlds: [],
