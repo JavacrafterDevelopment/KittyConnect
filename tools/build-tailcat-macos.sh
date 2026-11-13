@@ -68,6 +68,12 @@ both() { # <dir> <package> <name> <ldflags>
     build "$1" "$2" "$OUT/$3" "$4" "$ARCH"
   fi
   chmod 755 "$OUT/$3"
+  # Apple Silicon only runs signed code. Go signs only its arm64 builds, so
+  # sign the whole (universal) program ad hoc, as Go does. Off a Mac there's
+  # no codesign; the arm64 build is still signed by Go.
+  if command -v codesign >/dev/null 2>&1; then
+    codesign --force --sign - "$OUT/$3"
+  fi
 }
 
 both "$work/tailcat" ./cmd/tailcat tailcat "-s -w -X main.version=v$VERSION"

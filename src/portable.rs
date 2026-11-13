@@ -131,9 +131,13 @@ fn writable(dir: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use super::mac_data_candidates;
+    #[cfg(unix)]
     use std::path::{Path, PathBuf};
 
+    // Mac paths, which Windows reads differently; the rule is the Mac's own.
+    #[cfg(unix)]
     #[test]
     fn mac_data_goes_beside_the_app() {
         let home = Some(PathBuf::from("/Users/sam"));
