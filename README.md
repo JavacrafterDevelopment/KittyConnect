@@ -1,6 +1,7 @@
 # KittyConnect
 
-Portable peer-to-peer file sharing, port opening and voice/text rooms for Windows and macOS, built in Rust on
+Portable peer-to-peer file sharing, port opening, shared folders and voice/text rooms, with a Hub that ties
+them together for a group of friends, for Windows and macOS, built in Rust on
 top of [TailCat](https://github.com/tailscale/tailcat), Tailscale's open-source
 "netcat over WireGuard". It needs no account, no install, and no router setup.
 
@@ -37,6 +38,26 @@ in the app (shown top right; click it to change it). It's what people see in
 rooms, and the host of a port or file share you join sees it next to how
 you're connected. It only travels inside the encrypted TailCat tunnel.
 
+**Hub** (the first tab): one code for your group, so nobody copies a code for
+each thing.
+- *Start a hub* and send its code (`kitty:hub:…`) to your friends once, or
+  paste a friend's hub code and *Join hub*. Everyone in it is listed by name,
+  each with **Direct** or **Relay**.
+- *Invite*: whatever you have open (a voice room, a file share, ports, a game
+  server, a shared folder) is listed with **Invite everyone**; tick people to
+  invite only them. In a voice room, **Invite hub** next to its code does the
+  same. Port invites carry the port numbers, so friends join with one press.
+- *Invites* you get show up in the Hub tab, and pop up on whatever tab you're
+  on. Nothing is joined until you press **Join**; it then connects in that
+  thing's own tab, the same as pasting its code there.
+- The host can **Remove** someone (they could join again with the code; to
+  keep someone out, close the hub and send a new code to the rest).
+  **Close hub** disconnects everyone.
+- **Connections** lists everything connected anywhere in the app: each share,
+  port, game server, folder, room and the hub, who's on it and how each is
+  connected, with a button to drop it (the same as that tab's own Stop or
+  Leave; in your own room or hub, also one person).
+
 **File Share**
 - *Send files*: drop files or folders in, press **Start sharing**, then **Copy code**.
   Everyone who connects is listed by name, each with **Direct** or **Relay**.
@@ -69,10 +90,19 @@ you're connected. It only travels inside the encrypted TailCat tunnel.
   **Relay**.
 - *Join a port*: paste the TailCat code, type the port number, and press **Connect**. Then connect your game or
   app to `127.0.0.1:<port>`. It says **Connected** once your friend's
-  KittyConnect has answered through the tunnel; until then **Reaching**, and if
-  nothing answers within 30 seconds, **Not reached** (check the code, and that
-  they still have the port open; it keeps trying). Turn on *Share with my network* to let a console
-  or another device on your Wi-Fi use it too.
+  KittyConnect has answered through the tunnel **and said that port is one it
+  opened**; until then **Reaching**, and if nothing answers within 30 seconds,
+  **Not reached** (check the code, and that they still have the port open; it
+  keeps trying). A port number your friend didn't open stops with an error
+  ("Port 25566 isn't open on this code") instead of connecting, and nothing
+  is left listening for it on your PC. Turn on *Share with my network* to let
+  a console or another device on your Wi-Fi use it too (only the ports you
+  joined; nothing else).
+- **Only the ports you open can be reached.** TailCat is given exactly those
+  ports (and KittyConnect's own check port, 47474, which answers only its
+  check), and it silently drops a connection to any other port. Joining your
+  own code on the same PC picks another local port by itself, so the tunnel
+  never feeds back into itself.
 
 TailCat forwards **TCP** ports. Games that only use UDP won't work this way.
 
@@ -162,15 +192,17 @@ and when the other side stops sharing, closes the port or ends the room, your
 side disconnects by itself and says so. Downloads show their speed.
 
 File codes look like `kitty:file:51234:tc…`, room codes `kitty:voip:50211:tc…`,
-and port codes are a plain TailCat address (`tc…`). A code is a
-secret: anyone who has it can connect while that share is on. Stopping a
+hub codes `kitty:hub:50400:tc…`, and port codes are a plain TailCat address
+(`tc…`). A code is a secret: anyone who has it can connect while that share is
+on (invites through a hub travel inside its encrypted tunnel, not through
+Discord). Stopping a
 share kills its code for good, and the next start gets a new one.
 
 ## Portable
 
 - Two TailCat programs are embedded in the exe and unpacked to `data\bin\` on
   first use:
-  - **TailCat 0.7.0** itself, for File Share and Port Forward, so those get
+  - **TailCat 0.7.0** itself, for the Hub, File Share, Port Forward and Mounts, so those get
     TailCat's security updates by bumping one version. On Windows it's **the
     official build** (hash-pinned). TailCat publishes no macOS build, so on a
     Mac it's built from TailCat's source at the same version, with the official
@@ -207,8 +239,27 @@ runtime into a `WebView2\` folder beside the exe.
 
 ## How it works
 
-- **Port Forward**: the host runs `tailcat serve <ports>`, and the joiner runs
-  `tailcat forward <addr> <local>:<remote>`.
+- **Port Forward**: the host runs `tailcat serve <ports>,47474` (the beacon,
+  below), and the joiner runs `tailcat forward <addr> <local>:<remote>…`.
+  TailCat admits only the listed ports (its packet filter drops anything
+  else, with no reply) and hands each to `localhost:<port>`. Until it has
+  passed, the joiner's check carries the port numbers it typed, and the host
+  answers `open` only if that code opened every one of them, else `wrong`,
+  and the joiner stops. The host answers for the ports asked and nothing
+  else, at most 10 times in 20 seconds per code, so the code itself never says
+  which ports it opened, and they can't be guessed through it.
+- **Hub**: the host runs a small server on `127.0.0.1` and `::1`, served with
+  the official `tailcat serve --key=new <port>` (one port, nothing else);
+  members join with the official `tailcat forward`, and the host connects
+  directly with a secret only its KittyConnect has (32 bytes from the OS's
+  secure random source), which is what makes it the host. One JSON line per
+  message: hello and welcome, the member list (name, host, direct or relay),
+  path updates, invites, remove, and a ping every 15 seconds. An invite
+  carries a code, which the hub checks is one it can invite to (a room, file
+  share, ports with their numbers, game server or folder) and writes out clean
+  before passing it on only to the people it's for, at most 12 a minute from
+  each person. The person invited checks it again, and nothing is joined
+  until they press Join. A hub holds 32 people.
 - **Files**: the sharer runs a small file server on `127.0.0.1` and exposes
   only that port with `tailcat serve`. The receiver forwards a local port to it
   and requests files by id. Only files you added can be fetched. Received names
@@ -276,9 +327,15 @@ runtime into a `WebView2\` folder beside the exe.
   need). Nothing is fetched from the network; the page and image previews come
   from inside the app.
 - **Every byte between peers goes through the WireGuard-encrypted TailCat
-  tunnel.** KittyConnect's own servers and clients only ever use `127.0.0.1`.
-  The one exception is *Share with my network* on a joined port, which lets
-  devices on your own LAN reach that port on your PC.
+  tunnel** (Noise IK, ChaCha20-Poly1305), with a new key and a WireGuard
+  pre-shared key for every share, port, room and hub. TailCat relays only
+  ever see ciphertext. KittyConnect's own servers listen only on `127.0.0.1`
+  (and `::1`, at the same port, since TailCat tries that first: no other
+  program can sit there and get your friends' connections). The exceptions
+  are *Share with my network* on a joined port, which lets devices on your
+  own LAN reach the ports you joined (and only those) on your PC, and
+  Minecraft's LAN announcements, which the host listens for on UDP 4445 and
+  takes only from this PC's own addresses.
 - **Direct or relay**: TailCat runs with `--verbose`, and its
   `magicsock … now using <ip:port>` line marks the switch to a direct path. The
   30-second check is a ping through the tunnel itself: to the file server, to

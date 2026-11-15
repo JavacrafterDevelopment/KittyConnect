@@ -90,6 +90,9 @@ pub enum Role {
     PortJoin,
     VoipHost,
     VoipJoin,
+    /// The Hub, hosted or joined: always the official TailCat.
+    HubHost,
+    HubJoin,
 }
 
 impl Role {
@@ -98,7 +101,9 @@ impl Role {
     pub fn binary(self) -> Binary {
         match self {
             Role::VoipHost | Role::VoipJoin => Binary::Voip,
-            Role::ShareHost | Role::RecvForward | Role::PortHost | Role::PortJoin => Binary::Official,
+            Role::ShareHost | Role::RecvForward | Role::PortHost | Role::PortJoin | Role::HubHost | Role::HubJoin => {
+                Binary::Official
+            }
         }
     }
 }
@@ -405,6 +410,8 @@ pub struct Pong {
     pub name: Option<String>,
     /// The host pressed "Retry direct" for us.
     pub retry: bool,
+    /// The port check's answer, if we asked (an older host never says).
+    pub ports: Option<crate::peers::PortCheck>,
 }
 
 /// One request/reply check through a forwarded port: `request` (a
@@ -425,7 +432,8 @@ pub fn ping_port(port: u16, request: &str, timeout: std::time::Duration) -> Resu
     }
     let v = serde_json::from_str::<serde_json::Value>(line.trim()).unwrap_or_default();
     let name = v["name"].as_str().map(crate::peers::clean_name).filter(|n| !n.is_empty());
-    Ok(Pong { rtt: t0.elapsed(), name, retry: v["retry"] == true })
+    let ports = v["ports"].as_str().and_then(crate::peers::PortCheck::parse);
+    Ok(Pong { rtt: t0.elapsed(), name, retry: v["retry"] == true, ports })
 }
 
 /// Tells the far end we're leaving, so we drop off its list at once. Best
@@ -599,7 +607,7 @@ mod tests {
         for r in [Role::VoipHost, Role::VoipJoin] {
             assert_eq!(r.binary(), Binary::Voip);
         }
-        for r in [Role::ShareHost, Role::RecvForward, Role::PortHost, Role::PortJoin] {
+        for r in [Role::ShareHost, Role::RecvForward, Role::PortHost, Role::PortJoin, Role::HubHost, Role::HubJoin] {
             assert_eq!(r.binary(), Binary::Official);
         }
         assert_ne!(Binary::Voip.file_name(), Binary::Official.file_name());

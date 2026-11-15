@@ -5,10 +5,17 @@
 //!
 //! TailCat 0.7 serves local ports under their own numbers (no remapping), so
 //! the beacon listens on a fixed port the joiner knows to ask for. It only ever
-//! answers a ping with a pong (and the host's name); it serves nothing else.
+//! answers a ping with a pong (the host's name, and whether the ports the
+//! joiner typed are open on its code: see [`crate::peers`]), and a Minecraft
+//! joiner's question about LAN worlds; it serves nothing else.
+//!
+//! TailCat reaches it as `localhost:47474`, trying `::1` before `127.0.0.1`,
+//! so it listens on both: if another program already has either one, there is
+//! no beacon (and port 47474 isn't served), rather than that program getting
+//! the checks.
 
-use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{Ipv4Addr, TcpListener};
+use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
+use std::net::{Ipv4Addr, Ipv6Addr, TcpListener, TcpStream};
 use std::sync::OnceLock;
 use std::time::Duration;
 
@@ -26,31 +33,42 @@ pub const PORT: u16 = 47474;
 pub fn ensure(proxy: &EventLoopProxy<UserEvent>) -> Option<u16> {
     static STARTED: OnceLock<Option<u16>> = OnceLock::new();
     *STARTED.get_or_init(|| {
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, PORT)).ok()?;
-        let proxy = proxy.clone();
-        std::thread::spawn(move || {
-            for stream in listener.incoming().flatten() {
-                let proxy = proxy.clone();
-                std::thread::spawn(move || {
-                    let mut stream = stream;
-                    stream.set_read_timeout(Some(Duration::from_secs(15))).ok();
-                    let mut line = String::new();
-                    let Ok(clone) = stream.try_clone() else { return };
-                    if BufReader::new(clone.take(1024)).read_line(&mut line).is_err() {
-                        return;
-                    }
-                    let (reply, heard) = answer(&line);
-                    if let Some(reply) = reply {
-                        let _ = stream.write_all(reply.as_bytes());
-                    }
-                    if let Some(heard) = heard {
-                        let _ = proxy.send_event(UserEvent::Heard { share: false, heard });
-                    }
-                });
-            }
-        });
+        let v4 = TcpListener::bind((Ipv4Addr::LOCALHOST, PORT)).ok()?;
+        // No IPv6 on this PC is fine (TailCat then only tries 127.0.0.1);
+        // someone else on [::1]:47474 isn't.
+        let v6 = match TcpListener::bind((Ipv6Addr::LOCALHOST, PORT)) {
+            Ok(l) => Some(l),
+            Err(e) if e.kind() == ErrorKind::AddrInUse => return None,
+            Err(_) => None,
+        };
+        for listener in std::iter::once(v4).chain(v6) {
+            let proxy = proxy.clone();
+            std::thread::spawn(move || {
+                for stream in listener.incoming().flatten() {
+                    let proxy = proxy.clone();
+                    std::thread::spawn(move || serve_one(stream, &proxy));
+                }
+            });
+        }
         Some(PORT)
     })
+}
+
+/// One check: a line in, at most a line out.
+fn serve_one(mut stream: TcpStream, proxy: &EventLoopProxy<UserEvent>) {
+    stream.set_read_timeout(Some(Duration::from_secs(15))).ok();
+    let mut line = String::new();
+    let Ok(clone) = stream.try_clone() else { return };
+    if BufReader::new(clone.take(1024)).read_line(&mut line).is_err() {
+        return;
+    }
+    let (reply, heard) = answer(&line);
+    if let Some(reply) = reply {
+        let _ = stream.write_all(reply.as_bytes());
+    }
+    if let Some(heard) = heard {
+        let _ = proxy.send_event(UserEvent::Heard { share: false, heard });
+    }
 }
 
 /// The reply to one line (a pong for any ping, old or new), and who it was
@@ -61,8 +79,12 @@ fn answer(line: &str) -> (Option<String>, Option<Heard>) {
     if let Some(h) = heard.as_ref().filter(|h| h.op == "lan") {
         return (Some(crate::lan::reply(&h.addr)), None);
     }
-    let reply = line.contains("\"ping\"").then(|| crate::peers::pong(heard.as_ref().map_or(0, |h| h.peer)));
-    (reply, heard.filter(Heard::is_named))
+    let check = heard.as_ref().and_then(|h| crate::peers::check_ports(&h.addr, &h.ports));
+    let reply = line.contains("\"ping\"").then(|| crate::peers::pong(heard.as_ref().map_or(0, |h| h.peer), check));
+    // Someone who typed a port this code didn't open isn't connected to it:
+    // they aren't listed (they stop on this answer).
+    let listed = heard.filter(Heard::is_named).filter(|_| check != Some(crate::peers::PortCheck::Wrong));
+    (reply, listed)
 }
 
 #[cfg(test)]
@@ -87,5 +109,18 @@ mod tests {
         let (reply, heard) = answer(r#"{"op":"lan","addr":"tcnothing"}"#);
         assert_eq!(reply.unwrap().trim(), r#"{"lan":[]}"#);
         assert!(heard.is_none());
+    }
+
+    #[test]
+    fn a_wrong_port_gets_wrong_and_is_not_listed() {
+        crate::peers::serve("tcbeacon1", &[25565, super::PORT]);
+        let ask = |ports: &str| answer(&format!(r#"{{"op":"ping","peer":9,"name":"Jo","path":"direct","addr":"tcbeacon1","ports":{ports}}}"#));
+        let (reply, heard) = ask("[25566]");
+        assert!(reply.unwrap().contains(r#""ports":"wrong""#));
+        assert!(heard.is_none());
+        let (reply, heard) = ask("[25565]");
+        assert!(reply.unwrap().contains(r#""ports":"open""#));
+        assert!(heard.is_some());
+        crate::peers::unserve("tcbeacon1");
     }
 }

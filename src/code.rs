@@ -3,6 +3,7 @@
 //!   kitty:file:<port>:<tailcat address>   file sharing
 //!   kitty:game.<id>:<port>:<address>      a one-click game server (Port Forward)
 //!   kitty:mount:<port>:<address>          a shared folder (Mounts)
+//!   kitty:hub:<port>:<address>            a hub (Hub)
 //!   <tailcat address>                     ports (the port numbers are told separately)
 //!
 //! Older `kitty:port:<ports>:<address>` codes are still accepted.
@@ -22,6 +23,8 @@ pub enum Kind {
     Game,
     /// A shared folder, opened as a drive.
     Mount,
+    /// A hub: a group of friends who can invite each other in the app.
+    Hub,
     /// A bare `tc…` address with no KittyConnect wrapper.
     Bare,
 }
@@ -47,8 +50,27 @@ pub fn mount(port: u16, addr: &str) -> String {
     format!("kitty:mount:{port}:{addr}")
 }
 
+pub fn hub(port: u16, addr: &str) -> String {
+    format!("kitty:hub:{port}:{addr}")
+}
+
 pub fn game(id: &str, port: u16, addr: &str) -> String {
     format!("kitty:game.{id}:{port}:{addr}")
+}
+
+/// The code written out again from what was parsed, with nothing around it.
+/// None for a bare address (it has no ports to write).
+pub fn canonical(c: &Code) -> Option<String> {
+    let first = *c.ports.first()?;
+    Some(match c.kind {
+        Kind::File => file(first, &c.addr),
+        Kind::Voip => voip(first, &c.addr),
+        Kind::Mount => mount(first, &c.addr),
+        Kind::Hub => hub(first, &c.addr),
+        Kind::Game => game(c.game.as_deref()?, first, &c.addr),
+        Kind::Port => format!("kitty:port:{}:{}", c.ports.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(","), c.addr),
+        Kind::Bare => return None,
+    })
 }
 
 /// A game id is short lowercase letters and digits.
@@ -80,6 +102,7 @@ pub fn parse(input: &str) -> Result<Code, String> {
         Some("port") => Kind::Port,
         Some("voip") => Kind::Voip,
         Some("mount") => Kind::Mount,
+        Some("hub") => Kind::Hub,
         Some(g) if g.strip_prefix("game.").is_some_and(is_game_id) => {
             game = g.strip_prefix("game.").map(str::to_string);
             Kind::Game
@@ -143,12 +166,23 @@ mod tests {
         assert!(parse(&format!("kitty:game.Mine Craft:25565:{A}")).is_err());
         let c = parse(&format!("`{}`", mount(50123, A))).unwrap();
         assert_eq!(c, Code { kind: Kind::Mount, ports: vec![50123], addr: A.into(), game: None });
+        let c = parse(&hub(50124, A)).unwrap();
+        assert_eq!(c, Code { kind: Kind::Hub, ports: vec![50124], addr: A.into(), game: None });
         // kitty:port codes (Copy code with "Include port numbers") carry the
         // ports, backticks and all.
         let c = parse(&format!("kitty:port:25565,8080:{A}")).unwrap();
         assert_eq!(c.ports, vec![25565, 8080]);
         let c = parse(&format!("`kitty:port:25565:{}`", A.replace('_', "\\_"))).unwrap();
         assert_eq!((c.kind, c.ports, c.addr.as_str()), (Kind::Port, vec![25565], A));
+    }
+
+    #[test]
+    fn canonical_codes_carry_nothing_else() {
+        let c = parse(&format!("hey `{}` (also rm -rf)", game("minecraft", 25565, A))).unwrap();
+        assert_eq!(canonical(&c).unwrap(), game("minecraft", 25565, A));
+        let c = parse(&format!("kitty:port:25565,8080:{A}!!")).unwrap();
+        assert_eq!(canonical(&c).unwrap(), format!("kitty:port:25565,8080:{A}"));
+        assert_eq!(canonical(&parse(A).unwrap()), None);
     }
 
     #[test]

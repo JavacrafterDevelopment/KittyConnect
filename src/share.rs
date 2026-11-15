@@ -12,7 +12,7 @@
 
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Sender};
@@ -98,24 +98,26 @@ pub struct Server {
 
 impl Server {
     pub fn start(lib: Library, proxy: EventLoopProxy<UserEvent>) -> Result<Server, String> {
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).map_err(|e| format!("Couldn't open the file server: {e}"))?;
-        let port = listener.local_addr().map_err(|e| e.to_string())?.port();
+        let (v4, v6) = crate::loopback::listen().map_err(|e| format!("Couldn't open the file server: {e}"))?;
+        let port = v4.local_addr().map_err(|e| e.to_string())?.port();
         let stop = Arc::new(AtomicBool::new(false));
-        let flag = stop.clone();
-        std::thread::spawn(move || {
-            static CONN: AtomicU64 = AtomicU64::new(1);
-            for stream in listener.incoming() {
-                if flag.load(Ordering::Relaxed) {
-                    break;
+        for listener in std::iter::once(v4).chain(v6) {
+            let (lib, proxy, flag) = (lib.clone(), proxy.clone(), stop.clone());
+            std::thread::spawn(move || {
+                static CONN: AtomicU64 = AtomicU64::new(1);
+                for stream in listener.incoming() {
+                    if flag.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let Ok(stream) = stream else { continue };
+                    let (lib, proxy, flag) = (lib.clone(), proxy.clone(), flag.clone());
+                    let conn = CONN.fetch_add(1, Ordering::Relaxed);
+                    std::thread::spawn(move || {
+                        let _ = serve_one(stream, conn, &lib, &proxy, &flag);
+                    });
                 }
-                let Ok(stream) = stream else { continue };
-                let (lib, proxy, flag) = (lib.clone(), proxy.clone(), flag.clone());
-                let conn = CONN.fetch_add(1, Ordering::Relaxed);
-                std::thread::spawn(move || {
-                    let _ = serve_one(stream, conn, &lib, &proxy, &flag);
-                });
-            }
-        });
+            });
+        }
         Ok(Server { port, stop })
     }
 }
@@ -123,8 +125,10 @@ impl Server {
 impl Drop for Server {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
-        // Wakes the accept loop so it sees the flag.
-        let _ = TcpStream::connect_timeout(&SocketAddr::from((Ipv4Addr::LOCALHOST, self.port)), Duration::from_millis(300));
+        // Wakes both accept loops so they see the flag.
+        let wake = Duration::from_millis(300);
+        let _ = TcpStream::connect_timeout(&SocketAddr::from((Ipv4Addr::LOCALHOST, self.port)), wake);
+        let _ = TcpStream::connect_timeout(&SocketAddr::from((Ipv6Addr::LOCALHOST, self.port)), wake);
     }
 }
 
@@ -162,7 +166,7 @@ fn serve_one(
     }
     match req.op.as_str() {
         // The receiver checks every 30 seconds that sharing is still on.
-        "ping" => stream.write_all(crate::peers::pong(peer).as_bytes())?,
+        "ping" => stream.write_all(crate::peers::pong(peer, None).as_bytes())?,
         "list" => {
             let files = lib.lock().unwrap().clone();
             let body = json!({ "v": 1, "files": files });

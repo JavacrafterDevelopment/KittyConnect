@@ -1776,13 +1776,14 @@ dependencies = [
 
 [[package]]
 name = "kittyconnect"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "arboard",
  "base64 0.22.1",
  "cpal",
  "dav-server",
  "futures-util",
+ "getrandom 0.4.3",
  "hyper",
  "hyper-util",
  "muda",

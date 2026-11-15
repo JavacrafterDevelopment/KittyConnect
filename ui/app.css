@@ -1229,3 +1229,43 @@ select.input { padding: 7px 9px; }
 .file-name.link:hover { text-decoration: underline; }
 .browser-head .btn svg { margin-right: 2px; }
 .limit a { color: var(--blue); text-decoration: underline; cursor: pointer; }
+
+/* ------------------------------------------------------------------- hub */
+
+.mac-only { display: none; }
+:root[data-os="macos"] .mac-only { display: inline; }
+
+#hub-members, #hub-invitables { display: flex; flex-direction: column; gap: 2px; }
+#hub-members .pick { width: 14px; height: 14px; accent-color: var(--blue); flex: none; }
+#hub-members .person { cursor: default; }
+
+.invitable { display: flex; align-items: center; gap: 9px; padding: 6px; border-radius: 9px; min-width: 0; }
+.invitable:hover { background: var(--card-hover); }
+.invitable-title { font-weight: 600; color: var(--ink); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* What something is: a small tag in front of its name. */
+.kind {
+  flex: none; font-size: 10.5px; font-weight: 600; letter-spacing: .02em; text-transform: uppercase;
+  color: var(--walnut); background: var(--walnut-wash); border-radius: 6px; padding: 2px 7px;
+}
+.kind-voip { color: var(--blue-deep); background: var(--blue-wash); }
+.kind-game { color: var(--ok); background: var(--ok-wash); }
+.kind-mount { color: var(--warn); background: var(--warn-wash); }
+
+.sess.invite .sess-title { font-weight: 400; }
+.sess.conn .sess-head { flex-wrap: wrap; row-gap: 6px; }
+.sess.conn > .person { padding-left: 14px; }
+.sess.conn > .person .avatar { width: 24px; height: 24px; font-size: 10px; }
+.via { font-size: 11px; color: var(--ink-faint); white-space: nowrap; }
+
+/* An invite from the hub, over whatever tab is showing. */
+.toast {
+  position: fixed; left: 50%; bottom: 46px; transform: translateX(-50%); z-index: 50;
+  display: flex; align-items: center; gap: 10px; max-width: min(640px, calc(100vw - 32px));
+  padding: 10px 12px 10px 14px; border-radius: 14px; background: var(--card);
+  border: 1px solid var(--rule-strong); box-shadow: 0 10px 34px var(--shadow-drop);
+}
+.toast.hide { display: none; }
+.toast-text { min-width: 0; color: var(--ink-soft); overflow: hidden; text-overflow: ellipsis; }
+.toast-text b { color: var(--ink); }
+#hub-room .panes { margin-top: 12px; }

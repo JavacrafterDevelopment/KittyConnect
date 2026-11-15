@@ -217,6 +217,233 @@ document.querySelectorAll('[data-paste]').forEach((b) => {
   b.addEventListener('click', () => post({ cmd: 'paste', target: b.dataset.paste }));
 });
 
+/* ------------------------------------------------------------------- hub */
+
+/* The hub: who's in it, what you can invite them to, invites you got, and
+   every connection in the app. The codes behind invites are made by the app
+   itself; the page only says which thing and to whom. */
+const HUB_OFF = { st: 'off', mode: 'off', error: '', notice: '', name: '', code: null, me: 0, members: [], invites: [], sent: '', reconnecting: false, link: { path: 'unknown' }, log: [] };
+const HUB_PILL = { starting: ['busy', 'Connecting'], live: ['ok', 'Connected'] };
+const KIND_LABEL = { voip: 'Voice room', file: 'File share', port: 'Ports', game: 'Game server', mount: 'Folder' };
+const KIND_A = { voip: 'a voice room', file: 'a file share', port: 'some ports', game: 'a game server', mount: 'a shared folder' };
+/* Where each kind of invite lands once joined. */
+const KIND_PAGE = { voip: 'voip', file: 'files', port: 'ports', game: 'ports', mount: 'mounts' };
+let hubState = HUB_OFF;
+/* People ticked to invite (by hub id); none ticked means everyone. */
+const hubPicked = new Set();
+/* Invites already shown as a toast, so each pops up once. */
+const toasted = new Set();
+let toastInvite = null, toastTimer = 0;
+
+$('hub-host').addEventListener('click', () => post({ cmd: 'hub.host' }));
+$('hub-join').addEventListener('click', () => post({ cmd: 'hub.join', code: $('hub-code').value }));
+$('hub-code').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('hub-join').click(); });
+$('hub-leave').addEventListener('click', () => {
+  if (hubState.mode === 'host' && hubState.members.length > 1
+    && !confirm('Close your hub? Everyone in it is disconnected, and its code stops working.')) return;
+  post({ cmd: 'hub.leave' });
+});
+
+function pathLabel(p) {
+  if (p.path === 'host') return '<span class="meta">Host</span>';
+  return linkPill({ path: p.path, rtt: p.rtt }, p.name) || '<span class="meta">Connecting…</span>';
+}
+
+function hubMembersHtml(h) {
+  if (!h.members.length) return '<div class="peers-empty">Connecting…</div>';
+  return h.members.map((m) => {
+    const me = m.id === h.me;
+    const pick = me ? '' : `<input type="checkbox" class="pick" data-hub-pick="${m.id}"${hubPicked.has(m.id) ? ' checked' : ''} title="Invite ${esc(m.name)}">`;
+    const kick = h.mode === 'host' && !me && !m.host
+      ? `<button class="btn small ghost" data-hub-kick="${m.id}" title="Disconnect ${esc(m.name)} from the hub. They could join again with the code; to keep someone out, close the hub and send a new code to the rest.">Remove</button>`
+      : '';
+    return `
+      <div class="person">
+        ${pick}
+        <span class="avatar" style="--h:${hue(m.name)}">${esc(initials(m.name))}</span>
+        <span class="person-name">${esc(m.name)}${me ? ' <span class="meta">(you)</span>' : ''}${m.host ? ' <span class="meta">· host</span>' : ''}</span>
+        <span class="grow"></span>
+        ${kick}${me && h.mode === 'host' ? '' : pathLabel(m)}
+      </div>`;
+  }).join('');
+}
+
+function hubInvitablesHtml(h, items) {
+  const others = h.members.filter((m) => m.id !== h.me);
+  if (!items.length) {
+    return '<div class="peers-empty">Open something first: a voice room, a file share, a port, a game server or a folder. It shows up here to invite people to.</div>';
+  }
+  const picked = others.filter((m) => hubPicked.has(m.id)).length;
+  const label = picked ? `Invite ${picked}` : 'Invite everyone';
+  return items.map((i) => `
+    <div class="invitable">
+      <span class="kind kind-${i.kind}">${esc(KIND_LABEL[i.kind] || i.kind)}</span>
+      <span class="invitable-title">${esc(i.title)}</span>
+      <span class="grow"></span>
+      <button class="btn small primary" data-hub-invite="${esc(i.what)}"${others.length ? '' : ' disabled title="Nobody else is in the hub yet"'}>${label}</button>
+    </div>`).join('');
+}
+
+function inviteText(inv) {
+  return `<b>${esc(inv.from)}</b> invited you to ${esc(KIND_A[inv.kind] || 'something')}${inv.title ? `: “${esc(inv.title)}”` : ''}`;
+}
+
+function invitesHtml(list) {
+  if (!list.length) return '<div class="empty">No invites. When someone in your hub invites you, it shows up here (and pops up on any tab).</div>';
+  return list.map((inv) => `
+    <div class="sess invite">
+      <div class="sess-head">
+        <span class="avatar small" style="--h:${hue(inv.from)}">${esc(initials(inv.from))}</span>
+        <span class="sess-title">${inviteText(inv)}</span>
+        <span class="grow"></span>
+        <button class="btn small primary" data-inv-join="${inv.id}">Join</button>
+        <button class="btn small ghost" data-inv-dismiss="${inv.id}">Dismiss</button>
+      </div>
+    </div>`).join('');
+}
+
+function renderHub(h, items) {
+  hubState = h;
+  const on = h.mode !== 'off';
+  hide($('hub-lobby'), on);
+  hide($('hub-room'), !on);
+  $('hub-error').textContent = h.error;
+  show($('hub-error'), h.error);
+  $('hub-notice').textContent = h.notice;
+  show($('hub-notice'), h.notice && !on);
+  if (on) {
+    $('hub-title').textContent = h.name || (h.mode === 'host' ? 'Your hub' : 'Hub');
+    const [cls, text] = h.reconnecting ? ['busy', 'Reconnecting'] : (HUB_PILL[h.st] || HUB_PILL.starting);
+    $('hub-pill').className = `pill ${cls}`;
+    $('hub-pill').querySelector('.pill-text').textContent = text;
+    setHtml($('hub-link'), h.mode === 'join' && h.st === 'live' ? linkPill(h.link, 'the hub host') : '');
+    $('hub-leave').textContent = h.mode === 'host' ? 'Close hub' : 'Leave hub';
+    $('hub-room-code').textContent = h.code || '';
+    $('hub-codebox').classList.toggle('on', !!h.code && h.mode === 'host');
+    const ids = new Set(h.members.map((m) => m.id));
+    [...hubPicked].forEach((id) => { if (!ids.has(id)) hubPicked.delete(id); });
+    setHtml($('hub-members'), hubMembersHtml(h));
+    $('hub-count').textContent = h.members.length ? `${h.members.length} in it` : '';
+    setHtml($('hub-invitables'), h.st === 'live' ? hubInvitablesHtml(h, items) : '<div class="peers-empty">Connecting…</div>');
+    $('hub-sent').textContent = h.sent;
+  } else {
+    hubPicked.clear();
+  }
+  $('hub-invite-count').textContent = h.invites.length ? String(h.invites.length) : '';
+  setHtml($('hub-invites'), invitesHtml(h.invites));
+  renderLog('hub', h.log);
+
+  // A new invite pops up wherever you are.
+  const fresh = h.invites.find((i) => !toasted.has(i.id));
+  h.invites.forEach((i) => toasted.add(i.id));
+  if (fresh && fresh.ago < 30) showToast(fresh);
+  if (toastInvite && !h.invites.some((i) => i.id === toastInvite.id)) hideToast();
+}
+
+function showToast(inv) {
+  toastInvite = inv;
+  $('toast-avatar').style.setProperty('--h', hue(inv.from));
+  $('toast-avatar').textContent = initials(inv.from);
+  $('toast-text').innerHTML = inviteText(inv);
+  hide($('invite-toast'), false);
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(hideToast, 20000);
+}
+
+function hideToast() {
+  toastInvite = null;
+  hide($('invite-toast'), true);
+}
+
+/* Joining leaves the room you're in, if it's a room: say so first. */
+function joinInvite(id) {
+  const inv = hubState.invites.find((i) => i.id === id);
+  if (!inv) return;
+  if (inv.kind === 'voip' && voipState && voipState.st !== 'off' && voipState.st !== 'ended'
+    && !confirm('Leave the room you\'re in to join this one?')) return;
+  hideToast();
+  post({ cmd: 'hub.accept', id });
+}
+
+$('toast-join').addEventListener('click', () => { if (toastInvite) joinInvite(toastInvite.id); });
+$('toast-dismiss').addEventListener('click', hideToast);
+
+$('hub-room').addEventListener('click', (e) => {
+  const inv = e.target.closest('[data-hub-invite]');
+  if (inv) {
+    const to = hubState.members.filter((m) => m.id !== hubState.me && hubPicked.has(m.id)).map((m) => m.id);
+    return post({ cmd: 'hub.invite', what: inv.dataset.hubInvite, to });
+  }
+  const kick = e.target.closest('[data-hub-kick]');
+  if (kick) {
+    const m = hubState.members.find((x) => x.id === Number(kick.dataset.hubKick));
+    if (m && confirm(`Remove ${m.name} from the hub?`)) post({ cmd: 'hub.kick', id: m.id });
+  }
+});
+$('hub-room').addEventListener('change', (e) => {
+  const pick = e.target.closest('[data-hub-pick]');
+  if (!pick) return;
+  const id = Number(pick.dataset.hubPick);
+  if (pick.checked) hubPicked.add(id); else hubPicked.delete(id);
+  setHtml($('hub-invitables'), hubInvitablesHtml(hubState, lastInvitables));
+});
+$('hub-invites').addEventListener('click', (e) => {
+  const j = e.target.closest('[data-inv-join]');
+  if (j) return joinInvite(Number(j.dataset.invJoin));
+  const d = e.target.closest('[data-inv-dismiss]');
+  if (d) post({ cmd: 'hub.dismiss', id: Number(d.dataset.invDismiss) });
+});
+let lastInvitables = [];
+
+/* --------------------------------------------------------- connections */
+
+const VIA = {
+  official: ['TailCat', 'The official TailCat, end-to-end encrypted'],
+  voip: ['VOIP helper', 'KittyConnect’s VOIP helper: TailCat’s own library, so voice can go over UDP. End-to-end encrypted the same way.'],
+};
+
+function connHtml(c) {
+  const people = c.people.map((p) => `
+    <div class="person">
+      <span class="avatar" style="--h:${hue(p.name || '?')}">${esc(initials(p.name || '?'))}</span>
+      <span class="person-name">${esc(p.name || 'Someone')}</span>
+      <span class="grow"></span>
+      ${pathLabel(p)}
+      ${p.drop ? `<button class="btn small ghost" data-conn-drop="${esc(p.drop)}" data-conn-who="${esc(p.name || 'them')}" title="Disconnect ${esc(p.name || 'them')}">Remove</button>` : ''}
+    </div>`).join('');
+  const host = c.host ? `<span class="hostname">${c.section === 'File Share' ? 'From' : 'Host'} <b>${esc(c.host)}</b></span>` : '';
+  const empty = c.role === 'Hosting' ? '<div class="peers-empty">Nobody connected yet.</div>' : '';
+  return `
+    <div class="sess conn">
+      <div class="sess-head">
+        <span class="kind">${esc(c.section)}</span>
+        <span class="sess-title">${esc(c.title)}</span>
+        <span class="meta">${esc(c.role)}</span>
+        ${host}${c.link ? linkPill(c.link, c.host || 'them') : ''}
+        <span class="grow"></span>
+        <span class="via" title="${esc((VIA[c.via] || VIA.official)[1])}">${esc((VIA[c.via] || VIA.official)[0])}</span>
+        <button class="btn small danger" data-conn-drop="${esc(c.id)}">${esc(c.dropLabel)}</button>
+      </div>
+      ${people || (c.role === 'Hosting' ? `<div class="peers">${empty}</div>` : '')}
+    </div>`;
+}
+
+function renderConnections(rows) {
+  $('conn-count').textContent = rows.length ? `${rows.length} open` : '';
+  setHtml($('conn-list'), rows.length ? rows.map(connHtml).join('')
+    : '<div class="empty">Nothing connected. Whatever you open or join in any tab shows up here.</div>');
+}
+
+$('conn-list').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-conn-drop]');
+  if (!b) return;
+  if (b.dataset.connWho && !confirm(`Disconnect ${b.dataset.connWho}?`)) return;
+  post({ cmd: 'conn.drop', id: b.dataset.connDrop });
+});
+
+/* The VOIP tab's shortcut: send the room to everyone in the hub. */
+$('voip-invite-hub').addEventListener('click', () => post({ cmd: 'hub.invite', what: 'voip', to: [] }));
+
 /* ------------------------------------------------------------ file share */
 
 $('share-add-files').addEventListener('click', () => post({ cmd: 'share.addFiles' }));
@@ -1616,6 +1843,9 @@ window.onHost = (msg) => {
         : 'Not changed. See the message at the bottom.';
       break;
     case 'state': {
+      lastInvitables = msg.invitables || [];
+      renderHub(msg.hub || HUB_OFF, lastInvitables);
+      renderConnections(msg.connections || []);
       renderShare(msg.share);
       renderRecv(msg.recv);
       renderHosts(msg.hosts, msg.hostError);
@@ -1635,7 +1865,11 @@ window.onHost = (msg) => {
       show($('ports-badge'), portsLive);
       show($('voip-badge'), voipLiveNow);
       show($('mounts-badge'), mountsLive);
-      document.documentElement.classList.toggle('live', filesLive || portsLive || voipLiveNow || mountsLive);
+      const hub = msg.hub || HUB_OFF;
+      show($('hub-badge'), hub.st === 'live' || hub.invites.length > 0);
+      // In a room and a hub: one press sends the room to everyone in it.
+      hide($('voip-invite-hub'), !(hub.st === 'live' && msg.voip.st === 'live' && msg.voip.code));
+      document.documentElement.classList.toggle('live', filesLive || portsLive || voipLiveNow || mountsLive || hub.st === 'live');
       break;
     }
     case 'voipLive':
@@ -1666,6 +1900,11 @@ window.onHost = (msg) => {
     case 'dropped':
       page('files');
       break;
+    case 'goto':
+      // An invite was joined: show where it's connecting (and any error there).
+      page(msg.page);
+      if (msg.view) pfView(msg.view);
+      break;
     case 'window':
       document.documentElement.classList.toggle('maximized', msg.maximized);
       break;
@@ -1675,12 +1914,11 @@ window.onHost = (msg) => {
 $('data-link').addEventListener('click', () => post({ cmd: 'openData' }));
 $('version').textContent = `v${BOOT.version} · TailCat ${BOOT.tailcat}`;
 
-// Keyboard: Ctrl+1 / 2 / 3 (⌘ on a Mac) switch tabs.
+// Keyboard: Ctrl+1 to 5 (⌘ on a Mac) switch tabs, left to right.
 window.addEventListener('keydown', (e) => {
   if (!(MAC ? e.metaKey : e.ctrlKey)) return;
-  if (e.key === '1') page('files');
-  if (e.key === '2') page('ports');
-  if (e.key === '3') page('voip');
+  const tab = { 1: 'hub', 2: 'files', 3: 'ports', 4: 'voip', 5: 'mounts' }[e.key];
+  if (tab) page(tab);
 });
 if (MAC) $('data-link').textContent = 'Portable · KittyConnectData';
 document.addEventListener('contextmenu', (e) => { if (!e.target.closest('input, .code, .log-body, .err')) e.preventDefault(); });
@@ -1747,6 +1985,30 @@ if (window.ipc) {
       log: [],
     },
     hostError: '', joinError: '',
+    hub: {
+      st: 'live', mode: 'host', error: '', notice: '', name: 'Kit\'s hub', code: `kitty:hub:50400:${addr}`, me: 1,
+      members: [
+        { id: 1, name: 'Kit', host: true, path: 'host', rtt: null },
+        { id: 2, name: 'Priya', host: false, path: 'direct', rtt: 18 },
+        { id: 3, name: 'Sam', host: false, path: 'relay', rtt: 74 },
+      ],
+      invites: [{ id: 4, from: 'Priya', kind: 'mount', code: '', title: 'Minecraft Worlds', ago: 40 }],
+      sent: 'Invited 2 people.', reconnecting: false, link: { path: 'unknown' }, log: ['# \u{1F408} Server listening with new address: tc\u2026'],
+    },
+    invitables: [
+      { what: 'voip', kind: 'voip', title: 'Hangout' },
+      { what: 'share', kind: 'file', title: '3 files' },
+      { what: 'host:3', kind: 'game', title: 'Minecraft: Java Edition \u00b7 port 25565' },
+    ],
+    connections: [
+      { id: 'hub', section: 'Hub', title: 'Kit\'s hub', role: 'Hosting', link: null, via: 'official', dropLabel: 'Close',
+        people: [{ name: 'Priya', path: 'direct', rtt: 18, drop: 'hub-member:2' }, { name: 'Sam', path: 'relay', rtt: 74, drop: 'hub-member:3' }] },
+      { id: 'voip', section: 'VOIP', title: 'Hangout', role: 'Hosting', link: null, via: 'voip', dropLabel: 'Leave',
+        people: [{ name: 'Priya', path: 'direct', rtt: 21, drop: 'voip-member:2' }] },
+      { id: 'host:3', section: 'Game servers', title: 'Minecraft: Java Edition \u00b7 port 25565', role: 'Hosting', link: null, via: 'official', dropLabel: 'Stop',
+        people: [{ name: 'Sam', path: 'relay', rtt: 80, drop: null }] },
+      { id: 'join:12', section: 'Port Forward', title: 'Port 50200', role: 'Joined', host: 'Priya', link: { path: 'direct', rtt: 16, checkedAgo: 5 }, via: 'official', dropLabel: 'Disconnect', people: [] },
+    ],
     mounts: { pick: 'C:\\Users\\you\\Documents\\Minecraft Worlds', hostError: '', joinError: '', limit: 50000000, os: 'windows' },
     hosts: [
       { key: 11, st: 'live', error: '', warn: '', ports: [50123], game: null, code: `kitty:mount:50123:${addr.slice(0, 60)}`, lanNote: '', log: [],

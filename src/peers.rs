@@ -15,9 +15,18 @@
 //! check (every 10 seconds while on a relay) gets `"retry":true`, and they
 //! restart their end of the tunnel, which tries for a direct path from scratch.
 //!
+//! Port check: until it has passed, a joiner's check also carries the port
+//! numbers it typed (`"ports":[25565]`). The host answers `"ports":"open"`
+//! only if that code opened every one of them, else `"ports":"wrong"`, and
+//! the joiner stops: nothing on its PC stays listening for a port nobody
+//! opened. It answers for the ports asked and nothing else, so the code
+//! still never tells anyone which ports it opened, and it answers a few times
+//! a minute at most ("busy" after that), so nobody can guess through them.
+//!
 //! Older versions send a bare `{"op":"ping"}` and get `{"pong":true}`; they
 //! still work, they just aren't listed.
 
+use std::collections::VecDeque;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -50,11 +59,33 @@ pub fn my_name() -> String {
 /// A random id for one connection, so the host can tell joiners apart (two
 /// people can pick the same name).
 pub fn new_id() -> u64 {
+    let mut b = [0u8; 8];
+    fill_random(&mut b);
+    u64::from_le_bytes(b).max(1)
+}
+
+/// A secret: 32 bytes from the OS's secure random source, as hex.
+pub fn secret() -> String {
+    let mut b = [0u8; 32];
+    fill_random(&mut b);
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+/// Fills `buf` from the OS's secure random source. Should that ever fail
+/// (it doesn't on Windows or macOS), a keyed hash seeded by the OS is the
+/// fallback, so nothing is ever left predictable.
+fn fill_random(buf: &mut [u8]) {
+    if getrandom::fill(buf).is_ok() {
+        return;
+    }
     use std::collections::hash_map::RandomState;
     use std::hash::{BuildHasher, Hasher};
-    let mut h = RandomState::new().build_hasher();
-    h.write_u128(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos());
-    h.finish().max(1)
+    for (i, chunk) in buf.chunks_mut(8).enumerate() {
+        let mut h = RandomState::new().build_hasher();
+        h.write_usize(i);
+        h.write_u128(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos());
+        chunk.copy_from_slice(&h.finish().to_le_bytes()[..chunk.len()]);
+    }
 }
 
 /// What a joiner says about itself in each check.
@@ -65,12 +96,17 @@ pub struct Report<'a> {
     pub addr: &'a str,
     pub path: &'static str,
     pub rtt: Option<u32>,
+    /// The port numbers to check, until the host has said they're open.
+    pub ports: Vec<u16>,
 }
 
 impl Report<'_> {
     pub fn ping(&self) -> String {
-        json!({ "op": "ping", "peer": self.peer, "name": my_name(), "path": self.path, "rtt": self.rtt, "addr": self.addr })
-            .to_string()
+        let mut v = json!({ "op": "ping", "peer": self.peer, "name": my_name(), "path": self.path, "rtt": self.rtt, "addr": self.addr });
+        if !self.ports.is_empty() {
+            v["ports"] = json!(self.ports);
+        }
+        v.to_string()
     }
 
     pub fn bye(&self) -> String {
@@ -89,8 +125,8 @@ pub fn ask_retry(peer: u64) {
 }
 
 /// The host's answer to a check from `peer` (0 for an older version that
-/// doesn't say who it is).
-pub fn pong(peer: u64) -> String {
+/// doesn't say who it is), with the port check's answer if it asked one.
+pub fn pong(peer: u64, ports: Option<PortCheck>) -> String {
     let retry = {
         let mut r = RETRY.lock().unwrap();
         let asked = peer != 0 && r.contains(&peer);
@@ -101,7 +137,90 @@ pub fn pong(peer: u64) -> String {
     if retry {
         v["retry"] = json!(true);
     }
+    if let Some(p) = ports {
+        v["ports"] = json!(p.as_str());
+    }
     format!("{v}\n")
+}
+
+// ---------------------------------------------------------------- port check
+
+/// The most port numbers one check may ask about.
+pub const MAX_CHECKED: usize = 16;
+/// Port checks answered per code in [`CHECK_WINDOW`]; more get "busy".
+const CHECKS_PER_WINDOW: usize = 10;
+const CHECK_WINDOW: Duration = Duration::from_secs(20);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PortCheck {
+    /// The code opened every port asked about.
+    Open,
+    /// It didn't (or there is no such code here).
+    Wrong,
+    /// Asked too often just now; ask again in a moment.
+    Busy,
+}
+
+impl PortCheck {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PortCheck::Open => "open",
+            PortCheck::Wrong => "wrong",
+            PortCheck::Busy => "busy",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<PortCheck> {
+        match s {
+            "open" => Some(PortCheck::Open),
+            "wrong" => Some(PortCheck::Wrong),
+            "busy" => Some(PortCheck::Busy),
+            _ => None,
+        }
+    }
+}
+
+struct Served {
+    addr: String,
+    ports: Vec<u16>,
+    checks: VecDeque<Instant>,
+}
+
+/// Every code this PC serves behind the beacon, with the ports it opened.
+static SERVED: Mutex<Vec<Served>> = Mutex::new(Vec::new());
+
+/// A code is open (TailCat printed its address): its ports can be checked.
+pub fn serve(addr: &str, ports: &[u16]) {
+    let mut s = SERVED.lock().unwrap();
+    s.retain(|e| e.addr != addr);
+    s.push(Served { addr: addr.to_string(), ports: ports.to_vec(), checks: VecDeque::new() });
+}
+
+/// The code closed: every check on it is "wrong" from now on.
+pub fn unserve(addr: &str) {
+    SERVED.lock().unwrap().retain(|e| e.addr != addr);
+}
+
+/// Whether the code `addr` opened every one of `asked`. None if nothing was
+/// asked (an older joiner, or one whose check already passed).
+pub fn check_ports(addr: &str, asked: &[u16]) -> Option<PortCheck> {
+    if asked.is_empty() {
+        return None;
+    }
+    let mut served = SERVED.lock().unwrap();
+    let Some(e) = served.iter_mut().find(|e| !addr.is_empty() && e.addr == addr) else {
+        return Some(PortCheck::Wrong);
+    };
+    let now = Instant::now();
+    while e.checks.front().is_some_and(|t| now.duration_since(*t) > CHECK_WINDOW) {
+        e.checks.pop_front();
+    }
+    if e.checks.len() >= CHECKS_PER_WINDOW {
+        return Some(PortCheck::Busy);
+    }
+    e.checks.push_back(now);
+    let open = asked.len() <= MAX_CHECKED && asked.iter().all(|p| e.ports.contains(p));
+    Some(if open { PortCheck::Open } else { PortCheck::Wrong })
 }
 
 /// A check or goodbye as the host receives it.
@@ -114,6 +233,7 @@ pub struct Heard {
     pub path: String,
     pub rtt: Option<u32>,
     pub addr: String,
+    pub ports: Vec<u16>,
 }
 
 impl Heard {
@@ -264,11 +384,15 @@ mod tests {
     #[test]
     fn report_round_trips() {
         set_my_name(" Kit ");
-        let r = Report { peer: 42, addr: "tcabc", path: "relay", rtt: Some(31) };
+        let r = Report { peer: 42, addr: "tcabc", path: "relay", rtt: Some(31), ports: vec![25565] };
         let h = Heard::parse(&r.ping()).unwrap();
         assert!(h.is_named());
         assert_eq!((h.peer, h.name.as_str(), h.path.as_str(), h.rtt, h.addr.as_str()), (42, "Kit", "relay", Some(31), "tcabc"));
-        assert!(pong(42).contains("\"Kit\""));
+        assert_eq!(h.ports, vec![25565]);
+        assert!(pong(42, None).contains("\"Kit\""));
+        // Once the check has passed, the ports aren't sent again.
+        let r = Report { ports: Vec::new(), ..r };
+        assert!(!r.ping().contains("ports"));
     }
 
     #[test]
@@ -278,12 +402,59 @@ mod tests {
         assert!(peers.retry(5));
         assert!(!peers.retry(6));
         assert_eq!(peers.json()[0]["retrying"], true);
-        assert!(!pong(7).contains("retry"));
-        assert!(!pong(0).contains("retry"));
-        assert!(pong(5).contains("\"retry\":true"));
-        assert!(!pong(5).contains("retry"));
+        assert!(!pong(7, None).contains("retry"));
+        assert!(!pong(0, None).contains("retry"));
+        assert!(pong(5, None).contains("\"retry\":true"));
+        assert!(!pong(5, None).contains("retry"));
         // Going direct clears "Retrying…".
         peers.heard(&ping(5, "Jo", "direct"));
         assert_eq!(peers.json()[0]["retrying"], false);
+    }
+
+    #[test]
+    fn a_port_the_code_did_not_open_is_wrong() {
+        serve("tcports1", &[25565, 47474]);
+        assert_eq!(check_ports("tcports1", &[25565]), Some(PortCheck::Open));
+        assert_eq!(check_ports("tcports1", &[25566]), Some(PortCheck::Wrong));
+        // All or nothing: which one is wrong isn't said.
+        assert_eq!(check_ports("tcports1", &[25565, 25566]), Some(PortCheck::Wrong));
+        assert_eq!(check_ports("tcports1", &[]), None);
+        // Another code's ports don't count, nor a code that isn't open here.
+        serve("tcports2", &[7777]);
+        assert_eq!(check_ports("tcports2", &[25565]), Some(PortCheck::Wrong));
+        assert_eq!(check_ports("tcnothere", &[25565]), Some(PortCheck::Wrong));
+        assert_eq!(check_ports("", &[25565]), Some(PortCheck::Wrong));
+        unserve("tcports1");
+        assert_eq!(check_ports("tcports1", &[25565]), Some(PortCheck::Wrong));
+        unserve("tcports2");
+        assert!(pong(0, Some(PortCheck::Wrong)).contains("\"ports\":\"wrong\""));
+    }
+
+    #[test]
+    fn port_checks_cannot_be_used_to_guess() {
+        serve("tcports3", &[40000]);
+        let mut answered = 0;
+        for p in 1..=50u16 {
+            match check_ports("tcports3", &[p]) {
+                Some(PortCheck::Busy) => {}
+                _ => answered += 1,
+            }
+        }
+        assert_eq!(answered, CHECKS_PER_WINDOW);
+        let many: Vec<u16> = (39990..40010).collect();
+        unserve("tcports3");
+        serve("tcports3", &(39990..40010).collect::<Vec<_>>());
+        // More than MAX_CHECKED at once is never "open".
+        assert_eq!(check_ports("tcports3", &many), Some(PortCheck::Wrong));
+        unserve("tcports3");
+    }
+
+    #[test]
+    fn secrets_are_long_and_never_repeat() {
+        let a = secret();
+        assert_eq!(a.len(), 64);
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_ne!(a, secret());
+        assert_ne!(new_id(), new_id());
     }
 }

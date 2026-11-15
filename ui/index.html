@@ -19,7 +19,18 @@
         </div>
 
         <nav id="tabs">
-          <button class="chip on" data-page="files" title="Send and receive files">
+          <button class="chip on" data-page="hub" title="Your group: who's in it, invites, and every connection">
+            <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <circle cx="8" cy="8" r="2.2" stroke="currentColor" stroke-width="1.5"/>
+              <circle cx="2.8" cy="3.6" r="1.4" stroke="currentColor" stroke-width="1.3"/>
+              <circle cx="13.2" cy="3.6" r="1.4" stroke="currentColor" stroke-width="1.3"/>
+              <circle cx="8" cy="14" r="1.4" stroke="currentColor" stroke-width="1.3"/>
+              <path d="M4 4.6 6.3 6.6M12 4.6 9.7 6.6M8 10.2v2.4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
+            </svg>
+            Hub
+            <span class="badge" id="hub-badge"></span>
+          </button>
+          <button class="chip" data-page="files" title="Send and receive files">
             <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
               <path d="M3.5 1.5h6l3 3v10h-9z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
               <path d="M9.5 1.5v3h3" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
@@ -77,8 +88,99 @@
 
     <main id="body">
 
+      <!-- ----------------------------------------------------------------- hub -->
+      <section id="page-hub" class="page on">
+        <div class="column wide">
+          <div class="lib-head">
+            <h1 class="page-title">Hub</h1>
+          </div>
+          <p class="lib-note">One code for your group. Everyone who joins your hub shows up here, and
+            anyone in it can invite the others to a voice room, files, ports, a game server or a
+            folder with one press, so nobody copies a code for each. The hub and its invites go
+            through the encrypted <b>TailCat</b> tunnel, using the official TailCat<span class="mac-only">
+            (on a Mac, built from TailCat's own source, since Tailscale doesn't sign a Mac build)</span>.
+            Voice rooms still connect through KittyConnect's VOIP helper, as always.</p>
+
+          <!-- Not in a hub: start one or join one. -->
+          <div id="hub-lobby">
+            <div class="panes">
+              <div class="card pane">
+                <div class="card-head"><h3>Start a hub</h3></div>
+                <p class="set-desc">Friends join it once with its code. It stays open until you close it or quit KittyConnect.</p>
+                <div class="actions">
+                  <button class="btn primary" id="hub-host">Start hub</button>
+                  <span class="meta">You get a code to send your friends.</span>
+                </div>
+              </div>
+              <div class="card pane">
+                <div class="card-head"><h3>Join a hub</h3></div>
+                <label class="field-label" for="hub-code">Paste the hub code</label>
+                <div class="codein">
+                  <input id="hub-code" class="input mono" spellcheck="false" autocomplete="off" placeholder="kitty:hub:…">
+                  <button class="btn small" data-paste="hub-code">Paste</button>
+                </div>
+                <div class="actions">
+                  <button class="btn primary" id="hub-join">Join hub</button>
+                </div>
+              </div>
+            </div>
+            <p class="err" id="hub-error"></p>
+            <p class="warn" id="hub-notice"></p>
+          </div>
+
+          <!-- In a hub. -->
+          <div id="hub-room" class="hide">
+            <div class="card roombar">
+              <div class="roombar-head">
+                <span class="room-title" id="hub-title"></span>
+                <span class="pill" id="hub-pill"><span class="dot"></span><span class="pill-text"></span></span>
+                <span id="hub-link"></span>
+                <span class="grow"></span>
+                <button class="btn small danger" id="hub-leave">Leave hub</button>
+              </div>
+              <div class="roomcode" id="hub-codebox">
+                <code class="code" id="hub-room-code"></code>
+                <button class="btn small primary" data-copy="hub-room-code" data-code="1">Copy code</button>
+              </div>
+            </div>
+            <div class="panes">
+              <div class="card pane">
+                <div class="card-head"><h3>In the hub</h3><span class="meta" id="hub-count"></span></div>
+                <div id="hub-members"></div>
+              </div>
+              <div class="card pane">
+                <div class="card-head"><h3>Invite</h3></div>
+                <p class="set-desc" id="hub-invite-to">Invites go to everyone in the hub, or only the people you tick.</p>
+                <div id="hub-invitables"></div>
+                <p class="meta" id="hub-sent"></p>
+              </div>
+            </div>
+          </div>
+
+          <div class="lib-section">
+            <div class="lib-head">
+              <h2 class="section-title">Invites</h2>
+              <span class="meta" id="hub-invite-count"></span>
+            </div>
+            <div class="sessions" id="hub-invites"></div>
+          </div>
+
+          <div class="lib-section">
+            <div class="lib-head">
+              <h2 class="section-title">Connections</h2>
+              <span class="meta" id="conn-count"></span>
+            </div>
+            <p class="set-desc">Everything connected right now, anywhere in KittyConnect: who's on it and
+              whether each is direct or on a relay. Drop ends it, the same as its own tab's Stop or Leave.</p>
+            <div class="sessions" id="conn-list"></div>
+          </div>
+
+          <div class="logbox" data-log="hub"></div>
+        </div>
+      </section>
+
       <!-- ---------------------------------------------------------- file share -->
-      <section id="page-files" class="page on">
+      <section id="page-files" class="page">
         <div class="column wide">
           <div class="lib-head">
             <h1 class="page-title">File Share</h1>
@@ -398,6 +500,7 @@
               <div class="roomcode" id="voip-codebox">
                 <code class="code" id="voip-room-code"></code>
                 <button class="btn small primary" data-copy="voip-room-code" data-code="1">Copy code</button>
+                <button class="btn small hide" id="voip-invite-hub" title="Send this room to everyone in your hub, inside its encrypted tunnel. They join with one press.">Invite hub</button>
               </div>
             </div>
 
@@ -586,6 +689,14 @@
         </div>
       </section>
     </main>
+
+    <!-- An invite from the hub, shown on any tab. -->
+    <div id="invite-toast" class="toast hide" role="status">
+      <span class="avatar small" id="toast-avatar"></span>
+      <span class="toast-text" id="toast-text"></span>
+      <button class="btn small primary" id="toast-join">Join</button>
+      <button class="btn small ghost" id="toast-dismiss">Later</button>
+    </div>
 
     <footer id="status">
       <span id="lamp"></span>

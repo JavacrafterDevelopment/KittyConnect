@@ -1,6 +1,6 @@
 [package]
 name = "kittyconnect"
-version = "0.10.0"
+version = "0.11.0"
 edition = "2021"
 description = "Portable peer-to-peer file sharing and port opening over TailCat."
 license = "MIT OR Apache-2.0"
@@ -15,6 +15,8 @@ tao = "0.37"
 wry = "0.57"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Secrets (a hub or room host's proof, voice keys) from the OS's secure random source.
+getrandom = "0.4"
 rfd = "0.15"
 arboard = { version = "3", default-features = false }
 cpal = "0.16"

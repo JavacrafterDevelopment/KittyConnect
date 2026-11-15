@@ -1,13 +1,17 @@
 // No console window in release builds; debug builds keep one for logs.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+// The state snapshot is one big json! literal.
+#![recursion_limit = "256"]
 
 mod beacon;
 mod code;
 // Windows Firewall only; on other systems its helpers are used by its tests.
 #[cfg_attr(not(windows), allow(dead_code))]
 mod firewall;
+mod hub;
 mod icon;
 mod lan;
+mod loopback;
 mod mount;
 mod peers;
 mod portable;
@@ -37,7 +41,7 @@ use wry::{DragDropEvent, WebContext, WebView, WebViewBuilder};
 use wry::WebViewBuilderExtWindows;
 
 use code::Kind;
-use peers::{Heard, Peers, Report};
+use peers::{Heard, PortCheck, Peers, Report};
 use portable::data_dir;
 use share::{Library, RecvEvent, Remote, Server, ShareEvent};
 use tailcat::{Link, Proc, Role, TcEvent};
@@ -81,6 +85,8 @@ pub enum UserEvent {
     MountXfer(u64, u64, Xfer),
     /// The largest file Windows' WebDAV opens (None: no limit here, or unknown).
     WebdavLimit(Option<u64>),
+    /// Our hub connection (by generation) heard something.
+    Hub(u64, hub::HubEvent),
 }
 
 pub enum Xfer {
@@ -289,10 +295,14 @@ struct Transfer {
 }
 
 impl PortHost {
-    /// Stops telling joiners about LAN worlds on this code.
+    /// The code is closing: its ports check as wrong, and joiners hear of no
+    /// more LAN worlds on it.
     fn unserve(&mut self) {
-        if let (Some(_), Some(addr)) = (&self.game, &self.addr) {
-            lan::unserve(addr);
+        if let Some(addr) = &self.addr {
+            peers::unserve(addr);
+            if self.game.is_some() {
+                lan::unserve(addr);
+            }
         }
     }
 }
@@ -317,6 +327,9 @@ struct PortJoin {
     link: Link,
     /// The page has been told it can't reach the host (so it's told once).
     told_unreachable: bool,
+    /// The host said its code opened every port we forward (or it's an older
+    /// version that can't say). Until then it isn't "Connected".
+    ports_checked: bool,
     /// The `tailcat forward` arguments, to reconnect with ("Retry direct").
     args: Vec<String>,
     peer: u64,
@@ -330,6 +343,8 @@ struct PortJoin {
     lan_asking: bool,
     /// A joined mount (Mounts tab).
     mount: Option<MountJoin>,
+    /// "Share on my network": the picked ports on every address of this PC.
+    relays: Vec<loopback::LanRelay>,
     log: Log,
 }
 
@@ -341,17 +356,110 @@ enum JoinFrom {
     Mount,
 }
 
+/// Something open on this PC that the hub can invite people to.
+struct Invitable {
+    /// What the page calls it: "voip", "share" or "host:<key>".
+    what: String,
+    kind: &'static str,
+    title: String,
+    code: String,
+}
+
+/// The one-click games' names, for invites and the Connections list (the
+/// page has the same list).
+fn game_name(id: &str) -> &str {
+    match id {
+        "minecraft" => "Minecraft: Java Edition",
+        "terraria" => "Terraria",
+        "starbound" => "Starbound",
+        "vintagestory" => "Vintage Story",
+        other => other,
+    }
+}
+
+/// "Port 25565" or "Ports 25565, 8080".
+fn ports_title(ports: &[u16]) -> String {
+    format!("Port{} {}", if ports.len() == 1 { "" } else { "s" }, join_ports(ports, ", "))
+}
+
+fn join_ports(ports: &[u16], sep: &str) -> String {
+    ports.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(sep)
+}
+
+/// A hub code pasted somewhere else.
+const HUB_CODE_HERE: &str = "That's a hub code. Paste it in the Hub tab.";
+
+/// What one check of a joined port came to.
+#[derive(Debug, PartialEq, Eq)]
+enum Checked {
+    Nothing,
+    Connected,
+    /// The host stopped answering: it closed the port or went offline.
+    Gone,
+    /// The host said the port typed isn't open on its code.
+    WrongPorts,
+}
+
 /// A joined port that hasn't heard from the host in this long says so (it
 /// keeps trying).
 const UNREACHED: Duration = Duration::from_secs(30);
 
 impl PortJoin {
-    /// The host has answered through the tunnel: a check came back, or TailCat
-    /// found a path to it. TailCat listens on this PC before it has even tried
-    /// to reach anyone, so that alone proves nothing. Without a beacon to ask
+    /// The host has answered through the tunnel and said the ports we typed
+    /// are open on its code. TailCat listens on this PC before it has even
+    /// tried to reach anyone, and a tunnel that's up (even a direct one) only
+    /// proves the code is right, not the port number: TailCat on the host
+    /// silently drops a port it wasn't told to open. Without a beacon to ask
     /// (the friend's own port is the beacon's), a few quiet seconds have to do.
     fn reached(&self) -> bool {
-        self.link.peer_seen || self.link.direct.is_some() || (self.beacon.is_none() && self.started.elapsed() > Duration::from_secs(3))
+        match self.beacon {
+            Some(_) => self.ports_checked,
+            None => self.link.peer_seen || self.link.direct.is_some() || self.started.elapsed() > Duration::from_secs(3),
+        }
+    }
+
+    /// Takes in what a check through the tunnel said: whether it came back,
+    /// and the host's answer about the ports.
+    fn checked(&mut self, result: Result<Duration, String>, ports: Option<PortCheck>) -> Checked {
+        if result.is_ok() {
+            match ports {
+                Some(PortCheck::Wrong) => {
+                    self.wrong_ports();
+                    return Checked::WrongPorts;
+                }
+                // Open, or an older host that can't check (it never says).
+                Some(PortCheck::Open) | None => self.ports_checked = true,
+                // Asked too often just now: the next check asks again.
+                Some(PortCheck::Busy) => {}
+            }
+        }
+        if self.link.ping_result(result) {
+            self.proc = None;
+            self.relays.clear();
+            self.st = St::Error;
+            self.error = "Your friend closed this port or went offline.".into();
+            return Checked::Gone;
+        }
+        if self.promote() {
+            Checked::Connected
+        } else {
+            Checked::Nothing
+        }
+    }
+
+    /// The host said a port we typed isn't open on its code: stop, so nothing
+    /// on this PC listens for it.
+    fn wrong_ports(&mut self) {
+        let list: Vec<String> = self.maps.iter().map(|(_, r)| r.to_string()).collect();
+        self.proc = None;
+        self.relays.clear();
+        self.st = St::Error;
+        self.error = if list.len() == 1 {
+            format!("Port {} isn't open on this code. Check the port number with your friend.", list[0])
+        } else {
+            format!("Not every one of ports {} is open on this code. Check the numbers with your friend.", list.join(", "))
+        };
+        self.log.push("KittyConnect: the host said this code didn't open that port; stopped");
     }
 
     /// Joining, and nothing has answered for a while.
@@ -369,7 +477,9 @@ impl PortJoin {
     }
 
     fn report(&self) -> Report<'_> {
-        Report { peer: self.peer, addr: &self.addr, path: self.link.path(), rtt: self.link.rtt_ms }
+        // The port numbers go along until the host has said they're open.
+        let ports = if self.ports_checked { Vec::new() } else { self.maps.iter().map(|(_, r)| *r).collect() };
+        Report { peer: self.peer, addr: &self.addr, path: self.link.path(), rtt: self.link.rtt_ms, ports }
     }
 }
 
@@ -384,6 +494,7 @@ struct App {
     join_error: String,
     next_key: u64,
     voip: Voip,
+    hub: hub::Hub,
     /// The tab on screen, so a drop lands where the user expects.
     page: String,
     status: (String, &'static str),
@@ -576,6 +687,12 @@ fn main() {
             Event::UserEvent(UserEvent::MountDone(key, r)) => app.on_mount_done(key, r),
             Event::UserEvent(UserEvent::MountList(key, path, r)) => app.on_mount_list(key, path, r),
             Event::UserEvent(UserEvent::MountXfer(key, id, x)) => app.on_mount_xfer(key, id, x),
+            Event::UserEvent(UserEvent::Hub(gen, ev)) => {
+                if let Some((text, kind)) = app.hub.on_event(gen, ev) {
+                    app.set_status(text, kind);
+                }
+                true
+            }
             Event::UserEvent(UserEvent::WebdavLimit(limit)) => {
                 app.webdav_limit = limit;
                 true
@@ -791,7 +908,8 @@ impl App {
             join_error: String::new(),
             next_key: 1,
             voip: Voip::default(),
-            page: "files".into(),
+            hub: hub::Hub::default(),
+            page: "hub".into(),
             status: ("Ready. Everything runs from this folder.".into(), "idle"),
             name: String::new(),
             adverts: Vec::new(),
@@ -823,6 +941,7 @@ impl App {
         self.hosts.clear();
         self.joins.clear();
         self.voip.shutdown();
+        self.hub.leave();
     }
 
     /// Tells the sharer we're leaving, then closes the tunnel.
@@ -831,7 +950,7 @@ impl App {
             return None;
         }
         let proc = self.recv.proc.take()?;
-        let report = Report { peer: self.recv.peer, addr: &self.recv.addr, path: "unknown", rtt: None }.bye();
+        let report = Report { peer: self.recv.peer, addr: &self.recv.addr, path: "unknown", rtt: None, ports: Vec::new() }.bye();
         let port = self.recv.port;
         Some(std::thread::spawn(move || {
             tailcat::say_bye(port, &report);
@@ -846,6 +965,7 @@ impl App {
         }
         self.name = name;
         peers::set_my_name(&self.name);
+        self.hub.rename(&self.name);
         // Everyone we're connected to hears the new name now.
         let now = Instant::now();
         if self.recv.link.ok_once && !self.recv.link.pinging {
@@ -1133,6 +1253,46 @@ impl App {
             }
             "page" => self.page = s("page"),
 
+            // --------------------------------------------------------- hub
+            "hub.host" => {
+                self.hub.host(&self.name, &self.proxy);
+                if self.hub.error.is_empty() {
+                    self.set_status("Opening your hub…", "busy");
+                }
+            }
+            "hub.join" => {
+                self.hub.join(&s("code"), &self.name, &self.proxy);
+                if self.hub.error.is_empty() {
+                    self.set_status("Joining the hub through TailCat…", "busy");
+                }
+            }
+            "hub.leave" => {
+                let closing = self.hub.is_host();
+                self.hub.leave();
+                self.set_status(if closing { "Closed your hub. Its code no longer works." } else { "Left the hub" }, "idle");
+            }
+            "hub.invite" => {
+                let to: Vec<u64> = msg["to"].as_array().map(|a| a.iter().filter_map(Value::as_u64).collect()).unwrap_or_default();
+                let what = s("what");
+                let found = self.invitables().into_iter().find(|i| i.what == what);
+                let result = match found {
+                    Some(i) => self.hub.invite(&i.code, &i.title, to),
+                    None => Err("That isn't open any more.".into()),
+                };
+                if let Err(e) = result {
+                    self.set_status(e, "bad");
+                }
+            }
+            "hub.accept" => {
+                if let Some(a) = self.hub.accept(msg["id"].as_u64().unwrap_or(0)) {
+                    let (page, view) = self.join_invite(&a);
+                    send(webview, json!({ "type": "goto", "page": page, "view": view }));
+                }
+            }
+            "hub.dismiss" => self.hub.dismiss(msg["id"].as_u64().unwrap_or(0)),
+            "hub.kick" => self.hub.kick(msg["id"].as_u64().unwrap_or(0)),
+            "conn.drop" => self.drop_connection(&s("id")),
+
             // ------------------------------------------------------- misc
             "copy" => {
                 let ok = arboard::Clipboard::new().and_then(|mut c| c.set_text(s("text"))).is_ok();
@@ -1224,6 +1384,7 @@ impl App {
             }
             Ok(c) if c.kind == Kind::Mount => return self.fail_recv("That's a mount code. Paste it in the Mounts tab.".into()),
             Ok(c) if c.kind == Kind::Voip => return self.fail_recv("That's a room code. Paste it in the VOIP tab.".into()),
+            Ok(c) if c.kind == Kind::Hub => return self.fail_recv(HUB_CODE_HERE.into()),
             Ok(_) => return self.fail_recv("That's a port code. Paste it in the Port Forward tab, or ask for the file code (it starts with kitty:file:).".into()),
             Err(e) => return self.fail_recv(e),
         };
@@ -1358,6 +1519,7 @@ impl App {
                 return self.join_error = "That's a file share code. Paste it in the File Share tab.".into()
             }
             Ok(c) if c.kind == Kind::Voip => return self.join_error = "That's a room code. Paste it in the VOIP tab.".into(),
+            Ok(c) if c.kind == Kind::Hub => return self.join_error = HUB_CODE_HERE.into(),
             Ok(c) if from != JoinFrom::Mount && c.kind == Kind::Mount => {
                 return self.join_error = "That's a mount code. Paste it in the Mounts tab.".into()
             }
@@ -1384,15 +1546,25 @@ impl App {
                 Err(e) => return self.join_error = e,
             }
         };
+        if remotes.len() > peers::MAX_CHECKED {
+            return self.join_error = format!("That's more than {} ports. Join them in smaller sets.", peers::MAX_CHECKED);
+        }
+        // A port this PC opens above: joining it here too (your own code, to
+        // test it) would have TailCat's far end hand each connection straight
+        // back to its near end, round and round.
+        let hosted = |p: u16| self.hosts.iter().any(|h| h.proc.is_some() && h.ports.contains(&p));
         let mut maps = Vec::new();
         for (i, remote) in remotes.iter().enumerate() {
             let mut local = locals.get(i).copied().filter(|p| *p > 0).unwrap_or(*remote);
             if maps.iter().any(|(l, _)| *l == local) {
                 return self.join_error = format!("Local port {local} is used twice. Give each one its own number.");
             }
+            if !game_mode && hosted(local) {
+                return self.join_error = format!("You opened port {local} above. Pick another local port for {remote}.");
+            }
             // A game join picks another port itself (Minecraft finds it through
             // LAN anyway); a mount always does, as nobody types its address.
-            if from == JoinFrom::Mount || (game_mode && !port_free(local, lan)) {
+            if from == JoinFrom::Mount || (game_mode && (!port_free(local, lan) || hosted(local))) {
                 local = match free_port() {
                     Ok(p) => p,
                     Err(e) => return self.join_error = e,
@@ -1404,12 +1576,29 @@ impl App {
             }
             maps.push((local, *remote));
         }
-        let mut args: Vec<String> = vec!["forward".into()];
-        if lan {
-            args.push("--bind=0.0.0.0".into());
+        // TailCat always listens on 127.0.0.1 only. Shared on the network,
+        // each picked port gets KittyConnect's own relay on every address,
+        // passing to TailCat on a private port: TailCat's --bind would put
+        // every port it listens on there, the beacon's too.
+        let mut relays = Vec::new();
+        let mut tc_maps = Vec::new();
+        for (local, remote) in &maps {
+            if !lan {
+                tc_maps.push((*local, *remote));
+                continue;
+            }
+            let near = match free_port() {
+                Ok(p) => p,
+                Err(e) => return self.join_error = e,
+            };
+            match loopback::LanRelay::start(*local, near) {
+                Ok(r) => relays.push(r),
+                Err(e) => return self.join_error = format!("Couldn't share port {local} on your network: {e}"),
+            }
+            tc_maps.push((near, *remote));
         }
-        args.push(c.addr.clone());
-        args.extend(maps.iter().map(|(l, r)| format!("{l}:{r}")));
+        let mut args: Vec<String> = vec!["forward".into(), c.addr.clone()];
+        args.extend(tc_maps.iter().map(|(l, r)| format!("{l}:{r}")));
         // A private local port to the host's beacon, for the 30-second check.
         let beacon = (!remotes.contains(&beacon::PORT)).then(free_port).and_then(Result::ok);
         if let Some(b) = beacon {
@@ -1430,6 +1619,7 @@ impl App {
                     started: Instant::now(),
                     beacon,
                     told_unreachable: false,
+                    ports_checked: false,
                     link,
                     args,
                     peer: peers::new_id(),
@@ -1440,6 +1630,7 @@ impl App {
                     lan_next: Instant::now() + Duration::from_secs(3),
                     lan_asking: false,
                     mount: (from == JoinFrom::Mount).then(MountJoin::default),
+                    relays,
                     log: Log::default(),
                 });
                 self.set_status("Reaching your friend through TailCat…", "busy");
@@ -1491,6 +1682,8 @@ impl App {
                                 let who = if self.name.is_empty() { "Your friend".to_string() } else { self.name.clone() };
                                 lan::serve(&addr, &h.ports, &format!("{who}'s Minecraft server"));
                             }
+                            // Joiners can now ask whether the port they typed is one of these.
+                            peers::serve(&addr, &h.ports);
                             h.addr = Some(addr);
                             h.st = St::Live;
                             self.status = ("Port is open. Send the code and port number to your friend.".into(), "ok");
@@ -1520,12 +1713,14 @@ impl App {
                     TcEvent::Exited => {
                         let why = last_words(&j.log);
                         j.proc = None;
+                        j.relays.clear();
                         j.st = St::Error;
                         j.error = format!("TailCat stopped. {why}");
                     }
                 }
             }
             Role::VoipHost | Role::VoipJoin => return self.voip.on_tailcat(role, id, ev),
+            Role::HubHost | Role::HubJoin => return self.hub.on_tailcat(role, id, ev),
             _ => return false,
         }
         true
@@ -1647,7 +1842,13 @@ impl App {
         }
         if self.recv.st == St::Live && self.recv.link.ok_once && self.recv.link.ping_due(now) {
             self.recv.link.ping_started();
-            let r = Report { peer: self.recv.peer, addr: &self.recv.addr, path: self.recv.link.path(), rtt: self.recv.link.rtt_ms };
+            let r = Report {
+                peer: self.recv.peer,
+                addr: &self.recv.addr,
+                path: self.recv.link.path(),
+                rtt: self.recv.link.rtt_ms,
+                ports: Vec::new(),
+            };
             self.spawn_ping(PingTarget::Recv(self.recv.port), self.recv.port, r.ping());
         }
         let due: Vec<(u64, u16, String)> = self
@@ -1666,6 +1867,7 @@ impl App {
         changed |= self.games_tick(now);
         self.mounts_tick(now);
         changed |= self.voip.tick();
+        changed |= self.hub.tick();
         changed
     }
 
@@ -1822,6 +2024,7 @@ impl App {
     fn on_ping(&mut self, target: PingTarget, result: Result<tailcat::Pong, String>) -> bool {
         let name = result.as_ref().ok().and_then(|p| p.name.clone());
         let retry = result.as_ref().is_ok_and(|p| p.retry);
+        let ports = result.as_ref().ok().map(|p| p.ports);
         let result = result.map(|p| p.rtt);
         match target {
             PingTarget::Recv(port) => {
@@ -1846,13 +2049,14 @@ impl App {
                 if name.is_some() {
                     j.host_name = name;
                 }
-                if j.link.ping_result(result) {
-                    j.proc = None;
-                    j.st = St::Error;
-                    j.error = "Your friend closed this port or went offline.".into();
-                    self.status = ("A joined port was disconnected by the other side.".into(), "bad");
-                } else if j.promote() {
-                    self.status = ("Connected to your friend. Use the address shown.".into(), "ok");
+                match j.checked(result, ports.flatten()) {
+                    Checked::WrongPorts => {
+                        self.status = (j.error.clone(), "bad");
+                        return true;
+                    }
+                    Checked::Gone => self.status = ("A joined port was disconnected by the other side.".into(), "bad"),
+                    Checked::Connected => self.status = ("Connected to your friend. Use the address shown.".into(), "ok"),
+                    Checked::Nothing => {}
                 }
                 if retry && j.proc.is_some() && j.link.path() == "relay" {
                     j.log.push("KittyConnect: the host asked to retry a direct connection");
@@ -1892,15 +2096,209 @@ impl App {
                 j.proc = Some(p);
                 j.st = St::Starting;
                 j.started = Instant::now();
+                j.ports_checked = false;
                 j.link.restarted();
                 j.log.push("KittyConnect: reconnecting to try for a direct connection");
                 self.status = ("Reconnecting to try for a direct connection…".into(), "busy");
             }
             Err(e) => {
+                j.relays.clear();
                 j.st = St::Error;
                 j.error = e;
             }
         }
+    }
+
+    // ---------------------------------------------------------------- hub
+
+    /// Everything open on this PC that has a code, which the hub can invite
+    /// people to: the room we're in, our file share, and what we host in
+    /// Port Forward and Mounts. The codes are made here; the page only says
+    /// which one.
+    fn invitables(&self) -> Vec<Invitable> {
+        let mut out = Vec::new();
+        if let Some((code, title)) = self.voip.invite_code() {
+            out.push(Invitable { what: "voip".into(), kind: "voip", title, code });
+        }
+        if let (St::Live, Some(addr), Some(srv)) = (self.share.st, &self.share.addr, &self.share.server) {
+            let n = self.share.lib.lock().unwrap().len();
+            out.push(Invitable {
+                what: "share".into(),
+                kind: "file",
+                title: format!("{n} file{}", plural(n)),
+                code: code::file(srv.port, addr),
+            });
+        }
+        for h in self.hosts.iter().filter(|h| h.st == St::Live && h.proc.is_some()) {
+            let Some(addr) = &h.addr else { continue };
+            let (kind, title, code) = match (&h.game, &h.mount) {
+                (Some(g), _) => ("game", format!("{} · port {}", game_name(g), h.ports[0]), code::game(g, h.ports[0], addr)),
+                (_, Some(m)) => (
+                    "mount",
+                    m.dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "Shared folder".into()),
+                    code::mount(h.ports[0], addr),
+                ),
+                // An invite goes only to the people picked, inside the hub's
+                // tunnel, so it carries the port numbers: they join with one press.
+                _ => ("port", ports_title(&h.ports), format!("kitty:port:{}:{addr}", join_ports(&h.ports, ","))),
+            };
+            out.push(Invitable { what: format!("host:{}", h.key), kind, title, code });
+        }
+        out
+    }
+
+    /// Joins what an invite is to, the same way pasting its code in that tab
+    /// would. Returns the tab (and Port Forward view) to show, where any error lands.
+    fn join_invite(&mut self, a: &hub::Accepted) -> (&'static str, &'static str) {
+        match a.kind {
+            "voip" => {
+                if self.voip.is_on() {
+                    self.voip.leave();
+                }
+                self.voip.join(&a.code, &self.name, &self.proxy);
+                self.set_status("Joining the room through TailCat…", "busy");
+                ("voip", "")
+            }
+            "file" => {
+                self.recv_bye();
+                self.start_recv(&a.code);
+                ("files", "")
+            }
+            "mount" => {
+                self.start_port_join(&a.code, "", &[], false, JoinFrom::Mount);
+                self.mount_join_error = std::mem::take(&mut self.join_error);
+                ("mounts", "")
+            }
+            "game" => {
+                self.start_port_join(&a.code, "", &[], false, JoinFrom::Game);
+                ("ports", "games")
+            }
+            _ => {
+                self.start_port_join(&a.code, "", &[], false, JoinFrom::Manual);
+                ("ports", "manual")
+            }
+        }
+    }
+
+    /// The Drop button on a row of the Connections list: the same as that
+    /// tab's own Stop, Disconnect or Leave (or, for one person in our room or
+    /// hub, Remove).
+    fn drop_connection(&mut self, id: &str) {
+        let (what, n) = id.split_once(':').unwrap_or((id, ""));
+        let n: u64 = n.parse().unwrap_or(0);
+        match what {
+            "hub" => {
+                let closing = self.hub.is_host();
+                self.hub.leave();
+                self.set_status(if closing { "Closed your hub. Its code no longer works." } else { "Left the hub" }, "idle");
+            }
+            "hub-member" => self.hub.kick(n),
+            "share" => {
+                self.stop_share();
+                self.set_status("Stopped sharing. The old code no longer works.", "idle");
+            }
+            "recv" => {
+                self.recv_bye();
+                self.stop_recv();
+                self.set_status("Disconnected", "idle");
+            }
+            "host" => {
+                self.hosts.retain(|h| h.key != n);
+                self.set_status("Closed. Its code no longer works.", "idle");
+            }
+            "join" => {
+                if let Some(j) = self.joins.iter_mut().find(|j| j.key == n) {
+                    join_bye(j);
+                }
+                self.joins.retain(|j| j.key != n);
+                self.set_status("Disconnected", "idle");
+            }
+            "voip" => {
+                self.voip.leave();
+                self.set_status("Left the room", "idle");
+            }
+            "voip-member" => self.voip.moderate("kick", n.min(u16::MAX as u64) as u16),
+            _ => {}
+        }
+    }
+
+    /// Every connection open anywhere in the app, for the Hub tab: what it
+    /// is, who's on it, and how each is connected (direct or relay). Every
+    /// one goes through a TailCat tunnel: the official TailCat, or for voice
+    /// rooms the VOIP helper (TailCat's own library, for UDP).
+    fn connections(&self) -> Value {
+        let mut rows = Vec::new();
+        let person = |m: &Value, drop: Option<String>| json!({ "name": m["name"], "path": m["path"], "rtt": m["rtt"], "drop": drop });
+        if self.hub.is_on() {
+            let host = self.hub.is_host();
+            let people: Vec<Value> = self
+                .hub
+                .others()
+                .into_iter()
+                .map(|m| person(m, (host && m["host"] != true).then(|| format!("hub-member:{}", m["id"].as_u64().unwrap_or(0)))))
+                .collect();
+            rows.push(json!({
+                "id": "hub", "section": "Hub", "title": self.hub.title(), "role": if host { "Hosting" } else { "Joined" },
+                "link": (!host).then(|| self.hub.link.json()), "people": people, "via": "official",
+                "dropLabel": if host { "Close" } else { "Leave" },
+            }));
+        }
+        if self.share.st != St::Off {
+            let people: Vec<Value> = self.share.peers.json().as_array().cloned().unwrap_or_default().iter().map(|p| person(p, None)).collect();
+            rows.push(json!({
+                "id": "share", "section": "File Share", "title": "Sharing files", "role": "Hosting",
+                "link": Value::Null, "people": people, "via": "official", "dropLabel": "Stop",
+            }));
+        }
+        if self.recv.st != St::Off {
+            rows.push(json!({
+                "id": "recv", "section": "File Share", "title": "Receiving files", "role": "Joined",
+                "host": self.recv.host_name, "link": self.recv.link.json(), "people": [], "via": "official", "dropLabel": "Disconnect",
+            }));
+        }
+        for h in &self.hosts {
+            let (section, title) = match (&h.game, &h.mount) {
+                (Some(g), _) => ("Game servers", format!("{} · port {}", game_name(g), h.ports[0])),
+                (_, Some(m)) => ("Mounts", m.dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()),
+                _ => ("Port Forward", ports_title(&h.ports)),
+            };
+            let people: Vec<Value> = h.peers.json().as_array().cloned().unwrap_or_default().iter().map(|p| person(p, None)).collect();
+            rows.push(json!({
+                "id": format!("host:{}", h.key), "section": section, "title": title, "role": "Hosting",
+                "link": Value::Null, "people": people, "via": "official", "dropLabel": "Stop",
+            }));
+        }
+        for j in &self.joins {
+            let remotes: Vec<u16> = j.maps.iter().map(|(_, r)| *r).collect();
+            let (section, title) = match (&j.game, &j.mount) {
+                (Some(g), _) => ("Game servers", game_name(g).to_string()),
+                (_, Some(m)) => ("Mounts", m.info.as_ref().map(|i| i.title.clone()).unwrap_or_else(|| "Shared folder".into())),
+                _ => ("Port Forward", ports_title(&remotes)),
+            };
+            rows.push(json!({
+                "id": format!("join:{}", j.key), "section": section, "title": title, "role": "Joined",
+                "host": j.host_name, "link": (j.st == St::Live).then(|| j.link.json()), "people": [], "via": "official",
+                "dropLabel": "Disconnect",
+            }));
+        }
+        if let Some(v) = self.voip.connection() {
+            let host = self.voip.is_hosting();
+            let me = v["me"].as_u64();
+            let people: Vec<Value> = v["members"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .iter()
+                .filter(|m| m["id"].as_u64() != me)
+                .map(|m| person(m, (host && m["host"] != true).then(|| format!("voip-member:{}", m["id"].as_u64().unwrap_or(0)))))
+                .collect();
+            let room = v["room"].as_str().filter(|r| !r.is_empty()).unwrap_or("Voice room");
+            rows.push(json!({
+                "id": "voip", "section": "VOIP", "title": room, "role": if host { "Hosting" } else { "Joined" },
+                "link": (!host).then(|| v["link"].clone()), "people": people, "via": "voip", "dropLabel": "Leave",
+            }));
+        }
+        json!(rows)
     }
 
     // ------------------------------------------------------------- mounts
@@ -2282,6 +2680,9 @@ impl App {
                 "log": self.recv.log.json(),
             },
             "voip": self.voip.json(),
+            "hub": self.hub.json(),
+            "invitables": self.invitables().iter().map(|i| json!({ "what": i.what, "kind": i.kind, "title": i.title })).collect::<Vec<_>>(),
+            "connections": self.connections(),
             "hostError": self.host_error,
             "joinError": self.join_error,
             "mounts": {
@@ -2427,6 +2828,7 @@ mod tests {
             beacon,
             link: Link::default(),
             told_unreachable: false,
+            ports_checked: false,
             args: Vec::new(),
             peer: 1,
             addr: String::new(),
@@ -2436,26 +2838,61 @@ mod tests {
             lan_next: now,
             lan_asking: false,
             mount: None,
+            relays: Vec::new(),
             log: Log::default(),
         }
     }
 
+    const PONG: Result<Duration, String> = Ok(Duration::from_millis(20));
+
     /// TailCat listening on this PC proves nothing (a wrong code does that
-    /// too): "Connected" waits for the host to answer, or for a path to it.
+    /// too), and nor does a tunnel to the host, even a direct one (a wrong
+    /// port number does that): "Connected" waits for the host to answer and
+    /// say the port is open on its code.
     #[test]
-    fn a_joined_port_is_connected_only_once_the_host_answers() {
+    fn a_joined_port_is_connected_only_once_the_host_says_the_port_is_open() {
         let mut j = joining(Duration::from_secs(10), Some(40000));
         assert!(!j.promote() && !j.unreachable());
         assert_eq!(j.st, St::Starting);
-        j.link.ping_result(Err("no answer".into()));
-        assert!(!j.promote());
-        j.link.ping_result(Ok(Duration::from_millis(20)));
-        assert!(j.promote());
+        assert_eq!(j.checked(Err("no answer".into()), None), Checked::Nothing);
+        assert_eq!(j.checked(PONG, Some(PortCheck::Open)), Checked::Connected);
         assert_eq!(j.st, St::Live);
+        // The check passed: later checks don't send the ports again.
+        assert!(j.report().ports.is_empty());
 
         let mut j = joining(Duration::from_secs(1), Some(40000));
+        assert_eq!(j.report().ports, vec![12345]);
         j.link.observe("2026/11/12 01:02:03 magicsock: disco: node [a] d:1 now using 10.0.0.5:41641 mtu=1360");
-        assert!(j.promote(), "TailCat found a path to the host");
+        assert!(!j.promote(), "a direct path proves the code, not the port");
+        assert_eq!(j.link.path(), "direct");
+        // An older host answers without a port check: as before, the answer is enough.
+        assert_eq!(j.checked(PONG, None), Checked::Connected);
+    }
+
+    /// The 25566 case: the code is right, the port isn't. It stops with an
+    /// error instead of showing "Connected · Direct", and the tunnel closes,
+    /// so nothing on this PC is left listening on that port.
+    #[test]
+    fn a_port_the_host_did_not_open_stops_the_join() {
+        let mut j = joining(Duration::from_secs(5), Some(40000));
+        j.maps = vec![(25566, 25566)];
+        // Shared on the network too.
+        let near = free_port().unwrap();
+        let shared = TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0)).unwrap().local_addr().unwrap().port();
+        j.relays.push(loopback::LanRelay::start(shared, near).unwrap());
+        j.link.observe("2026/11/12 01:02:03 magicsock: disco: node [a] d:1 now using 10.0.0.5:41641 mtu=1360");
+        assert_eq!(j.checked(PONG, Some(PortCheck::Wrong)), Checked::WrongPorts);
+        assert_eq!(j.st, St::Error);
+        assert!(j.proc.is_none(), "the tunnel (and its listener on 25566) is closed");
+        assert!(j.relays.is_empty(), "and nothing is left shared on the network");
+        assert!(j.error.contains("25566"), "{}", j.error);
+        assert!(!j.promote());
+
+        // Asked too often just now: still waiting, not connected.
+        let mut j = joining(Duration::from_secs(5), Some(40000));
+        assert_eq!(j.checked(PONG, Some(PortCheck::Busy)), Checked::Nothing);
+        assert_eq!(j.st, St::Starting);
+        assert_eq!(j.checked(PONG, Some(PortCheck::Open)), Checked::Connected);
     }
 
     /// Nothing answers for 30 seconds: it says so, and keeps trying.
@@ -2464,12 +2901,11 @@ mod tests {
         let j = joining(Duration::from_secs(29), Some(40000));
         assert!(!j.unreachable());
         let mut j = joining(UNREACHED + Duration::from_secs(1), Some(40000));
-        j.link.ping_result(Err("no answer".into()));
-        assert!(!j.promote());
+        assert_eq!(j.checked(Err("no answer".into()), None), Checked::Nothing);
         assert!(j.unreachable());
         // They come online after all.
-        j.link.ping_result(Ok(Duration::from_millis(20)));
-        assert!(j.promote() && !j.unreachable());
+        assert_eq!(j.checked(PONG, Some(PortCheck::Open)), Checked::Connected);
+        assert!(!j.unreachable());
     }
 
     /// Only joining waits: with no beacon to ask (the friend's own port is

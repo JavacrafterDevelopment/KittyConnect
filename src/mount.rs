@@ -283,9 +283,12 @@ impl MountServer {
             return Err(format!("{} isn't a folder.", dir.display()));
         }
         let name = url_name(&root);
-        let listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).map_err(|e| format!("Couldn't start the mount's server: {e}"))?;
-        let port = listener.local_addr().map_err(|e| e.to_string())?.port();
-        listener.set_nonblocking(true).map_err(|e| e.to_string())?;
+        let (v4, v6) = crate::loopback::listen().map_err(|e| format!("Couldn't start the mount's server: {e}"))?;
+        let port = v4.local_addr().map_err(|e| e.to_string())?.port();
+        let listeners: Vec<std::net::TcpListener> = std::iter::once(v4).chain(v6).collect();
+        for l in &listeners {
+            l.set_nonblocking(true).map_err(|e| e.to_string())?;
+        }
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .thread_name("kc-mount")
@@ -307,22 +310,27 @@ impl MountServer {
         let title: String = root.file_name().map(|n| n.to_string_lossy().chars().filter(|c| !c.is_control()).take(80).collect()).unwrap_or_default();
         let api = Arc::new(Api { root, name: name.clone(), title, write });
 
-        rt.spawn(async move {
-            let Ok(listener) = tokio::net::TcpListener::from_std(listener) else { return };
-            loop {
-                let Ok((stream, _)) = listener.accept().await else { continue };
-                let (dav, api) = (dav.clone(), api.clone());
-                tokio::spawn(async move {
-                    let service = hyper::service::service_fn(move |req| {
-                        let (dav, api) = (dav.clone(), api.clone());
-                        async move { Ok::<_, Infallible>(route(&dav, &api, req).await) }
+        for listener in listeners {
+            let (dav, api) = (dav.clone(), api.clone());
+            // from_std needs the runtime it will run on.
+            let _guard = rt.enter();
+            let Ok(listener) = tokio::net::TcpListener::from_std(listener) else { continue };
+            rt.spawn(async move {
+                loop {
+                    let Ok((stream, _)) = listener.accept().await else { continue };
+                    let (dav, api) = (dav.clone(), api.clone());
+                    tokio::spawn(async move {
+                        let service = hyper::service::service_fn(move |req| {
+                            let (dav, api) = (dav.clone(), api.clone());
+                            async move { Ok::<_, Infallible>(route(&dav, &api, req).await) }
+                        });
+                        let _ = hyper::server::conn::http1::Builder::new()
+                            .serve_connection(hyper_util::rt::TokioIo::new(stream), service)
+                            .await;
                     });
-                    let _ = hyper::server::conn::http1::Builder::new()
-                        .serve_connection(hyper_util::rt::TokioIo::new(stream), service)
-                        .await;
-                });
-            }
-        });
+                }
+            });
+        }
         Ok(MountServer { port, name, rt: Some(rt) })
     }
 }

@@ -171,16 +171,9 @@ fn now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
+/// The host's proof and each member's voice key: from the OS's secure random source.
 fn token() -> String {
-    use std::hash::{BuildHasher, Hasher};
-    let mut out = String::new();
-    for i in 0..4u64 {
-        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
-        h.write_u64(i);
-        h.write_u128(SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0));
-        out.push_str(&format!("{:016x}", h.finish()));
-    }
-    out
+    crate::peers::secret()
 }
 
 /// Printable, trimmed, length-capped text from a member.
@@ -596,7 +589,7 @@ fn serve_member(stream: TcpStream, room: &Arc<Mutex<Room>>, host_token: &str) {
         }
         let id = r.next_id;
         r.next_id = r.next_id.wrapping_add(1).max(1);
-        let host = hello["host"].as_str() == Some(host_token);
+        let host = hello["host"].as_str().is_some_and(|t| crate::hub::same_secret(t, host_token));
         let key = token();
         r.members.push(Member {
             id,

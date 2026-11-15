@@ -263,6 +263,7 @@ impl Voip {
             Ok(c) if c.kind == Kind::Voip => c,
             Ok(c) if c.kind == Kind::File => return self.error = "That's a file share code. Paste it in the File Share tab.".into(),
             Ok(c) if c.kind == Kind::Mount => return self.error = "That's a mount code. Paste it in the Mounts tab.".into(),
+            Ok(c) if c.kind == Kind::Hub => return self.error = "That's a hub code. Paste it in the Hub tab.".into(),
             Ok(_) => return self.error = "That's a port code. Ask for the room code (it starts with kitty:voip:).".into(),
             Err(e) => return self.error = e,
         };
@@ -283,6 +284,44 @@ impl Voip {
         self.mode = Mode::Joined;
         self.st = "starting";
         self.media = "connecting";
+    }
+
+    /// The room's code and name while we're in it, to invite people from the Hub.
+    pub fn invite_code(&self) -> Option<(String, String)> {
+        let code = self.code.clone().filter(|_| self.is_live())?;
+        let title = if self.room.is_empty() { "Voice room".to_string() } else { self.room.clone() };
+        Some((code, title))
+    }
+
+    pub fn is_on(&self) -> bool {
+        self.mode_name() != "off"
+    }
+
+    pub fn is_hosting(&self) -> bool {
+        matches!(self.mode, Mode::Hosting)
+    }
+
+    fn mode_name(&self) -> &'static str {
+        match self.mode {
+            Mode::Off => "off",
+            Mode::Hosting => "host",
+            Mode::Joined => "join",
+        }
+    }
+
+    /// For the Connections list: the room, everyone in it, and how we reach it.
+    pub fn connection(&self) -> Option<Value> {
+        if !self.is_on() {
+            return None;
+        }
+        Some(json!({
+            "st": self.st,
+            "mode": self.mode_name(),
+            "room": self.room,
+            "me": self.me,
+            "members": self.members,
+            "link": self.link.json(),
+        }))
     }
 
     pub fn leave(&mut self) {
@@ -771,7 +810,7 @@ impl Voip {
     pub fn json(&self) -> Value {
         json!({
             "st": self.st,
-            "mode": match self.mode { Mode::Off => "off", Mode::Hosting => "host", Mode::Joined => "join" },
+            "mode": self.mode_name(),
             "error": self.error,
             "notice": self.notice,
             "room": self.room,
