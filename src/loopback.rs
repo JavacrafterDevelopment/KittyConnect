@@ -72,6 +72,20 @@ impl Drop for LanRelay {
     }
 }
 
+/// For tests: a relay on some free port, and that port. Picking a port and
+/// then listening on it can race other tests doing the same at once, so it
+/// tries again.
+#[cfg(test)]
+pub fn lan_relay_anywhere(to: u16) -> (LanRelay, u16) {
+    for _ in 0..50 {
+        let port = TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0)).unwrap().local_addr().unwrap().port();
+        if let Ok(r) = LanRelay::start(port, to) {
+            return (r, port);
+        }
+    }
+    panic!("no free port for a relay");
+}
+
 /// Copies both ways until either side is done.
 fn pipe(a: std::net::TcpStream, b: std::net::TcpStream) {
     use std::net::Shutdown;
@@ -99,8 +113,7 @@ mod tests {
     fn a_lan_relay_passes_both_ways_and_closes() {
         let far = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
         let to = far.local_addr().unwrap().port();
-        let port = TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0)).unwrap().local_addr().unwrap().port();
-        let relay = LanRelay::start(port, to).unwrap();
+        let (relay, port) = lan_relay_anywhere(to);
         let mut c = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
         c.write_all(b"ping").unwrap();
         let (mut s, _) = far.accept().unwrap();
@@ -111,8 +124,12 @@ mod tests {
         c.read_exact(&mut b).unwrap();
         assert_eq!(&b, b"pong");
         drop(relay);
-        std::thread::sleep(std::time::Duration::from_millis(200));
-        assert!(TcpListener::bind((Ipv4Addr::UNSPECIFIED, port)).is_ok(), "the port is free again");
+        // The port is free again (another test could grab it for a moment).
+        let freed = (0..20).any(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            TcpListener::bind((Ipv4Addr::UNSPECIFIED, port)).is_ok()
+        });
+        assert!(freed, "the port is free again");
     }
 
     #[test]

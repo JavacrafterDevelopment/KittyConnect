@@ -2880,9 +2880,7 @@ mod tests {
         let mut j = joining(Duration::from_secs(5), Some(40000));
         j.maps = vec![(25566, 25566)];
         // Shared on the network too.
-        let near = free_port().unwrap();
-        let shared = TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0)).unwrap().local_addr().unwrap().port();
-        j.relays.push(loopback::LanRelay::start(shared, near).unwrap());
+        j.relays.push(loopback::lan_relay_anywhere(free_port().unwrap()).0);
         j.link.observe("2026/11/12 01:02:03 magicsock: disco: node [a] d:1 now using 10.0.0.5:41641 mtu=1360");
         assert_eq!(j.checked(PONG, Some(PortCheck::Wrong)), Checked::WrongPorts);
         assert_eq!(j.st, St::Error);
