@@ -380,6 +380,22 @@ To move to a newer TailCat, change the version and hash in
 `go get github.com/tailscale/tailcat@v<version>` then `go mod tidy` in
 `voip-helper\`. The build refuses to run if the three disagree.
 
+### Encryption check
+
+`tools/encryption-check/run.sh` (Linux, as root) runs two KittyConnects, a
+host and a friend, through real tunnels: the official TailCat for the Hub,
+File Share, Port Forward (and a wrong port) and Mounts, and the VOIP helper
+for a room (chat, an attachment, voice and screen video). It uses the app's
+own code for each (`src/e2e.rs`) and sends random markers through all of it,
+while every packet on the machine is captured. It passes only if no marker
+and no code ever appears in traffic between the TailCat programs or through
+the relay; if every packet there is WireGuard, TailCat's encrypted path
+finding, STUN or TailCat's public-key introduction ("meow"); and if the
+WireGuard payload is indistinguishable from random. It runs once going
+direct and once forced through the relay. The relay is a local one
+(Tailscale's own relay server code) speaking plain HTTP instead of TLS, so
+the capture sees exactly what a relay operator would.
+
 ## Releases and the Launcher
 
 KittyConnect is listed in the Javacrafter Launcher, which installs and updates

@@ -1,0 +1,26 @@
+package main
+
+// TEST BUILD ONLY (not in KittyConnect): serve registers with the relay
+// region given as JSON in KC_TEST_DERP_REGION instead of picking one of
+// Tailscale's, which a sandbox can't reach. The region goes into the
+// address, so forward needs no change. Nothing else differs from the
+// shipped helper: tunnel.go is untouched.
+
+import (
+	"encoding/json"
+	"os"
+
+	"tailscale.com/tailcfg"
+)
+
+func testRegion() *tailcfg.DERPRegion {
+	j := os.Getenv("KC_TEST_DERP_REGION")
+	if j == "" {
+		return nil
+	}
+	var r tailcfg.DERPRegion
+	if err := json.Unmarshal([]byte(j), &r); err != nil {
+		fatal(err)
+	}
+	return &r
+}

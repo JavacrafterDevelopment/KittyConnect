@@ -5,6 +5,9 @@
 
 mod beacon;
 mod code;
+// The end-to-end encryption check (tools/encryption-check/run.sh).
+#[cfg(all(test, target_os = "linux"))]
+mod e2e;
 // Windows Firewall only; on other systems its helpers are used by its tests.
 #[cfg_attr(not(windows), allow(dead_code))]
 mod firewall;

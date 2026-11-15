@@ -148,6 +148,19 @@ impl Drop for Proc {
 
 /// Unpacks an embedded program if this version isn't there yet.
 fn exe_path(bin: Binary) -> Result<PathBuf, String> {
+    // Builds for systems that aren't shipped (Linux, for the end-to-end
+    // encryption check) embed nothing; that check names programs built for
+    // this system. Windows and macOS builds never look at these.
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        let var = match bin {
+            Binary::Official => "KC_TEST_TAILCAT",
+            Binary::Voip => "KC_TEST_KC_VOIP",
+        };
+        if let Some(p) = std::env::var_os(var) {
+            return Ok(PathBuf::from(p));
+        }
+    }
     let bytes = bin.bytes();
     let dir = data_dir().join("bin");
     let exe = dir.join(bin.file_name());

@@ -843,6 +843,10 @@ impl Hub {
                 // Our own hub is live once TailCat has given it a code.
                 let was = self.st;
                 self.reconnecting = false;
+                // The hub answered through the tunnel: it's up, direct or relay.
+                if self.mode == Mode::Joined {
+                    self.link.peer_seen = true;
+                }
                 if self.mode == Mode::Joined || self.code.is_some() {
                     self.st = "live";
                 }
@@ -917,6 +921,13 @@ impl Hub {
 
     pub fn title(&self) -> &str {
         &self.name
+    }
+
+    /// For the end-to-end check: events from two hubs in one process are
+    /// told apart by generation.
+    #[cfg(all(test, target_os = "linux"))]
+    pub fn test_gen_base(&mut self, base: u64) {
+        self.gen = base;
     }
 
     pub fn json(&self) -> Value {
