@@ -547,6 +547,15 @@ fn script(d: &Drive, work: &std::path::Path) -> Result<Value, String> {
         a.host.hub.leave();
         a.friend.hub.leave();
     });
+    // Someone new saved it while the host was away: only the friend's copy knows them.
+    let zed = code::hub(21999, &format!("tc{}", "z".repeat(60)));
+    let (i2, z) = (id.clone(), zed.clone());
+    d.on(move |a| {
+        let s = a.friend.hub.saved.iter_mut().find(|s| s.id == i2).unwrap();
+        s.book.push(hubstore::Entry { name: "Zed".into(), code: z, at: hubstore::now() });
+        let s = s.clone();
+        a.friend.hub.store.store(&s).unwrap();
+    });
     let i2 = id.clone();
     d.on(move |a| {
         let (name, p) = (a.friend.name.clone(), a.friend.proxy.clone());
@@ -582,7 +591,18 @@ fn script(d: &Drive, work: &std::path::Path) -> Result<Value, String> {
     d.wait("the host to join the friend's copy", 60, |a| {
         a.host.hub.json()["st"] == "live" && a.friend.hub.json()["members"].as_array().is_some_and(|m| m.len() == 2)
     })?;
-    results.insert("scan".into(), json!("found the friend's open copy by their name, and joined it"));
+    // The scan caught the host's book up from the friend's copy, and looked at Zed too.
+    let (i2, z) = (id.clone(), zed.clone());
+    let (knows_zed, learned, total) = d.on(move |a| {
+        let s = a.host.hub.saved.iter().find(|s| s.id == i2).unwrap();
+        let j = a.host.hub.json();
+        let sc = j["saved"].as_array().unwrap().iter().find(|x| x["id"] == i2.as_str()).unwrap()["scan"].clone();
+        (s.book.iter().any(|e| e.code == z && e.name == "Zed"), sc["learned"].as_u64().unwrap_or(0), sc["total"].as_u64().unwrap_or(0))
+    });
+    if !knows_zed || learned != 1 || total != 2 {
+        return Err(format!("the scan didn't catch the book up: knows Zed {knows_zed}, learned {learned}, looked at {total}"));
+    }
+    results.insert("scan".into(), json!("found the friend's open copy by their name and joined it; caught the address book up (+Zed) and looked at Zed too"));
 
     // Delete for everyone: both copies go, keys and all.
     let i2 = id.clone();

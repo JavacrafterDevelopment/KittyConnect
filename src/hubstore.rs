@@ -10,6 +10,13 @@
 //! What's shared *in* a hub (rooms, files, ports, folders) still gets new
 //! keys every time.
 //!
+//! The address book is versioned: every entry (someone saved it, or changed
+//! their name) and every deletion carries when it happened, and copies merge
+//! code by code, newest wins. So whatever order people come back in, after
+//! weeks away or not, everyone ends up with the same book: an old copy can't
+//! bring back someone deleted or an old name, and saving again after a
+//! delete brings them back.
+//!
 //! On disk, in the data folder: `hubs/<id>/hub.json` and
 //! `hubs/<id>/key.private.json` (TailCat's own key file). An expired hub is
 //! deleted, key and all.
@@ -35,6 +42,33 @@ pub const MAX_GONE: usize = 128;
 pub struct Entry {
     pub name: String,
     pub code: String,
+    /// When they saved it, or last changed their name (seconds since 1970;
+    /// 0 from KittyConnect 0.12.0, which didn't say).
+    #[serde(default)]
+    pub at: u64,
+}
+
+/// A code deleted from the hub, and when.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Gone {
+    pub code: String,
+    #[serde(default)]
+    pub at: u64,
+}
+
+/// Reads deleted codes saved by 0.12.0 (plain codes) or later (with times).
+fn gone_any<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<Gone>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Any {
+        Code(String),
+        Full(Gone),
+    }
+    let v: Vec<Any> = Vec::deserialize(d)?;
+    Ok(v.into_iter().map(|a| match a {
+        Any::Code(code) => Gone { code, at: 0 },
+        Any::Full(g) => g,
+    }).collect())
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -50,8 +84,11 @@ pub struct Saved {
     pub code: String,
     #[serde(default)]
     pub book: Vec<Entry>,
+    #[serde(default, deserialize_with = "gone_any")]
+    pub gone: Vec<Gone>,
+    /// When the address book last changed (0: not since it was saved).
     #[serde(default)]
-    pub gone: Vec<String>,
+    pub updated: u64,
 }
 
 pub fn now() -> u64 {
@@ -149,51 +186,80 @@ impl Store {
     }
 }
 
-/// An address book entry as it arrives: a hub code (written out clean) and
-/// a name. None if it isn't one.
-pub fn entry(name: &str, code_text: &str) -> Option<Entry> {
-    let c = code::parse(code_text).ok().filter(|c| c.kind == Kind::Hub)?;
+/// An address book entry as it arrives: a hub code (written out clean), a
+/// name and when. None if it isn't one.
+pub fn entry(name: &str, code_text: &str, at: u64) -> Option<Entry> {
     let mut name = crate::hub::clean(name, crate::peers::MAX_NAME);
     if name.is_empty() {
         name = "Someone".into();
     }
-    Some(Entry { name, code: code::canonical(&c)? })
+    Some(Entry { name, code: clean_code(code_text)?, at: when(at) })
 }
 
-/// Adds `incoming` to `book` (newest name wins for a code), leaving out
-/// anything in `gone`, and keeps it within [`MAX_BOOK`]. True if it changed.
-pub fn merge(book: &mut Vec<Entry>, gone: &[String], incoming: &[Entry]) -> bool {
-    let before = book.clone();
-    book.retain(|e| !gone.contains(&e.code));
-    for e in incoming {
-        let Some(e) = entry(&e.name, &e.code) else { continue };
-        if gone.contains(&e.code) {
-            continue;
+/// A hub code written out clean. None if it isn't one.
+pub fn clean_code(code_text: &str) -> Option<String> {
+    let c = code::parse(code_text).ok().filter(|c| c.kind == Kind::Hub)?;
+    code::canonical(&c)
+}
+
+/// A time from someone else's copy: never more than a day ahead of ours, so a
+/// wrong clock can't make its change win for good.
+fn when(at: u64) -> u64 {
+    at.min(now() + 24 * 3600)
+}
+
+/// Merges another copy's book into ours, code by code, newest wins: an entry
+/// (someone saved it, or renamed) against our entry for that code, or
+/// against a deletion. A deletion wins a tie. Keeps the book within
+/// [`MAX_BOOK`] and the deletions within [`MAX_GONE`]. True if anything changed.
+pub fn merge(book: &mut Vec<Entry>, gone: &mut Vec<Gone>, entries: &[Entry], deletes: &[Gone]) -> bool {
+    let (book_before, gone_before) = (book.clone(), gone.clone());
+    for d in deletes {
+        let Some(code) = clean_code(&d.code) else { continue };
+        let at = when(d.at);
+        match gone.iter_mut().find(|g| g.code == code) {
+            Some(g) => g.at = g.at.max(at),
+            None => gone.push(Gone { code: code.clone(), at }),
+        }
+        let at = gone.iter().find(|g| g.code == code).map_or(at, |g| g.at);
+        book.retain(|e| !(e.code == code && e.at <= at));
+    }
+    for e in entries {
+        let Some(e) = entry(&e.name, &e.code, e.at) else { continue };
+        if let Some(g) = gone.iter().find(|g| g.code == e.code) {
+            if g.at >= e.at {
+                continue;
+            }
+            // Saved again after it was deleted.
+            gone.retain(|g| g.code != e.code);
         }
         if let Some(b) = book.iter_mut().find(|b| b.code == e.code) {
-            b.name = e.name;
+            if e.at > b.at {
+                *b = e;
+            }
         } else if book.len() < MAX_BOOK {
             book.push(e);
         }
     }
-    *book != before
+    if gone.len() > MAX_GONE {
+        gone.sort_by_key(|g| std::cmp::Reverse(g.at));
+        gone.truncate(MAX_GONE);
+    }
+    *book != book_before || *gone != gone_before
 }
 
-/// Adds codes to the deleted list (cleaned, within [`MAX_GONE`]). True if it changed.
-pub fn add_gone(gone: &mut Vec<String>, codes: &[String]) -> bool {
-    let mut changed = false;
-    for c in codes {
-        let Some(e) = entry("", c) else { continue };
-        if !gone.contains(&e.code) {
-            gone.push(e.code);
-            changed = true;
-        }
+/// Deleted codes as 0.12.0 reads them (plain codes, no times).
+pub fn gone_codes(gone: &[Gone]) -> Vec<&str> {
+    gone.iter().map(|g| g.code.as_str()).collect()
+}
+
+/// Deleted codes from a message: `goneAt` (with times) if it has it, else
+/// `gone` (0.12.0: plain codes).
+pub fn gone_from(msg: &serde_json::Value) -> Vec<Gone> {
+    if let Some(list) = msg["goneAt"].as_array() {
+        return list.iter().filter_map(|v| serde_json::from_value::<Gone>(v.clone()).ok()).collect();
     }
-    if gone.len() > MAX_GONE {
-        let extra = gone.len() - MAX_GONE;
-        gone.drain(..extra);
-    }
-    changed
+    msg["gone"].as_array().map(|a| a.iter().filter_map(|v| v.as_str()).map(|c| Gone { code: c.to_string(), at: 0 }).collect()).unwrap_or_default()
 }
 
 /// A local port for a new saved hub, kept for its whole life (its code
@@ -235,24 +301,67 @@ mod tests {
         assert!(Store::default().key_path("../x").is_none());
     }
 
+    fn e(name: &str, code: &str, at: u64) -> Entry {
+        Entry { name: name.into(), code: code.into(), at }
+    }
+
+    fn g(code: &str, at: u64) -> Gone {
+        Gone { code: code.into(), at }
+    }
+
     #[test]
     fn the_address_book_merges_and_remembers_deletions() {
         let a = code::hub(21001, A);
         let b = code::hub(21002, B);
-        let mut book = Vec::new();
-        assert!(merge(&mut book, &[], &[Entry { name: "Kit".into(), code: format!("`{a}`") }]));
-        assert_eq!(book, vec![Entry { name: "Kit".into(), code: a.clone() }]);
+        let (mut book, mut gone) = (Vec::new(), Vec::new());
+        assert!(merge(&mut book, &mut gone, &[e("Kit", &format!("`{a}`"), 100)], &[]));
+        assert_eq!(book, vec![e("Kit", &a, 100)]);
         // Not a hub code: left out.
-        assert!(!merge(&mut book, &[], &[Entry { name: "x".into(), code: code::voip(1, A) }]));
-        // A new name for the same code replaces it.
-        assert!(merge(&mut book, &[], &[Entry { name: "Kitty".into(), code: a.clone() }]));
+        assert!(!merge(&mut book, &mut gone, &[e("x", &code::voip(1, A), 100)], &[]));
+        // A newer name for the same code replaces it.
+        assert!(merge(&mut book, &mut gone, &[e("Kitty", &a, 200)], &[]));
         assert_eq!(book.len(), 1);
         // Deleted codes go, and an old copy can't bring them back.
-        let mut gone = Vec::new();
-        assert!(add_gone(&mut gone, &[a.clone()]));
-        assert!(merge(&mut book, &gone, &[Entry { name: "Jo".into(), code: b.clone() }]));
-        assert_eq!(book, vec![Entry { name: "Jo".into(), code: b.clone() }]);
-        assert!(!merge(&mut book, &gone, &[Entry { name: "Kit".into(), code: a }]));
+        assert!(merge(&mut book, &mut gone, &[e("Jo", &b, 300)], &[g(&a, 250)]));
+        assert_eq!(book, vec![e("Jo", &b, 300)]);
+        assert!(!merge(&mut book, &mut gone, &[e("Kitty", &a, 200)], &[]));
+    }
+
+    /// Away for two weeks with an old book: rejoining brings the new people
+    /// in, and the old book changes nothing that's newer.
+    #[test]
+    fn an_old_copy_catches_up_and_cant_undo_anything() {
+        let (kit, jo, sam, zed) = (code::hub(21001, A), code::hub(21002, B), code::hub(21003, A), code::hub(21004, B));
+        // The hub's book now: Jo renamed, Sam joined, Zed joined and later left.
+        let mut hub = vec![e("Kit", &kit, 10), e("Jo (new name)", &jo, 500), e("Sam", &sam, 600)];
+        let mut hub_gone = vec![g(&zed, 700)];
+        // Ours, from two weeks ago: Jo's old name, Zed still in it.
+        let (mut mine, mut mine_gone) = (vec![e("Kit", &kit, 10), e("Jo", &jo, 20), e("Zed", &zed, 30)], vec![]);
+        // We come back: we merge theirs, they merge ours.
+        assert!(merge(&mut mine, &mut mine_gone, &hub, &hub_gone));
+        merge(&mut hub, &mut hub_gone, &mine.clone(), &mine_gone.clone());
+        for b in [&mine, &hub] {
+            let names: Vec<&str> = b.iter().map(|x| x.name.as_str()).collect();
+            assert_eq!(names, ["Kit", "Jo (new name)", "Sam"], "new people in, new name kept, Zed stays out");
+        }
+        // Zed saves it again later: they're back, for everyone.
+        assert!(merge(&mut mine, &mut mine_gone, &[e("Zed", &zed, 800)], &[]));
+        assert!(mine.iter().any(|x| x.code == zed));
+        assert!(mine_gone.is_empty());
+        // A clock far in the future can't win for good.
+        merge(&mut mine, &mut mine_gone, &[e("Sam (from the future)", &sam, u64::MAX)], &[]);
+        assert!(merge(&mut mine, &mut mine_gone, &[], &[g(&sam, now() + 2 * 24 * 3600)]), "a later delete still wins");
+    }
+
+    #[test]
+    fn old_saved_files_still_load() {
+        let old = r#"{"id":"00000000000000000000000000000000","name":"x","expires":1,"port":21000,"code":"c","book":[{"name":"Kit","code":"c"}],"gone":["d"]}"#;
+        let s: Saved = serde_json::from_str(old).unwrap();
+        assert_eq!((s.book[0].at, s.gone[0].clone()), (0, g("d", 0)));
+        let msg = serde_json::json!({ "gone": ["d"] });
+        assert_eq!(gone_from(&msg), vec![g("d", 0)]);
+        let msg = serde_json::json!({ "gone": ["d"], "goneAt": [{ "code": "d", "at": 5 }] });
+        assert_eq!(gone_from(&msg), vec![g("d", 5)]);
     }
 
     #[test]
@@ -266,6 +375,7 @@ mod tests {
             code: code::hub(21001, A),
             book: Vec::new(),
             gone: Vec::new(),
+            updated: 0,
         };
         let key = st.prepare(&s.id).unwrap();
         std::fs::write(&key, "{}").unwrap();

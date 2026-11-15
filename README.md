@@ -53,6 +53,11 @@ each thing.
   any of them can **Open** it, and **Scan** shows who has it open right now,
   by name, to **Join**. Open scans first: if someone already has it open, it
   offers to join them instead of opening a second copy.
+- The address book keeps itself up to date. Away for a couple of weeks while
+  friends added friends? Joining anyone's open copy, or just scanning,
+  brings in everyone added since (and Scan then looks for them too). Each
+  entry and each deletion carries when it happened, and the newest wins, so
+  your old copy can't bring back an old name or someone who was deleted.
 - **Close** turns a saved hub off (it stays saved); **Delete…** deletes it
   just for you (your code leaves everyone's address book) or **for everyone**
   in it right now (anyone in it can; whoever isn't keeps theirs until it
@@ -287,8 +292,12 @@ runtime into a `WebView2\` folder beside the exe.
   local port (the code names it) and the address book, in
   `hubs/<id>/` in the data folder. A friend's copy gets the time left, not a
   date, so a wrong clock can't stretch it. The address book (everyone's code)
-  goes round inside the hub's tunnel; codes deleted from it are remembered so
-  an old copy can't bring them back. **Scan** starts a TailCat to each code
+  goes round inside the hub's tunnel. It's versioned: every entry (saved, or
+  renamed) and every deletion has a time, and copies merge code by code,
+  newest wins, a deletion winning a tie; a time more than a day ahead is
+  taken as a day ahead, so a wrong clock can't win for good. A peek (Scan)
+  carries a saved hub's book too, so scanning catches you up even without
+  joining, and anyone new in it is scanned as well. **Scan** starts a TailCat to each code
   in it for a moment (a few at a time) and asks `{"op":"peek"}`: an open copy
   answers with the hub's id (only the same hub counts), its name and whose
   copy it is. Each scan adds a client to that person's TailCat until their

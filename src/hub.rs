@@ -27,14 +27,15 @@
 //!   ← {"op":"welcome","v":2,"you":3,"hub":"Minecraft Hub","id":"<32 hex>","expiresIn":<secs>|null,"host":false}
 //!     (or {"op":"full"} / {"op":"old"}), then the members, address book and what's open:
 //!   ← {"op":"members","list":[{"id":1,"name":"Kit","host":true,"path":"host"},…]}
-//!   ← {"op":"book","book":[{"name":"Kit","code":"kitty:hub:…"}],"gone":["kitty:hub:…"]}
+//!   ← {"op":"book","book":[{"name":"Kit","code":"kitty:hub:…","at":<secs>}],"gone":["kitty:hub:…"],"goneAt":[{"code":…,"at":…}]}
 //!   ← {"op":"offers","list":[{"from":1,"name":"Kit","oid":"voip","kind":"voip","code":"kitty:voip:…","title":"Hangout"}]}
 //!   → {"op":"path","path":"relay","rtt":80}
 //!   → {"op":"invite","to":[3,4],"code":"kitty:voip:…","title":"Kit's room"}   ([] for everyone)
 //!   ← {"op":"invite","inv":7,"from":1,"name":"Kit","kind":"voip","code":"kitty:voip:…","title":"Kit's room"}
 //!   ← {"op":"invited","n":2}
 //!   → {"op":"address","code":"kitty:hub:…"}       (saved hubs: our own code for it)
-//!   → {"op":"merge","book":[…],"gone":[…]}        (saved hubs: our copy of the book)
+//!   → {"op":"merge","book":[…],"gone":[…],"goneAt":[…]}   (saved hubs: our copy of the book;
+//!                                                    newest wins, code by code)
 //!   → {"op":"forget","code":"kitty:hub:…"}        (we deleted our copy)
 //!   → {"op":"offer","oid":"voip","code":"kitty:voip:…","title":"Hangout"}   ("Open to hub")
 //!   → {"op":"withdraw","oid":"voip"}
@@ -46,7 +47,8 @@
 //!
 //! Scan sends one line instead of a hello, and gets one back:
 //!
-//!   → {"op":"peek","v":2}  ← {"op":"peeked","v":2,"id":…,"hub":…,"host":"Kit","members":3,"expiresIn":…}
+//!   → {"op":"peek","v":2}  ← {"op":"peeked","v":2,"id":…,"hub":…,"host":"Kit","members":3,"expiresIn":…,
+//!                             "book":[…],"gone":[…],"goneAt":[…]}   (a saved hub's book, so a scan catches up)
 
 use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -60,7 +62,7 @@ use serde_json::{json, Value};
 use tao::event_loop::EventLoopProxy;
 
 use crate::code::{self, Kind};
-use crate::hubstore::{self, Entry, Saved, Store};
+use crate::hubstore::{self, Entry, Gone, Saved, Store};
 use crate::tailcat::{self, Link, Proc, Role, TcEvent};
 use crate::{Log, UserEvent};
 
@@ -145,6 +147,8 @@ struct Member {
     out: Sender<Value>,
     stream: TcpStream,
     invites: VecDeque<Instant>,
+    /// Their own code for a saved hub, once they've said (a rename updates it).
+    code: Option<String>,
 }
 
 /// What a hub is, the same in everyone's copy of a saved one.
@@ -172,7 +176,7 @@ struct State {
     next_id: u64,
     next_inv: u64,
     book: Vec<Entry>,
-    gone: Vec<String>,
+    gone: Vec<Gone>,
     offers: Vec<Offer>,
 }
 
@@ -187,8 +191,18 @@ impl State {
         }
     }
 
+    /// The time for a change made here to `code`: now, or just after the
+    /// last change the book has for it, so it always counts as newer (two
+    /// changes in the same second are still in order).
+    fn stamp(&self, code: &str) -> u64 {
+        let last = self.book.iter().filter(|e| e.code == code).map(|e| e.at).chain(self.gone.iter().filter(|g| g.code == code).map(|g| g.at)).max();
+        last.map_or(hubstore::now(), |l| hubstore::now().max(l + 1))
+    }
+
+    /// The book, with deleted codes both ways: plain (what 0.12.0 reads) and
+    /// with their times.
     fn book_msg(&self) -> Value {
-        json!({ "op": "book", "book": self.book, "gone": self.gone })
+        json!({ "op": "book", "book": self.book, "gone": hubstore::gone_codes(&self.gone), "goneAt": self.gone })
     }
 
     fn offers_msg(&self) -> Value {
@@ -337,10 +351,17 @@ fn serve_member(stream: TcpStream, state: &Mutex<State>, stop: &AtomicBool, toke
     if hello["op"] == "peek" {
         let st = state.lock().unwrap();
         let host = st.members.iter().find(|m| m.host).map(|m| m.name.clone()).unwrap_or_default();
-        let reply = json!({
+        let mut reply = json!({
             "op": "peeked", "v": PROTOCOL, "id": st.meta.id, "hub": st.meta.name, "host": host,
             "members": st.members.len(), "expiresIn": st.expires_in(),
         });
+        // A saved hub's book goes with it, so whoever scans catches up.
+        if st.meta.expires.is_some() {
+            let b = st.book_msg();
+            for k in ["book", "gone", "goneAt"] {
+                reply[k] = b[k].clone();
+            }
+        }
         drop(st);
         send_line(&mut writer, &reply);
         return Ok(());
@@ -386,6 +407,7 @@ fn serve_member(stream: TcpStream, state: &Mutex<State>, stop: &AtomicBool, toke
             out: out_tx.clone(),
             stream: stream.try_clone()?,
             invites: VecDeque::new(),
+            code: None,
         });
         let _ = out_tx.send(json!({
             "op": "welcome", "v": PROTOCOL, "you": id, "hub": st.meta.name, "id": st.meta.id,
@@ -431,8 +453,19 @@ fn serve_member(stream: TcpStream, state: &Mutex<State>, stop: &AtomicBool, toke
                 let name = clean(msg["name"].as_str().unwrap_or(""), crate::peers::MAX_NAME);
                 let mut st = state.lock().unwrap();
                 if let Some(m) = st.members.iter_mut().find(|m| m.id == id).filter(|m| !name.is_empty() && m.name != name) {
-                    m.name = name;
+                    m.name = name.clone();
+                    let code = m.code.clone();
                     st.broadcast_members();
+                    // A saved hub's book has their new name, as of now.
+                    if let (Some(code), true) = (code, st.meta.expires.is_some()) {
+                        let st = &mut *st;
+                        let at = st.stamp(&code);
+                        if let Some(e) = hubstore::entry(&name, &code, at) {
+                            if hubstore::merge(&mut st.book, &mut st.gone, &[e], &[]) {
+                                st.broadcast(&st.book_msg());
+                            }
+                        }
+                    }
                 }
             }
             "invite" => {
@@ -447,30 +480,32 @@ fn serve_member(stream: TcpStream, state: &Mutex<State>, stop: &AtomicBool, toke
                 }
                 let st = &mut *st;
                 let changed = match msg["op"].as_str() {
+                    // Their code, as of now (saving again after a delete brings it back).
                     Some("address") => {
                         let name = st.members.iter().find(|m| m.id == id).map(|m| m.name.clone()).unwrap_or_default();
-                        match hubstore::entry(&name, msg["code"].as_str().unwrap_or_default()) {
-                            // Saving again brings a deleted code back.
+                        let code = hubstore::clean_code(msg["code"].as_str().unwrap_or_default()).unwrap_or_default();
+                        let at = st.stamp(&code);
+                        match hubstore::entry(&name, &code, at) {
                             Some(e) => {
-                                st.gone.retain(|g| *g != e.code);
-                                hubstore::merge(&mut st.book, &st.gone, &[e])
+                                if let Some(m) = st.members.iter_mut().find(|m| m.id == id) {
+                                    m.code = Some(e.code.clone());
+                                }
+                                hubstore::merge(&mut st.book, &mut st.gone, &[e], &[])
                             }
                             None => false,
                         }
                     }
+                    // Their copy of the book: newest wins, code by code.
                     Some("merge") => {
-                        let gone: Vec<String> =
-                            msg["gone"].as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()).unwrap_or_default();
                         let book: Vec<Entry> = serde_json::from_value(msg["book"].clone()).unwrap_or_default();
-                        let a = hubstore::add_gone(&mut st.gone, &gone);
-                        let b = hubstore::merge(&mut st.book, &st.gone, &book);
-                        a || b
+                        let gone = hubstore::gone_from(&msg);
+                        hubstore::merge(&mut st.book, &mut st.gone, &book, &gone)
                     }
+                    // They deleted their copy.
                     _ => {
-                        let code = msg["code"].as_str().unwrap_or_default().to_string();
-                        let a = hubstore::add_gone(&mut st.gone, &[code]);
-                        let b = hubstore::merge(&mut st.book, &st.gone, &[]);
-                        a || b
+                        let code = hubstore::clean_code(msg["code"].as_str().unwrap_or_default()).unwrap_or_default();
+                        let at = st.stamp(&code);
+                        hubstore::merge(&mut st.book, &mut st.gone, &[], &[Gone { code, at }])
                     }
                 };
                 if changed {
@@ -586,7 +621,7 @@ pub enum HubEvent {
     /// saved hub), whether we're its host.
     Welcome { you: u64, hub: String, id: String, expires_in: Option<u64>, host: bool },
     /// A saved hub's address book, and the codes deleted from it.
-    Book { book: Vec<Entry>, gone: Vec<String> },
+    Book { book: Vec<Entry>, gone: Vec<Gone> },
     /// What everyone has open in the hub ("Open to hub").
     Offers(Vec<Value>),
     /// Someone deleted the hub for everyone.
@@ -752,18 +787,10 @@ fn session(stream: TcpStream, hello: &Value, rx: &Arc<Mutex<Receiver<Value>>>, s
                 emit(HubEvent::Members(list.into_iter().take(MAX_MEMBERS).collect()));
             }
             "invite" => emit(HubEvent::Invite(msg)),
-            "book" => emit(HubEvent::Book {
-                book: serde_json::from_value::<Vec<Entry>>(msg["book"].clone())
-                    .unwrap_or_default()
-                    .into_iter()
-                    .filter_map(|e| hubstore::entry(&e.name, &e.code))
-                    .take(hubstore::MAX_BOOK)
-                    .collect(),
-                gone: msg["gone"]
-                    .as_array()
-                    .map(|a| a.iter().filter_map(|v| v.as_str()).filter_map(|c| hubstore::entry("", c)).map(|e| e.code).collect())
-                    .unwrap_or_default(),
-            }),
+            "book" => {
+                let (book, gone) = read_book(&msg);
+                emit(HubEvent::Book { book, gone });
+            }
             "offers" => emit(HubEvent::Offers(msg["list"].as_array().cloned().unwrap_or_default())),
             "deleted" => emit(HubEvent::Deleted { by: clean(msg["by"].as_str().unwrap_or("Someone"), crate::peers::MAX_NAME) }),
             "pong" => {
@@ -792,13 +819,32 @@ fn session(stream: TcpStream, hello: &Value, rx: &Arc<Mutex<Receiver<Value>>>, s
     }
 }
 
-/// What a scan found at one code: an open copy of a hub.
+/// A book and its deletions as they arrive, checked: hub codes only, names
+/// cleaned, within the limits.
+fn read_book(msg: &Value) -> (Vec<Entry>, Vec<Gone>) {
+    let book = serde_json::from_value::<Vec<Entry>>(msg["book"].clone())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|e| hubstore::entry(&e.name, &e.code, e.at))
+        .take(hubstore::MAX_BOOK)
+        .collect();
+    let gone = hubstore::gone_from(msg)
+        .into_iter()
+        .filter_map(|g| Some(Gone { code: hubstore::clean_code(&g.code)?, at: g.at }))
+        .take(hubstore::MAX_GONE)
+        .collect();
+    (book, gone)
+}
+
+/// What a scan found at one code: an open copy of a hub, and its book.
 #[derive(Clone, Debug)]
 pub struct Peeked {
     pub id: String,
     pub hub: String,
     pub host: String,
     pub members: u64,
+    pub book: Vec<Entry>,
+    pub gone: Vec<Gone>,
 }
 
 /// Asks whatever answers at 127.0.0.1:`port` (the near end of a tunnel to
@@ -826,7 +872,10 @@ pub fn peek(port: u16, wait: Duration) -> Result<Peeked, String> {
     if v["v"].as_u64() != Some(PROTOCOL) {
         return Err("a different version of KittyConnect".into());
     }
+    let (book, gone) = read_book(&v);
     Ok(Peeked {
+        book,
+        gone,
         id: v["id"].as_str().filter(|i| hubstore::is_id(i)).unwrap_or_default().to_string(),
         hub: clean(v["hub"].as_str().unwrap_or(""), 48),
         host: clean(v["host"].as_str().unwrap_or(""), crate::peers::MAX_NAME),
@@ -866,6 +915,10 @@ struct Scan {
     total: usize,
     checked: usize,
     hits: Vec<Hit>,
+    /// Every code looked at (people an open copy told us about get looked at too).
+    seen: Vec<String>,
+    /// People new to us, from open copies' books.
+    learned: usize,
     /// Started by Open: when it's done, open ours, or ask.
     open_after: bool,
 }
@@ -930,7 +983,7 @@ pub struct Hub {
     /// Which of them this session is (we host it, or joined it and saved it).
     saved_id: Option<String>,
     book: Vec<Entry>,
-    gone: Vec<String>,
+    gone: Vec<Gone>,
     /// What others have open in the hub.
     offers: Vec<Value>,
     /// "Open to hub": everything we open is shown to everyone in it.
@@ -1109,6 +1162,7 @@ impl Hub {
             code: String::new(),
             book: Vec::new(),
             gone: Vec::new(),
+            updated: 0,
         };
         self.make_key(saved, true, proxy, "create");
     }
@@ -1133,6 +1187,7 @@ impl Hub {
             code: String::new(),
             book: self.book.clone(),
             gone: self.gone.clone(),
+            updated: 0,
         };
         self.make_key(saved, false, proxy, "save");
     }
@@ -1169,9 +1224,8 @@ impl Hub {
         };
         saved.code = code::hub(saved.port, &addr);
         let me = clean(my_name, crate::peers::MAX_NAME);
-        let mine = Entry { name: me, code: saved.code.clone() };
-        saved.gone.retain(|g| *g != mine.code);
-        hubstore::merge(&mut saved.book, &saved.gone, &[mine]);
+        let mine = Entry { name: me, code: saved.code.clone(), at: hubstore::now() };
+        hubstore::merge(&mut saved.book, &mut saved.gone, &[mine], &[]);
         if let Err(e) = self.store.store(&saved) {
             self.store.delete(&saved.id);
             self.error = e;
@@ -1238,7 +1292,7 @@ impl Hub {
     fn share_address(&self) {
         let (Some(c), Some(s)) = (&self.conn, self.saved_id.as_ref().and_then(|id| self.saved.iter().find(|s| s.id == *id))) else { return };
         c.send(json!({ "op": "address", "code": s.code }));
-        c.send(json!({ "op": "merge", "book": s.book, "gone": s.gone }));
+        c.send(json!({ "op": "merge", "book": s.book, "gone": hubstore::gone_codes(&s.gone), "goneAt": s.gone }));
     }
 
     /// Looks through a saved hub's address book for whoever has it open now
@@ -1251,38 +1305,36 @@ impl Hub {
             return None;
         }
         self.prompt = None;
-        self.scans.insert(id.to_string(), Scan { total: targets.len(), open_after, ..Scan::default() });
+        let seen = targets.iter().map(|e| e.code.clone()).collect();
+        self.scans.insert(id.to_string(), Scan { total: targets.len(), open_after, seen, ..Scan::default() });
         if targets.is_empty() {
             return open_after.then(|| AfterScan::OpenOwn(id.to_string()));
         }
-        let (proxy, tag, id) = (proxy.clone(), self.tag, id.to_string());
-        std::thread::spawn(move || {
-            for chunk in targets.chunks(SCAN_AT_ONCE) {
-                let looks: Vec<_> = chunk
-                    .iter()
-                    .cloned()
-                    .map(|e| {
-                        let (p, id) = (proxy.clone(), id.clone());
-                        std::thread::spawn(move || {
-                            let r = scan_one(&e, &p);
-                            let _ = p.send_event(UserEvent::HubScan(tag, id, e, r));
-                        })
-                    })
-                    .collect();
-                for l in looks {
-                    let _ = l.join();
-                }
-            }
-        });
+        look(targets, id.to_string(), self.tag, proxy);
         None
     }
 
-    /// One code's answer to a scan.
-    pub fn on_scan(&mut self, id: &str, entry: Entry, result: Result<Peeked, String>) -> Option<AfterScan> {
+    /// One code's answer to a scan. An open copy's book is merged into ours,
+    /// and anyone new in it is looked at too.
+    pub fn on_scan(&mut self, id: &str, entry: Entry, result: Result<Peeked, String>, proxy: &EventLoopProxy<UserEvent>) -> Option<AfterScan> {
+        let found = result.ok().filter(|p| p.id == id);
+        if let Some(p) = &found {
+            let learned = self.learn(id, &p.book, &p.gone).unwrap_or(0);
+            let mine = self.saved.iter().find(|s| s.id == id).map(|s| s.code.clone()).unwrap_or_default();
+            let book: Vec<Entry> = self.saved.iter().find(|s| s.id == id).map(|s| s.book.clone()).unwrap_or_default();
+            let sc = self.scans.get_mut(id)?;
+            sc.learned += learned;
+            let more: Vec<Entry> = book.into_iter().filter(|e| e.code != mine && !sc.seen.contains(&e.code)).collect();
+            if !more.is_empty() {
+                sc.seen.extend(more.iter().map(|e| e.code.clone()));
+                sc.total += more.len();
+                look(more, id.to_string(), self.tag, proxy);
+            }
+        }
         let sc = self.scans.get_mut(id)?;
         sc.checked += 1;
         // Only a copy of this same hub counts.
-        if let Some(p) = result.ok().filter(|p| p.id == id) {
+        if let Some(p) = found {
             let host = if p.host.is_empty() { entry.name.clone() } else { p.host };
             sc.hits.retain(|h| h.code != entry.code);
             sc.hits.push(Hit { code: entry.code, host, members: p.members });
@@ -1296,6 +1348,20 @@ impl Hub {
         }
         self.prompt = Some((id.to_string(), sc.hits.clone()));
         None
+    }
+
+    /// Merges another copy's book into our saved copy of hub `id`, newest
+    /// wins, and keeps it. Returns how many people are new to us (None if we
+    /// don't have it saved).
+    fn learn(&mut self, id: &str, book: &[Entry], gone: &[Gone]) -> Option<usize> {
+        let s = self.saved.iter_mut().find(|s| s.id == id)?;
+        let before: Vec<String> = s.book.iter().map(|e| e.code.clone()).collect();
+        if !hubstore::merge(&mut s.book, &mut s.gone, book, gone) {
+            return Some(0);
+        }
+        s.updated = hubstore::now();
+        let _ = self.store.store(s);
+        Some(s.book.iter().filter(|e| !before.contains(&e.code) && e.code != s.code).count())
     }
 
     pub fn dismiss_prompt(&mut self) {
@@ -1504,20 +1570,19 @@ impl Hub {
             HubEvent::Book { book, gone } => {
                 self.book = book;
                 self.gone = gone;
-                if let Some(s) = self.saved_id.as_ref().and_then(|id| self.saved.iter_mut().find(|s| s.id == *id)) {
-                    let a = hubstore::add_gone(&mut s.gone, &self.gone);
-                    let b = hubstore::merge(&mut s.book, &s.gone, &self.book);
-                    if a || b {
-                        let _ = self.store.store(s);
-                    }
-                }
+                // Our saved copy catches up: whoever came back after a while
+                // gets everyone added since, and nothing older wins.
+                let new = self.saved_id.clone().and_then(|id| self.learn(&id, &self.book.clone(), &self.gone.clone()));
                 // Our "delete for me" reached the hub: finish it.
                 if let Some(f) = self.finish.as_ref().filter(|f| !f.everyone) {
                     let id = f.id.clone();
                     let mine = self.saved.iter().find(|s| s.id == id).map(|s| s.code.clone());
-                    if mine.is_some_and(|c| self.gone.contains(&c)) {
+                    if mine.is_some_and(|c| self.gone.iter().any(|g| g.code == c)) {
                         return self.finish_delete(&id, None);
                     }
+                }
+                if let Some(n) = new.filter(|n| *n > 0) {
+                    return Some((format!("{}'s address book: {n} new {}.", self.name, if n == 1 { "person" } else { "people" }), "ok"));
                 }
             }
             HubEvent::Offers(list) => {
@@ -1672,9 +1737,11 @@ impl Hub {
                 json!({
                     "id": s.id, "name": s.name, "expiresIn": s.expires.saturating_sub(now),
                     "people": s.book.len(),
+                    // When its address book last changed (another copy's had someone new).
+                    "updatedAgo": (s.updated > 0).then(|| now.saturating_sub(s.updated)),
                     "here": self.is_on() && self.id == s.id,
                     "scan": scan.map(|sc| json!({
-                        "running": sc.checked < sc.total, "checked": sc.checked, "total": sc.total,
+                        "running": sc.checked < sc.total, "checked": sc.checked, "total": sc.total, "learned": sc.learned,
                         "hits": sc.hits.iter().map(|h| json!({ "code": h.code, "host": h.host, "members": h.members })).collect::<Vec<_>>(),
                     })),
                 })
@@ -1686,6 +1753,29 @@ impl Hub {
             })),
         })
     }
+}
+
+/// Looks at each code (a few at a time) and reports each answer to the app.
+fn look(targets: Vec<Entry>, id: String, tag: u64, proxy: &EventLoopProxy<UserEvent>) {
+    let proxy = proxy.clone();
+    std::thread::spawn(move || {
+        for chunk in targets.chunks(SCAN_AT_ONCE) {
+            let looks: Vec<_> = chunk
+                .iter()
+                .cloned()
+                .map(|e| {
+                    let (p, id) = (proxy.clone(), id.clone());
+                    std::thread::spawn(move || {
+                        let r = scan_one(&e, &p);
+                        let _ = p.send_event(UserEvent::HubScan(tag, id, e, r));
+                    })
+                })
+                .collect();
+            for l in looks {
+                let _ = l.join();
+            }
+        }
+    });
 }
 
 /// One look at someone's copy: a TailCat to their code for a moment, and a peek.
@@ -1994,6 +2084,52 @@ mod tests {
         jo.send(json!({ "op": "ping" }));
         assert_eq!(jo.wait("pong")["op"], "pong");
         assert_eq!(hub.state.lock().unwrap().book.len(), 2);
+    }
+
+    /// Back after weeks with an old book: joining any open copy brings in
+    /// everyone added since, and nothing older than what the hub has wins.
+    /// A rename updates the book; a peek (Scan) carries it too.
+    #[test]
+    fn coming_back_after_a_while_catches_up() {
+        let (hub, _) = saved("h");
+        let mut kit = Raw::join(hub.port, json!({ "op": "hello", "v": PROTOCOL, "peer": 1, "name": "Kit", "host": hub.host_token }));
+        kit.wait("welcome");
+        kit.send(json!({ "op": "address", "code": hub_code(1) }));
+        // While we were away: Sam joined and saved it, Jo renamed.
+        kit.send(json!({ "op": "merge", "book": [
+            { "name": "Sam", "code": hub_code(3), "at": hubstore::now() - 100 },
+            { "name": "Jo (new)", "code": hub_code(2), "at": hubstore::now() - 50 },
+        ], "goneAt": [] }));
+        for _ in 0..3 {
+            if kit.wait("book")["book"].as_array().unwrap().len() == 3 {
+                break;
+            }
+        }
+        // We come back with our old book: Jo's old name, from weeks ago.
+        let mut jo = Raw::join(hub.port, hello("Jo", 2));
+        jo.wait("welcome");
+        let got = jo.wait("book");
+        let names: Vec<&str> = got["book"].as_array().unwrap().iter().map(|e| e["name"].as_str().unwrap()).collect();
+        assert!(names.contains(&"Sam"), "we get who joined while we were away");
+        jo.send(json!({ "op": "merge", "book": [{ "name": "Jo", "code": hub_code(2), "at": hubstore::now() - 14 * 24 * 3600 }], "goneAt": [] }));
+        jo.send(json!({ "op": "ping" }));
+        jo.wait("pong");
+        let names: Vec<String> = hub.state.lock().unwrap().book.iter().map(|e| e.name.clone()).collect();
+        assert!(names.contains(&"Jo (new)".to_string()), "an old book doesn't bring an old name back: {names:?}");
+        // Jo says their own code, then renames: the book follows.
+        jo.send(json!({ "op": "address", "code": hub_code(2) }));
+        jo.send(json!({ "op": "name", "name": "Joanna" }));
+        for _ in 0..5 {
+            let b = kit.wait("book");
+            if b["book"].as_array().unwrap().iter().any(|e| e["name"] == "Joanna") {
+                break;
+            }
+        }
+        // Scan's peek carries the book, with times, and the deletions both ways.
+        let p = peek(hub.port, Duration::from_secs(5)).unwrap();
+        assert_eq!(p.book.len(), 3);
+        assert!(p.book.iter().all(|e| e.at > 0));
+        assert!(p.book.iter().any(|e| e.name == "Joanna"));
     }
 
     #[test]

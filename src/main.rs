@@ -1967,7 +1967,7 @@ impl App {
     }
 
     fn on_hub_scan(&mut self, id: &str, entry: hubstore::Entry, result: Result<hub::Peeked, String>) {
-        if let Some(hub::AfterScan::OpenOwn(id)) = self.hub.on_scan(id, entry, result) {
+        if let Some(hub::AfterScan::OpenOwn(id)) = self.hub.on_scan(id, entry, result, &self.proxy) {
             self.open_saved_hub(&id);
         }
     }

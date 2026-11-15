@@ -503,13 +503,16 @@ function savedHtml(h) {
       scan = sc.hits.length ? hitsHtml(sc.hits)
         : `<p class="meta">${sc.total ? 'Nobody has it open right now.' : 'Nobody else has saved it yet.'}</p>`;
     }
+    if (sc && sc.learned) {
+      scan += `<p class="okline">Its address book caught up: ${sc.learned} new ${sc.learned === 1 ? 'person' : 'people'}.</p>`;
+    }
     const busy = sc && sc.running;
     return `
       <div class="sess${s.here ? ' live' : ''}">
         <div class="sess-head">
           <span class="sess-title">${esc(s.name)}</span>
           ${s.here ? '<span class="pill ok"><span class="dot"></span><span class="pill-text">You\'re in it</span></span>' : ''}
-          <span class="meta">${timeLeft(s.expiresIn)} left · ${s.people} saved it</span>
+          <span class="meta">${timeLeft(s.expiresIn)} left · ${s.people} saved it${s.updatedAgo != null ? ` · book updated ${s.updatedAgo < 120 ? 'just now' : `${timeLeft(s.updatedAgo)} ago`}` : ''}</span>
           <span class="grow"></span>
           <button class="btn small primary" data-saved-open="${s.id}"${s.here || busy ? ' disabled' : ''}>Open</button>
           <button class="btn small" data-saved-scan="${s.id}"${busy ? ' disabled' : ''}>Scan</button>
