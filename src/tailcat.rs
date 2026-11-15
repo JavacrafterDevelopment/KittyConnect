@@ -93,6 +93,8 @@ pub enum Role {
     /// The Hub, hosted or joined: always the official TailCat.
     HubHost,
     HubJoin,
+    /// A moment's look at a saved hub's copy, to see if it's open (Scan).
+    HubScan,
 }
 
 impl Role {
@@ -101,7 +103,13 @@ impl Role {
     pub fn binary(self) -> Binary {
         match self {
             Role::VoipHost | Role::VoipJoin => Binary::Voip,
-            Role::ShareHost | Role::RecvForward | Role::PortHost | Role::PortJoin | Role::HubHost | Role::HubJoin => {
+            Role::ShareHost
+            | Role::RecvForward
+            | Role::PortHost
+            | Role::PortJoin
+            | Role::HubHost
+            | Role::HubJoin
+            | Role::HubScan => {
                 Binary::Official
             }
         }
@@ -193,21 +201,14 @@ fn home(bin: Binary) -> PathBuf {
     h
 }
 
-pub fn spawn(role: Role, args: &[String], proxy: &EventLoopProxy<UserEvent>) -> Result<Proc, String> {
-    static NEXT: AtomicU64 = AtomicU64::new(1);
-    let bin = role.binary();
+/// One of the programs, set up the way every run is: its own home and config
+/// folder inside the portable folder, no window.
+fn command(bin: Binary) -> Result<Command, String> {
     let exe = exe_path(bin)?;
     let home = home(bin);
-
     let mut cmd = Command::new(&exe);
-    // --verbose (a root flag, so it goes first) is what makes TailCat log
-    // "now using <ip:port>" when the tunnel goes direct; see [`Link`].
-    cmd.arg("--verbose")
-        .args(args)
-        .current_dir(&home)
+    cmd.current_dir(&home)
         .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
         // Keep TailCat's keys and config inside the portable folder.
         .env("HOME", &home)
         .env("USERPROFILE", &home)
@@ -221,6 +222,35 @@ pub fn spawn(role: Role, args: &[String], proxy: &EventLoopProxy<UserEvent>) -> 
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
+    Ok(cmd)
+}
+
+/// Makes a saved key at `path` with the official TailCat, for a saved hub:
+/// with TailCat's WireGuard pre-shared key (its default) and the nearest
+/// relay region fixed into it, so its address is the same every time it's
+/// served. Returns that address. Takes a few seconds (it measures the
+/// relays): call it off the UI thread.
+pub fn genkey(path: &std::path::Path) -> Result<String, String> {
+    let mut cmd = command(Binary::Official)?;
+    cmd.arg("genkey").arg(format!("--key={}", path.display())).arg("--fixed-region").stdout(Stdio::piped()).stderr(Stdio::piped());
+    let out = cmd.output().map_err(|e| format!("Couldn't start TailCat: {e}"))?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    match stdout.lines().find_map(find_addr) {
+        Some(addr) if out.status.success() && path.is_file() => Ok(addr),
+        _ => {
+            let err = String::from_utf8_lossy(&out.stderr);
+            let why = err.lines().rev().map(str::trim).find(|l| !l.is_empty()).unwrap_or("no address");
+            Err(format!("Couldn't make the hub's key: {why}"))
+        }
+    }
+}
+
+pub fn spawn(role: Role, args: &[String], proxy: &EventLoopProxy<UserEvent>) -> Result<Proc, String> {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    let mut cmd = command(role.binary())?;
+    // --verbose (a root flag, so it goes first) is what makes TailCat log
+    // "now using <ip:port>" when the tunnel goes direct; see [`Link`].
+    cmd.arg("--verbose").args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
 
     let mut child = cmd.spawn().map_err(|e| format!("Couldn't start TailCat: {e}"))?;
     #[cfg(windows)]
@@ -620,7 +650,7 @@ mod tests {
         for r in [Role::VoipHost, Role::VoipJoin] {
             assert_eq!(r.binary(), Binary::Voip);
         }
-        for r in [Role::ShareHost, Role::RecvForward, Role::PortHost, Role::PortJoin, Role::HubHost, Role::HubJoin] {
+        for r in [Role::ShareHost, Role::RecvForward, Role::PortHost, Role::PortJoin, Role::HubHost, Role::HubJoin, Role::HubScan] {
             assert_eq!(r.binary(), Binary::Official);
         }
         assert_ne!(Binary::Voip.file_name(), Binary::Official.file_name());

@@ -12,6 +12,7 @@ mod e2e;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod firewall;
 mod hub;
+mod hubstore;
 mod icon;
 mod lan;
 mod loopback;
@@ -90,6 +91,11 @@ pub enum UserEvent {
     WebdavLimit(Option<u64>),
     /// Our hub connection (by generation) heard something.
     Hub(u64, hub::HubEvent),
+    /// A saved hub's key was made (for the Hub with this tag): the hub, the
+    /// key's address or why not, and whether to open it now.
+    HubKey(u64, hubstore::Saved, Result<String, String>, bool),
+    /// Scan: one code of a saved hub's address book, and what answered there.
+    HubScan(u64, String, hubstore::Entry, Result<hub::Peeked, String>),
 }
 
 pub enum Xfer {
@@ -696,6 +702,14 @@ fn main() {
                 }
                 true
             }
+            Event::UserEvent(UserEvent::HubKey(_, saved, result, open_after)) => {
+                app.on_hub_key(saved, result, open_after);
+                true
+            }
+            Event::UserEvent(UserEvent::HubScan(_, id, entry, result)) => {
+                app.on_hub_scan(&id, entry, result);
+                true
+            }
             Event::UserEvent(UserEvent::WebdavLimit(limit)) => {
                 app.webdav_limit = limit;
                 true
@@ -911,7 +925,7 @@ impl App {
             join_error: String::new(),
             next_key: 1,
             voip: Voip::default(),
-            hub: hub::Hub::default(),
+            hub: hub::Hub::with_store(hubstore::Store::default()),
             page: "hub".into(),
             status: ("Ready. Everything runs from this folder.".into(), "idle"),
             name: String::new(),
@@ -1257,10 +1271,66 @@ impl App {
             "page" => self.page = s("page"),
 
             // --------------------------------------------------------- hub
+            // A new hub: temporary (gone when it closes), or saved for `secs`.
             "hub.host" => {
-                self.hub.host(&self.name, &self.proxy);
+                if msg["kind"] == "saved" {
+                    let secs = msg["secs"].as_u64().unwrap_or(0);
+                    self.hub.create_saved(&s("name"), secs, &self.name, &self.proxy);
+                    if self.hub.error.is_empty() {
+                        self.set_status("Making your hub's key (a few seconds)…", "busy");
+                    }
+                } else {
+                    self.hub.host_temporary(&s("name"), &self.name, &self.proxy);
+                    if self.hub.error.is_empty() {
+                        self.set_status("Opening your hub…", "busy");
+                    }
+                }
+            }
+            // A saved hub: Open looks for whoever has it open first.
+            "hub.open" => {
+                let id = s("id");
+                match self.hub.scan(&id, true, &self.proxy) {
+                    Some(hub::AfterScan::OpenOwn(id)) => self.open_saved_hub(&id),
+                    None => self.set_status("Looking for whoever has it open…", "busy"),
+                }
+            }
+            "hub.openNow" => {
+                let id = s("id");
+                self.open_saved_hub(&id);
+            }
+            "hub.scan" => {
+                let id = s("id");
+                if self.hub.scan(&id, false, &self.proxy).is_none() {
+                    self.set_status("Scanning for whoever has it open…", "busy");
+                }
+            }
+            "hub.joinCode" => {
+                self.hub.join(&s("code"), &self.name, &self.proxy);
                 if self.hub.error.is_empty() {
-                    self.set_status("Opening your hub…", "busy");
+                    self.set_status("Joining the hub through TailCat…", "busy");
+                }
+            }
+            "hub.dismissPrompt" => self.hub.dismiss_prompt(),
+            "hub.save" => {
+                self.hub.save_joined(&self.proxy);
+                if self.hub.error.is_empty() {
+                    self.set_status("Saving the hub (a few seconds)…", "busy");
+                }
+            }
+            "hub.close" => {
+                self.hub.leave();
+                self.set_status("Closed the hub. It's still saved: open it again any time before it expires.", "idle");
+            }
+            "hub.delete" => {
+                if let Some((text, kind)) = self.hub.delete(&s("id"), msg["everyone"] == true) {
+                    self.set_status(text, kind);
+                }
+            }
+            "hub.openToHub" => self.hub.set_open(msg["on"] == true),
+            "hub.acceptOffer" => {
+                if let Some(a) = self.hub.accept_offer(msg["from"].as_u64().unwrap_or(0), &s("oid")) {
+                    let (page, view) = self.join_invite(&a);
+                    send(webview, json!({ "type": "goto", "page": page, "view": view }));
                 }
             }
             "hub.join" => {
@@ -1272,7 +1342,7 @@ impl App {
             "hub.leave" => {
                 let closing = self.hub.is_host();
                 self.hub.leave();
-                self.set_status(if closing { "Closed your hub. Its code no longer works." } else { "Left the hub" }, "idle");
+                self.set_status(if closing { "Deleted your hub. Its code no longer works." } else { "Left the hub" }, "idle");
             }
             "hub.invite" => {
                 let to: Vec<u64> = msg["to"].as_array().map(|a| a.iter().filter_map(Value::as_u64).collect()).unwrap_or_default();
@@ -1870,8 +1940,36 @@ impl App {
         changed |= self.games_tick(now);
         self.mounts_tick(now);
         changed |= self.voip.tick();
-        changed |= self.hub.tick();
+        if let Some((text, kind)) = self.hub.tick() {
+            self.set_status(text, kind);
+            changed = true;
+        }
+        // "Open to hub": what's open goes to the hub (and stops once it closes).
+        let open = self.invitables().into_iter().map(|i| (i.what, i.title, i.code)).collect();
+        self.hub.sync_offers(open);
         changed
+    }
+
+    fn open_saved_hub(&mut self, id: &str) {
+        self.hub.open_saved(id, &self.name, &self.proxy);
+        if self.hub.error.is_empty() {
+            self.set_status("Opening the hub…", "busy");
+        }
+    }
+
+    fn on_hub_key(&mut self, saved: hubstore::Saved, result: Result<String, String>, open_after: bool) {
+        if let Some((text, kind)) = self.hub.on_key(saved, result, open_after, &self.name, &self.proxy) {
+            self.set_status(text, kind);
+        } else if !self.hub.error.is_empty() {
+            let e = self.hub.error.clone();
+            self.set_status(e, "bad");
+        }
+    }
+
+    fn on_hub_scan(&mut self, id: &str, entry: hubstore::Entry, result: Result<hub::Peeked, String>) {
+        if let Some(hub::AfterScan::OpenOwn(id)) = self.hub.on_scan(id, entry, result) {
+            self.open_saved_hub(&id);
+        }
     }
 
     /// Minecraft: keeps hosts' notes up to date, asks hosts we joined which
@@ -2243,7 +2341,7 @@ impl App {
             rows.push(json!({
                 "id": "hub", "section": "Hub", "title": self.hub.title(), "role": if host { "Hosting" } else { "Joined" },
                 "link": (!host).then(|| self.hub.link.json()), "people": people, "via": "official",
-                "dropLabel": if host { "Close" } else { "Leave" },
+                "dropLabel": match (host, self.hub.is_saved()) { (true, true) => "Close", (true, false) => "Delete", _ => "Leave" },
             }));
         }
         if self.share.st != St::Off {

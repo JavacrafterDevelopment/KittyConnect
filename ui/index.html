@@ -106,10 +106,25 @@
             <div class="panes">
               <div class="card pane">
                 <div class="card-head"><h3>Start a hub</h3></div>
-                <p class="set-desc">Friends join it once with its code. It stays open until you close it or quit KittyConnect.</p>
+                <label class="field-label" for="hub-name">Name</label>
+                <input id="hub-name" class="input" maxlength="48" spellcheck="false" autocomplete="off">
+                <div class="seg" id="hub-kind" role="radiogroup" aria-label="How long to keep it">
+                  <button type="button" class="seg-btn on" data-kind="temporary" role="radio" aria-checked="true">Temporary</button>
+                  <button type="button" class="seg-btn" data-kind="saved" role="radio" aria-checked="false">Saved</button>
+                </div>
+                <p class="set-desc" id="hub-kind-desc">A new code every time. Closing it deletes it.</p>
+                <!-- Saved: how long, like a clock's timer. -->
+                <div class="hide" id="hub-save-panel">
+                  <div class="wheels" id="hub-wheels">
+                    <div class="wheel-col"><div class="wheel" data-wheel="weeks" data-max="13" tabindex="0" aria-label="Weeks"></div><span class="wheel-label">weeks</span></div>
+                    <div class="wheel-col"><div class="wheel" data-wheel="days" data-max="6" tabindex="0" aria-label="Days"></div><span class="wheel-label">days</span></div>
+                    <div class="wheel-col"><div class="wheel" data-wheel="hours" data-max="23" tabindex="0" aria-label="Hours"></div><span class="wheel-label">hours</span></div>
+                  </div>
+                  <p class="set-desc" id="hub-until"></p>
+                </div>
                 <div class="actions">
                   <button class="btn primary" id="hub-host">Start hub</button>
-                  <span class="meta">You get a code to send your friends.</span>
+                  <span class="meta" id="hub-host-meta">You get a code to send your friends.</span>
                 </div>
               </div>
               <div class="card pane">
@@ -134,8 +149,12 @@
               <div class="roombar-head">
                 <span class="room-title" id="hub-title"></span>
                 <span class="pill" id="hub-pill"><span class="dot"></span><span class="pill-text"></span></span>
+                <span class="kind" id="hub-kind-badge"></span>
                 <span id="hub-link"></span>
                 <span class="grow"></span>
+                <button class="btn small primary hide" id="hub-save" title="Keep this hub on this PC until it expires, so you can open it yourself and scan for whoever has it open">Save this hub?</button>
+                <button class="btn small hide" id="hub-close" title="Turn it off. It stays saved, with the same code, until it expires.">Close</button>
+                <button class="btn small danger hide" id="hub-delete">Delete…</button>
                 <button class="btn small danger" id="hub-leave">Leave hub</button>
               </div>
               <div class="roomcode" id="hub-codebox">
@@ -150,11 +169,27 @@
               </div>
               <div class="card pane">
                 <div class="card-head"><h3>Invite</h3></div>
-                <p class="set-desc" id="hub-invite-to">Invites go to everyone in the hub, or only the people you tick.</p>
+                <span class="field-label">Send to</span>
+                <div id="hub-picks"></div>
                 <div id="hub-invitables"></div>
                 <p class="meta" id="hub-sent"></p>
+                <label class="set-row hub-open-row">
+                  <span class="set-text">
+                    <span class="set-title">Open to hub</span>
+                    <span class="set-desc">Everything you open (a room, files, ports, a game server, a folder) shows up for everyone in the hub while it's open, to join with one press.</span>
+                  </span>
+                  <input type="checkbox" id="hub-open-to-hub" class="switch">
+                </label>
               </div>
             </div>
+          </div>
+
+          <div class="lib-section hide" id="hub-offers-section">
+            <div class="lib-head">
+              <h2 class="section-title">Open in the hub</h2>
+              <span class="meta" id="hub-offer-count"></span>
+            </div>
+            <div class="sessions" id="hub-offers"></div>
           </div>
 
           <div class="lib-section">
@@ -163,6 +198,16 @@
               <span class="meta" id="hub-invite-count"></span>
             </div>
             <div class="sessions" id="hub-invites"></div>
+          </div>
+
+          <div class="lib-section hide" id="hub-saved-section">
+            <div class="lib-head">
+              <h2 class="section-title">Saved hubs</h2>
+              <span class="meta" id="hub-saved-count"></span>
+            </div>
+            <p class="set-desc">Open one again with the same code, or scan for whoever in it has it open
+              right now. Each scan takes a few seconds.</p>
+            <div class="sessions" id="hub-saved"></div>
           </div>
 
           <div class="lib-section">
@@ -731,6 +776,20 @@
         <span class="meta">Press OK to use the grey name, or type your own.</span>
       </div>
     </form>
+  </div>
+
+  <!-- Deleting a saved hub: just ours, or for everyone in it now. -->
+  <div class="modal hide" id="hub-del-modal" role="dialog" aria-labelledby="hub-del-title">
+    <div class="modal-card namecard">
+      <div class="card-head"><h3 id="hub-del-title">Delete this hub?</h3></div>
+      <p class="set-desc" id="hub-del-text"></p>
+      <div class="actions del-actions">
+        <button type="button" class="btn danger" id="hub-del-me">Delete for me</button>
+        <button type="button" class="btn danger" id="hub-del-all">Delete for everyone</button>
+        <span class="grow"></span>
+        <button type="button" class="btn ghost" id="hub-del-cancel">Cancel</button>
+      </div>
+    </div>
   </div>
 
   <!-- Network permission: removes Windows Firewall's remembered answer for

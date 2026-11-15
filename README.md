@@ -40,13 +40,33 @@ you're connected. It only travels inside the encrypted TailCat tunnel.
 
 **Hub** (the first tab): one code for your group, so nobody copies a code for
 each thing.
-- *Start a hub* and send its code (`kitty:hub:…`) to your friends once, or
-  paste a friend's hub code and *Join hub*. Everyone in it is listed by name,
-  each with **Direct** or **Relay**.
+- *Start a hub*: give it a name (everyone who joins sees it) and pick
+  **Temporary** (a new code every time; closing it deletes it) or **Saved**:
+  scroll the weeks, days and hours (like a clock's timer) for how long to
+  keep it, up to 13 weeks. Send its code (`kitty:hub:…`) to your friends
+  once, or paste a friend's hub code and *Join hub*. Everyone in it is listed
+  by name, each with **Direct** or **Relay** and their ping.
+- *Saved hubs* keep the same code until they expire, so friends join with one
+  press whenever it's open. Anyone who joins one gets **Save this hub?**:
+  their copy expires when yours does, they get their own code for it, and it
+  goes into the hub's address book, which everyone who saved it keeps. Then
+  any of them can **Open** it, and **Scan** shows who has it open right now,
+  by name, to **Join**. Open scans first: if someone already has it open, it
+  offers to join them instead of opening a second copy.
+- **Close** turns a saved hub off (it stays saved); **Delete…** deletes it
+  just for you (your code leaves everyone's address book) or **for everyone**
+  in it right now (anyone in it can; whoever isn't keeps theirs until it
+  expires). A temporary hub only has **Delete hub**. Expired hubs delete
+  themselves, keys and all.
 - *Invite*: whatever you have open (a voice room, a file share, ports, a game
-  server, a shared folder) is listed with **Invite everyone**; tick people to
-  invite only them. In a voice room, **Invite hub** next to its code does the
-  same. Port invites carry the port numbers, so friends join with one press.
+  server, a shared folder) is listed with **Invite everyone**; tick people
+  under **Send to** to invite only them. In a voice room, **Invite hub** next
+  to its code does the same. Port invites carry the port numbers, so friends
+  join with one press.
+- **Open to hub**: everything you open shows up for everyone in the hub,
+  under **Open in the hub**, while it's open, to join with one press.
+- Rooms, file shares, ports, game servers and folders shared through a hub
+  still get new keys every time; only the hub itself can be saved.
 - *Invites* you get show up in the Hub tab, and pop up on whatever tab you're
   on. Nothing is joined until you press **Join**; it then connects in that
   thing's own tab, the same as pasting its code there.
@@ -260,6 +280,21 @@ runtime into a `WebView2\` folder beside the exe.
   before passing it on only to the people it's for, at most 12 a minute from
   each person. The person invited checks it again, and nothing is joined
   until they press Join. A hub holds 32 people.
+- **Saved hubs**: each person who saves one has their own key for it, made
+  with the official `tailcat genkey --fixed-region` (with TailCat's
+  pre-shared key, and the relay region fixed into it, so the code is the same
+  every time it's served) and kept, with the hub's name, id, expiry, a fixed
+  local port (the code names it) and the address book, in
+  `hubs/<id>/` in the data folder. A friend's copy gets the time left, not a
+  date, so a wrong clock can't stretch it. The address book (everyone's code)
+  goes round inside the hub's tunnel; codes deleted from it are remembered so
+  an old copy can't bring them back. **Scan** starts a TailCat to each code
+  in it for a moment (a few at a time) and asks `{"op":"peek"}`: an open copy
+  answers with the hub's id (only the same hub counts), its name and whose
+  copy it is. Each scan adds a client to that person's TailCat until their
+  hub closes (TailCat never forgets one), which is why scanning is a button,
+  not automatic. Protocol version 2: everyone in a hub needs KittyConnect
+  0.12 or newer.
 - **Files**: the sharer runs a small file server on `127.0.0.1` and exposes
   only that port with `tailcat serve`. The receiver forwards a local port to it
   and requests files by id. Only files you added can be fetched. Received names

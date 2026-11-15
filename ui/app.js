@@ -219,30 +219,180 @@ document.querySelectorAll('[data-paste]').forEach((b) => {
 
 /* ------------------------------------------------------------------- hub */
 
-/* The hub: who's in it, what you can invite them to, invites you got, and
-   every connection in the app. The codes behind invites are made by the app
-   itself; the page only says which thing and to whom. */
-const HUB_OFF = { st: 'off', mode: 'off', error: '', notice: '', name: '', code: null, me: 0, members: [], invites: [], sent: '', reconnecting: false, link: { path: 'unknown' }, log: [] };
+/* The hub: who's in it, what you can invite them to, invites you got, saved
+   hubs, and every connection in the app. The codes behind invites are made by
+   the app itself; the page only says which thing and to whom. */
+const HUB_OFF = {
+  st: 'off', mode: 'off', error: '', notice: '', name: '', id: '', kind: 'temporary', expiresIn: null, savedHere: false,
+  canSave: false, making: null, code: null, me: 0, members: [], invites: [], offers: [], openToHub: false, sent: '',
+  reconnecting: false, link: { path: 'unknown' }, log: [], saved: [], prompt: null,
+};
 const HUB_PILL = { starting: ['busy', 'Connecting'], live: ['ok', 'Connected'] };
 const KIND_LABEL = { voip: 'Voice room', file: 'File share', port: 'Ports', game: 'Game server', mount: 'Folder' };
 const KIND_A = { voip: 'a voice room', file: 'a file share', port: 'some ports', game: 'a game server', mount: 'a shared folder' };
-/* Where each kind of invite lands once joined. */
-const KIND_PAGE = { voip: 'voip', file: 'files', port: 'ports', game: 'ports', mount: 'mounts' };
 let hubState = HUB_OFF;
 /* People ticked to invite (by hub id); none ticked means everyone. */
 const hubPicked = new Set();
 /* Invites already shown as a toast, so each pops up once. */
 const toasted = new Set();
 let toastInvite = null, toastTimer = 0;
+let lastInvitables = [];
 
-$('hub-host').addEventListener('click', () => post({ cmd: 'hub.host' }));
+/* "3 days 4 h", "2 weeks 1 day", "45 min". */
+function timeLeft(secs) {
+  const w = Math.floor(secs / 604800), d = Math.floor((secs % 604800) / 86400), h = Math.floor((secs % 86400) / 3600);
+  const parts = [];
+  if (w) parts.push(`${w} week${w === 1 ? '' : 's'}`);
+  if (d) parts.push(`${d} day${d === 1 ? '' : 's'}`);
+  if (h && !w) parts.push(`${h} h`);
+  if (!parts.length) parts.push(`${Math.max(1, Math.round(secs / 60))} min`);
+  return parts.join(' ');
+}
+
+function when(secs) {
+  return new Date(Date.now() + secs * 1000).toLocaleString(undefined,
+    { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+}
+
+/* ----------------------------------------------- start: name, kind, wheels */
+
+let hubKind = 'temporary';
+document.querySelectorAll('#hub-kind .seg-btn').forEach((b) => b.addEventListener('click', () => setHubKind(b.dataset.kind)));
+
+function setHubKind(kind) {
+  hubKind = kind;
+  document.querySelectorAll('#hub-kind .seg-btn').forEach((b) => {
+    b.classList.toggle('on', b.dataset.kind === kind);
+    b.setAttribute('aria-checked', String(b.dataset.kind === kind));
+  });
+  hide($('hub-save-panel'), kind !== 'saved');
+  $('hub-kind-desc').textContent = kind === 'saved'
+    ? 'Kept on this PC with the same code until it expires. Open it again any time; anyone in it who saves it can open it too.'
+    : 'A new code every time. Closing it deletes it.';
+  if (kind === 'saved') requestAnimationFrame(() => WHEELS.forEach((w) => setWheel(w, wheelVals[w.dataset.wheel], false)));
+}
+
+/* Weeks, days and hours, each a column you scroll or click, like a clock's
+   timer. Up to 13 weeks, at least an hour. */
+const ITEM_H = 34;
+const WHEELS = [...document.querySelectorAll('#hub-wheels .wheel')];
+const wheelVals = { weeks: 1, days: 0, hours: 0 };
+
+function wheelValue(el) {
+  return Math.max(0, Math.min(Number(el.dataset.max), Math.round(el.scrollTop / ITEM_H)));
+}
+
+function markWheel(el) {
+  const v = wheelValue(el);
+  el.querySelectorAll('.wheel-item').forEach((i) => i.classList.toggle('on', Number(i.dataset.v) === v));
+}
+
+function setWheel(el, v, smooth) {
+  wheelVals[el.dataset.wheel] = v;
+  el.scrollTo({ top: v * ITEM_H, behavior: smooth ? 'smooth' : 'auto' });
+  markWheel(el);
+  updateUntil();
+}
+
+function wheel(name) {
+  return WHEELS.find((w) => w.dataset.wheel === name);
+}
+
+/* Once a column stops: 13 weeks is the most, an hour the least. */
+function settleWheels() {
+  WHEELS.forEach((w) => { wheelVals[w.dataset.wheel] = wheelValue(w); });
+  if (wheelVals.weeks === 13 && (wheelVals.days || wheelVals.hours)) {
+    setWheel(wheel('days'), 0, true);
+    setWheel(wheel('hours'), 0, true);
+  }
+  if (!wheelVals.weeks && !wheelVals.days && !wheelVals.hours) setWheel(wheel('hours'), 1, true);
+  updateUntil();
+}
+
+function hubSecs() {
+  return wheelVals.weeks * 604800 + wheelVals.days * 86400 + wheelVals.hours * 3600;
+}
+
+function updateUntil() {
+  const secs = Math.min(hubSecs(), 13 * 604800);
+  $('hub-until').textContent = `Kept until ${when(secs)}. Up to 13 weeks.`;
+}
+
+WHEELS.forEach((el) => {
+  const max = Number(el.dataset.max);
+  el.innerHTML = '<div class="wheel-pad"></div>'
+    + Array.from({ length: max + 1 }, (_, i) => `<div class="wheel-item" data-v="${i}">${i}</div>`).join('')
+    + '<div class="wheel-pad"></div>';
+  let t = 0;
+  el.addEventListener('scroll', () => {
+    markWheel(el);
+    clearTimeout(t);
+    t = setTimeout(settleWheels, 120);
+  });
+  el.addEventListener('click', (e) => {
+    const it = e.target.closest('.wheel-item');
+    if (it) setWheel(el, Number(it.dataset.v), true);
+  });
+  el.addEventListener('keydown', (e) => {
+    const step = { ArrowUp: -1, ArrowDown: 1 }[e.key];
+    if (!step) return;
+    e.preventDefault();
+    setWheel(el, Math.max(0, Math.min(max, wheelValue(el) + step)), true);
+    setTimeout(settleWheels, 250);
+  });
+});
+updateUntil();
+
+$('hub-host').addEventListener('click', () => {
+  post({ cmd: 'hub.host', name: $('hub-name').value, kind: hubKind, secs: hubKind === 'saved' ? hubSecs() : 0 });
+});
 $('hub-join').addEventListener('click', () => post({ cmd: 'hub.join', code: $('hub-code').value }));
 $('hub-code').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('hub-join').click(); });
+
+/* Leave (joined) or delete (a temporary hub of ours: closing it deletes it). */
 $('hub-leave').addEventListener('click', () => {
   if (hubState.mode === 'host' && hubState.members.length > 1
-    && !confirm('Close your hub? Everyone in it is disconnected, and its code stops working.')) return;
+    && !confirm('Delete your hub? Everyone in it is disconnected, and its code stops working.')) return;
   post({ cmd: 'hub.leave' });
 });
+$('hub-close').addEventListener('click', () => {
+  if (hubState.members.length > 1 && !confirm('Close the hub? Everyone in it is disconnected. It stays saved, with the same code.')) return;
+  post({ cmd: 'hub.close' });
+});
+$('hub-save').addEventListener('click', () => post({ cmd: 'hub.save' }));
+$('hub-delete').addEventListener('click', () => openDelete(hubState.id, hubState.name, true, hubState.savedHere));
+$('hub-open-to-hub').addEventListener('change', (e) => post({ cmd: 'hub.openToHub', on: e.target.checked }));
+
+/* ------------------------------------------------------------- delete */
+
+let deleting = null;
+function openDelete(id, name, here, mine) {
+  deleting = id;
+  $('hub-del-title').textContent = `Delete ${name || 'this hub'}?`;
+  $('hub-del-text').textContent = (mine
+    ? 'Delete for me removes it from this PC, its key too, and your code from everyone\'s address book. '
+    : '')
+    + (here
+      ? 'Delete for everyone also deletes it for everyone in it right now. Anyone not in it keeps theirs until it expires.'
+      : 'To delete it for everyone, open or join it first: it reaches everyone in it.');
+  hide($('hub-del-me'), !mine);
+  $('hub-del-all').disabled = !here;
+  hide($('hub-del-modal'), false);
+}
+function closeDelete() {
+  deleting = null;
+  hide($('hub-del-modal'), true);
+}
+$('hub-del-me').addEventListener('click', () => { post({ cmd: 'hub.delete', id: deleting, everyone: false }); closeDelete(); });
+$('hub-del-all').addEventListener('click', () => {
+  if (!confirm('Delete it for everyone in it now? This can\'t be undone.')) return;
+  post({ cmd: 'hub.delete', id: deleting, everyone: true });
+  closeDelete();
+});
+$('hub-del-cancel').addEventListener('click', closeDelete);
+$('hub-del-modal').addEventListener('click', (e) => { if (e.target === $('hub-del-modal')) closeDelete(); });
+
+/* ------------------------------------------------------------- members */
 
 function pathLabel(p) {
   if (p.path === 'host') return '<span class="meta">Host</span>';
@@ -253,19 +403,29 @@ function hubMembersHtml(h) {
   if (!h.members.length) return '<div class="peers-empty">Connecting…</div>';
   return h.members.map((m) => {
     const me = m.id === h.me;
-    const pick = me ? '' : `<input type="checkbox" class="pick" data-hub-pick="${m.id}"${hubPicked.has(m.id) ? ' checked' : ''} title="Invite ${esc(m.name)}">`;
     const kick = h.mode === 'host' && !me && !m.host
-      ? `<button class="btn small ghost" data-hub-kick="${m.id}" title="Disconnect ${esc(m.name)} from the hub. They could join again with the code; to keep someone out, close the hub and send a new code to the rest.">Remove</button>`
+      ? `<button class="btn small ghost" data-hub-kick="${m.id}" title="Disconnect ${esc(m.name)} from the hub. They could join again with the code.">Remove</button>`
       : '';
     return `
       <div class="person">
-        ${pick}
         <span class="avatar" style="--h:${hue(m.name)}">${esc(initials(m.name))}</span>
         <span class="person-name">${esc(m.name)}${me ? ' <span class="meta">(you)</span>' : ''}${m.host ? ' <span class="meta">· host</span>' : ''}</span>
         <span class="grow"></span>
         ${kick}${me && h.mode === 'host' ? '' : pathLabel(m)}
       </div>`;
   }).join('');
+}
+
+/* Who an invite goes to: ticked people, or everyone. */
+function hubPicksHtml(h) {
+  const others = h.members.filter((m) => m.id !== h.me);
+  if (!others.length) return '<div class="peers-empty">Nobody else is here yet.</div>';
+  return `<div class="picks">${others.map((m) => `
+    <label class="pick-chip${hubPicked.has(m.id) ? ' on' : ''}">
+      <input type="checkbox" data-hub-pick="${m.id}"${hubPicked.has(m.id) ? ' checked' : ''}>
+      <span class="avatar small" style="--h:${hue(m.name)}">${esc(initials(m.name))}</span>${esc(m.name)}
+    </label>`).join('')}</div>
+    <p class="set-desc">${hubPicked.size ? 'Only the people ticked get invites.' : 'Nobody ticked: invites go to everyone.'}</p>`;
 }
 
 function hubInvitablesHtml(h, items) {
@@ -281,6 +441,20 @@ function hubInvitablesHtml(h, items) {
       <span class="invitable-title">${esc(i.title)}</span>
       <span class="grow"></span>
       <button class="btn small primary" data-hub-invite="${esc(i.what)}"${others.length ? '' : ' disabled title="Nobody else is in the hub yet"'}>${label}</button>
+    </div>`).join('');
+}
+
+/* What others have open ("Open to hub"), to join with one press. */
+function offersHtml(list) {
+  return list.map((o) => `
+    <div class="sess invite">
+      <div class="sess-head">
+        <span class="avatar small" style="--h:${hue(o.name)}">${esc(initials(o.name))}</span>
+        <span class="kind kind-${o.kind}">${esc(KIND_LABEL[o.kind] || o.kind)}</span>
+        <span class="sess-title"><b>${esc(o.name)}</b>${o.title ? `: ${esc(o.title)}` : ''}</span>
+        <span class="grow"></span>
+        <button class="btn small primary" data-offer-from="${o.from}" data-offer-oid="${esc(o.oid)}" data-offer-kind="${o.kind}">Join</button>
+      </div>
     </div>`).join('');
 }
 
@@ -302,35 +476,110 @@ function invitesHtml(list) {
     </div>`).join('');
 }
 
+/* ---------------------------------------------------------- saved hubs */
+
+function hitsHtml(hits) {
+  return hits.map((x) => `
+    <div class="person">
+      <span class="avatar" style="--h:${hue(x.host)}">${esc(initials(x.host))}</span>
+      <span class="person-name"><b>${esc(x.host)}</b> has it open <span class="meta">· ${x.members} ${x.members === 1 ? 'person' : 'people'}</span></span>
+      <span class="grow"></span>
+      <button class="btn small primary" data-scan-join="${esc(x.code)}">Join</button>
+    </div>`).join('');
+}
+
+function savedHtml(h) {
+  return h.saved.map((s) => {
+    const sc = s.scan;
+    const prompt = h.prompt && h.prompt.id === s.id ? h.prompt : null;
+    let scan = '';
+    if (prompt) {
+      scan = `<p class="okline">Someone already has it open. Join them, or open your own copy anyway.</p>${hitsHtml(prompt.hits)}
+        <div class="row"><button class="btn small" data-prompt-open="${s.id}">Open my own</button>
+        <button class="btn small ghost" data-prompt-cancel="1">Cancel</button></div>`;
+    } else if (sc && sc.running) {
+      scan = `<p class="meta">Looking for whoever has it open… ${sc.checked} of ${sc.total}</p>`;
+    } else if (sc) {
+      scan = sc.hits.length ? hitsHtml(sc.hits)
+        : `<p class="meta">${sc.total ? 'Nobody has it open right now.' : 'Nobody else has saved it yet.'}</p>`;
+    }
+    const busy = sc && sc.running;
+    return `
+      <div class="sess${s.here ? ' live' : ''}">
+        <div class="sess-head">
+          <span class="sess-title">${esc(s.name)}</span>
+          ${s.here ? '<span class="pill ok"><span class="dot"></span><span class="pill-text">You\'re in it</span></span>' : ''}
+          <span class="meta">${timeLeft(s.expiresIn)} left · ${s.people} saved it</span>
+          <span class="grow"></span>
+          <button class="btn small primary" data-saved-open="${s.id}"${s.here || busy ? ' disabled' : ''}>Open</button>
+          <button class="btn small" data-saved-scan="${s.id}"${busy ? ' disabled' : ''}>Scan</button>
+          <button class="btn small danger" data-saved-del="${s.id}" data-saved-name="${esc(s.name)}" data-saved-here="${s.here ? 1 : ''}">Delete…</button>
+        </div>
+        ${scan}
+      </div>`;
+  }).join('');
+}
+
+/* Leaving the hub you're in for another one: say so first. */
+function leaveFirst() {
+  return hubState.mode === 'off' || confirm('Leave the hub you\'re in?');
+}
+
+/* ------------------------------------------------------------- render */
+
 function renderHub(h, items) {
   hubState = h;
   const on = h.mode !== 'off';
+  const saved = h.kind === 'saved';
   hide($('hub-lobby'), on);
   hide($('hub-room'), !on);
   $('hub-error').textContent = h.error;
   show($('hub-error'), h.error);
   $('hub-notice').textContent = h.notice;
   show($('hub-notice'), h.notice && !on);
+  $('hub-name').placeholder = myName ? `${myName}'s hub` : 'Hub name';
+  const making = h.making === 'create';
+  $('hub-host').disabled = making;
+  $('hub-host').textContent = making ? 'Making its key…' : 'Start hub';
+  $('hub-host-meta').textContent = making ? 'A few seconds: it measures the relays once.' : 'You get a code to send your friends.';
   if (on) {
-    $('hub-title').textContent = h.name || (h.mode === 'host' ? 'Your hub' : 'Hub');
+    $('hub-title').textContent = h.name || 'Hub';
     const [cls, text] = h.reconnecting ? ['busy', 'Reconnecting'] : (HUB_PILL[h.st] || HUB_PILL.starting);
     $('hub-pill').className = `pill ${cls}`;
     $('hub-pill').querySelector('.pill-text').textContent = text;
+    $('hub-kind-badge').textContent = saved ? `Saved · ${timeLeft(h.expiresIn || 0)} left` : 'Temporary';
     setHtml($('hub-link'), h.mode === 'join' && h.st === 'live' ? linkPill(h.link, 'the hub host') : '');
-    $('hub-leave').textContent = h.mode === 'host' ? 'Close hub' : 'Leave hub';
+    // Temporary hub of ours: Delete. Saved one: Close (stays saved) and Delete…
+    const host = h.mode === 'host';
+    hide($('hub-leave'), host && saved);
+    $('hub-leave').textContent = host ? 'Delete hub' : 'Leave hub';
+    hide($('hub-close'), !(host && saved));
+    hide($('hub-delete'), !saved);
+    hide($('hub-save'), !(h.canSave || h.making === 'save'));
+    $('hub-save').disabled = h.making === 'save';
+    $('hub-save').textContent = h.making === 'save' ? 'Saving…' : 'Save this hub?';
     $('hub-room-code').textContent = h.code || '';
-    $('hub-codebox').classList.toggle('on', !!h.code && h.mode === 'host');
+    $('hub-codebox').classList.toggle('on', !!h.code && host);
     const ids = new Set(h.members.map((m) => m.id));
     [...hubPicked].forEach((id) => { if (!ids.has(id)) hubPicked.delete(id); });
     setHtml($('hub-members'), hubMembersHtml(h));
     $('hub-count').textContent = h.members.length ? `${h.members.length} in it` : '';
+    setHtml($('hub-picks'), h.st === 'live' ? hubPicksHtml(h) : '');
     setHtml($('hub-invitables'), h.st === 'live' ? hubInvitablesHtml(h, items) : '<div class="peers-empty">Connecting…</div>');
     $('hub-sent').textContent = h.sent;
+    $('hub-open-to-hub').checked = h.openToHub;
   } else {
     hubPicked.clear();
   }
+  const offers = on ? h.offers : [];
+  hide($('hub-offers-section'), !offers.length);
+  $('hub-offer-count').textContent = offers.length ? String(offers.length) : '';
+  setHtml($('hub-offers'), offersHtml(offers));
   $('hub-invite-count').textContent = h.invites.length ? String(h.invites.length) : '';
   setHtml($('hub-invites'), invitesHtml(h.invites));
+  hide($('hub-saved-section'), !h.saved.length);
+  $('hub-saved-count').textContent = h.saved.length ? String(h.saved.length) : '';
+  setHtml($('hub-saved'), savedHtml(h));
   renderLog('hub', h.log);
 
   // A new invite pops up wherever you are.
@@ -355,12 +604,15 @@ function hideToast() {
   hide($('invite-toast'), true);
 }
 
-/* Joining leaves the room you're in, if it's a room: say so first. */
+/* Joining a room leaves the room you're in: say so first. */
+function okToJoin(kind) {
+  return !(kind === 'voip' && voipState && voipState.st !== 'off' && voipState.st !== 'ended'
+    && !confirm('Leave the room you\'re in to join this one?'));
+}
+
 function joinInvite(id) {
   const inv = hubState.invites.find((i) => i.id === id);
-  if (!inv) return;
-  if (inv.kind === 'voip' && voipState && voipState.st !== 'off' && voipState.st !== 'ended'
-    && !confirm('Leave the room you\'re in to join this one?')) return;
+  if (!inv || !okToJoin(inv.kind)) return;
   hideToast();
   post({ cmd: 'hub.accept', id });
 }
@@ -385,6 +637,7 @@ $('hub-room').addEventListener('change', (e) => {
   if (!pick) return;
   const id = Number(pick.dataset.hubPick);
   if (pick.checked) hubPicked.add(id); else hubPicked.delete(id);
+  setHtml($('hub-picks'), hubPicksHtml(hubState));
   setHtml($('hub-invitables'), hubInvitablesHtml(hubState, lastInvitables));
 });
 $('hub-invites').addEventListener('click', (e) => {
@@ -393,7 +646,24 @@ $('hub-invites').addEventListener('click', (e) => {
   const d = e.target.closest('[data-inv-dismiss]');
   if (d) post({ cmd: 'hub.dismiss', id: Number(d.dataset.invDismiss) });
 });
-let lastInvitables = [];
+$('hub-offers').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-offer-from]');
+  if (b && okToJoin(b.dataset.offerKind)) post({ cmd: 'hub.acceptOffer', from: Number(b.dataset.offerFrom), oid: b.dataset.offerOid });
+});
+$('hub-saved').addEventListener('click', (e) => {
+  const t = e.target;
+  const open = t.closest('[data-saved-open]');
+  if (open && leaveFirst()) return post({ cmd: 'hub.open', id: open.dataset.savedOpen });
+  const scan = t.closest('[data-saved-scan]');
+  if (scan) return post({ cmd: 'hub.scan', id: scan.dataset.savedScan });
+  const del = t.closest('[data-saved-del]');
+  if (del) return openDelete(del.dataset.savedDel, del.dataset.savedName, !!del.dataset.savedHere, true);
+  const join = t.closest('[data-scan-join]');
+  if (join && leaveFirst()) return post({ cmd: 'hub.joinCode', code: join.dataset.scanJoin });
+  const own = t.closest('[data-prompt-open]');
+  if (own) return post({ cmd: 'hub.openNow', id: own.dataset.promptOpen });
+  if (t.closest('[data-prompt-cancel]')) post({ cmd: 'hub.dismissPrompt' });
+});
 
 /* --------------------------------------------------------- connections */
 
@@ -1986,7 +2256,15 @@ if (window.ipc) {
     },
     hostError: '', joinError: '',
     hub: {
-      st: 'live', mode: 'host', error: '', notice: '', name: 'Kit\'s hub', code: `kitty:hub:50400:${addr}`, me: 1,
+      st: 'live', mode: 'host', error: '', notice: '', name: 'Minecraft Hub', code: `kitty:hub:24818:${addr}`, me: 1,
+      id: 'a1', kind: 'saved', expiresIn: 6 * 86400 + 5 * 3600, savedHere: true, canSave: false, making: null, openToHub: true,
+      offers: [{ from: 2, oid: 'host:3', kind: 'game', code: '', name: 'Priya', title: 'Minecraft: Java Edition · port 25565' }],
+      saved: [
+        { id: 'a1', name: 'Minecraft Hub', expiresIn: 6 * 86400 + 5 * 3600, people: 3, here: true, scan: null },
+        { id: 'b2', name: 'Friday crew', expiresIn: 9 * 604800, people: 5, here: false,
+          scan: { running: false, checked: 4, total: 4, hits: [{ code: 'x', host: 'Sam', members: 3 }] } },
+      ],
+      prompt: null,
       members: [
         { id: 1, name: 'Kit', host: true, path: 'host', rtt: null },
         { id: 2, name: 'Priya', host: false, path: 'direct', rtt: 18 },

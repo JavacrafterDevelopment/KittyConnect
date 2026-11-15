@@ -43,12 +43,19 @@ const FRIEND_GEN: u64 = 1_000_000;
 /// Each event goes to the app it's for, as main()'s loop would hand it.
 fn route(a: &mut Apps, ev: UserEvent) {
     match ev {
+        // Each app takes only its own processes' lines (either can host
+        // a hub): the host's app first, then the friend's.
         UserEvent::Tc(role, id, ev) => {
-            let app = match role {
-                Role::ShareHost | Role::PortHost | Role::VoipHost | Role::HubHost => &mut a.host,
-                Role::RecvForward | Role::PortJoin | Role::VoipJoin | Role::HubJoin => &mut a.friend,
+            if role == Role::HubScan {
+                return;
+            }
+            let line = match &ev {
+                TcEvent::Line(l) => Some(l.clone()),
+                TcEvent::Exited => None,
             };
-            app.on_tailcat(role, id, ev);
+            if !a.host.on_tailcat(role, id, ev) {
+                a.friend.on_tailcat(role, id, line.map_or(TcEvent::Exited, TcEvent::Line));
+            }
         }
         UserEvent::Share(e) => {
             a.host.on_share(e);
@@ -74,6 +81,14 @@ fn route(a: &mut Apps, ev: UserEvent) {
         UserEvent::Hub(gen, e) => {
             let app = if gen >= FRIEND_GEN { &mut a.friend } else { &mut a.host };
             app.hub.on_event(gen, e);
+        }
+        UserEvent::HubKey(tag, saved, r, open_after) => {
+            let app = if tag == a.friend.hub.tag { &mut a.friend } else { &mut a.host };
+            app.on_hub_key(saved, r, open_after);
+        }
+        UserEvent::HubScan(tag, id, e, r) => {
+            let app = if tag == a.friend.hub.tag { &mut a.friend } else { &mut a.host };
+            app.on_hub_scan(&id, e, r);
         }
         UserEvent::Ping(t, r) => {
             a.friend.on_ping(t, r);
@@ -155,6 +170,9 @@ fn everything_between_two_kittyconnects_goes_through_the_tunnels() {
     let work = std::env::temp_dir().join(format!("kc-e2e-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&work);
     apps.friend.recv.inbox = work.join("inbox");
+    // Two PCs in one: the friend's saved hubs go somewhere of their own.
+    apps.host.hub = hub::Hub::with_store(hubstore::Store::at(work.join("host-hubs")));
+    apps.friend.hub = hub::Hub::with_store(hubstore::Store::at(work.join("friend-hubs")));
 
     // The app's 1-second tick.
     let done = Arc::new(AtomicBool::new(false));
@@ -233,7 +251,7 @@ fn script(d: &Drive, work: &std::path::Path) -> Result<Value, String> {
     // ---------------------------------------------------------------- hub
     d.on(|a| {
         let name = a.host.name.clone();
-        a.host.hub.host(&name, &a.host.proxy.clone());
+        a.host.hub.host_temporary("", &name, &a.host.proxy.clone());
     });
     d.wait("the hub to open", 60, |a| a.host.hub.json()["st"] == "live")?;
     let hub_code = d.on(|a| a.host.hub.json()["code"].as_str().unwrap_or_default().to_string());
@@ -476,5 +494,112 @@ fn script(d: &Drive, work: &std::path::Path) -> Result<Value, String> {
         })
     });
     results.insert("paths".into(), paths);
+
+    // ---------------------------------------------------------- saved hub
+    // Made with a real key (the official `tailcat genkey`), saved by the
+    // friend too, then opened by the friend, found by the host's Scan, and
+    // deleted for everyone.
+    let hub_name = m("HubName");
+    let hn = hub_name.clone();
+    d.on(move |a| {
+        let (name, p) = (a.host.name.clone(), a.host.proxy.clone());
+        a.host.hub.create_saved(&hn, 3 * 24 * 3600, &name, &p);
+    });
+    d.wait("the saved hub's key and the hub to open", 90, |a| {
+        let j = a.host.hub.json();
+        j["st"] == "live" && j["kind"] == "saved" && a.host.hub.saved.len() == 1
+    })?;
+    let (id, saved_code, served_code) = d.on(|a| {
+        let s = &a.host.hub.saved[0];
+        (s.id.clone(), s.code.clone(), a.host.hub.json()["code"].as_str().unwrap_or_default().to_string())
+    });
+    if saved_code != served_code {
+        return Err(format!("the saved key's code {saved_code} isn't the one served, {served_code}"));
+    }
+    codes.insert("savedHub".into(), json!(saved_code));
+    let sc = saved_code.clone();
+    d.on(move |a| {
+        let (name, p) = (a.friend.name.clone(), a.friend.proxy.clone());
+        a.friend.hub.join(&sc, &name, &p);
+    });
+    d.wait("the friend in the saved hub, offered Save this hub?", 60, |a| a.friend.hub.json()["canSave"] == true)?;
+    d.on(|a| {
+        let p = a.friend.proxy.clone();
+        a.friend.hub.save_joined(&p);
+    });
+    d.wait("the friend's copy, and their code in the host's book", 90, |a| {
+        a.friend.hub.saved.len() == 1 && a.host.hub.saved.first().is_some_and(|s| s.book.len() == 2)
+    })?;
+    let (friend_code, host_expires, friend_expires) =
+        d.on(|a| (a.friend.hub.saved[0].code.clone(), a.host.hub.saved[0].expires, a.friend.hub.saved[0].expires));
+    codes.insert("savedHubFriend".into(), json!(friend_code));
+    if friend_expires > host_expires + 5 {
+        return Err("the friend's copy outlives the hub".into());
+    }
+    // The ping shows next to the friend.
+    d.wait("the friend's ping in the member list", 30, |a| {
+        a.host.hub.json()["members"].as_array().is_some_and(|l| l.iter().any(|m| m["host"] == false && m["rtt"].is_u64()))
+    })?;
+    results.insert("saved_hub".into(), json!("made with a real key; the friend saved it with the same expiry; both codes in the book; ping shown"));
+
+    // The host closes it; the friend opens their own copy; the host's Scan finds it.
+    d.on(|a| {
+        a.host.hub.leave();
+        a.friend.hub.leave();
+    });
+    let i2 = id.clone();
+    d.on(move |a| {
+        let (name, p) = (a.friend.name.clone(), a.friend.proxy.clone());
+        a.friend.hub.open_saved(&i2, &name, &p);
+    });
+    if let Err(e) = d.wait("the friend's copy open", 60, |a| a.friend.hub.json()["st"] == "live") {
+        let j = d.on(|a| {
+            let j = a.friend.hub.json();
+            json!({ "st": j["st"], "mode": j["mode"], "error": j["error"], "notice": j["notice"], "code": j["code"], "log": j["log"] })
+        });
+        return Err(format!("{e}: {j}"));
+    }
+    let i2 = id.clone();
+    d.on(move |a| {
+        let p = a.host.proxy.clone();
+        a.host.hub.scan(&i2, false, &p);
+    });
+    let (i2, fc, fname) = (id.clone(), friend_code.clone(), friend_name.clone());
+    d.wait("the scan to find the friend's copy", 60, move |a| {
+        a.host.hub.json()["saved"].as_array().is_some_and(|l| {
+            l.iter().any(|s| {
+                s["id"] == i2.as_str()
+                    && s["scan"]["running"] == false
+                    && s["scan"]["hits"].as_array().is_some_and(|h| h.iter().any(|x| x["code"] == fc.as_str() && x["host"] == fname.as_str()))
+            })
+        })
+    })?;
+    let fc = friend_code.clone();
+    d.on(move |a| {
+        let (name, p) = (a.host.name.clone(), a.host.proxy.clone());
+        a.host.hub.join(&fc, &name, &p);
+    });
+    d.wait("the host to join the friend's copy", 60, |a| {
+        a.host.hub.json()["st"] == "live" && a.friend.hub.json()["members"].as_array().is_some_and(|m| m.len() == 2)
+    })?;
+    results.insert("scan".into(), json!("found the friend's open copy by their name, and joined it"));
+
+    // Delete for everyone: both copies go, keys and all.
+    let i2 = id.clone();
+    d.on(move |a| {
+        a.host.hub.delete(&i2, true);
+    });
+    d.wait("the hub deleted for everyone", 30, |a| {
+        a.host.hub.saved.is_empty() && a.friend.hub.saved.is_empty() && !a.friend.hub.is_on() && !a.host.hub.is_on()
+    })?;
+    let i2 = id.clone();
+    let keys_left = d.on(move |a| {
+        [&a.host.hub.store, &a.friend.hub.store].iter().any(|st| st.key_path(&i2).is_some_and(|k| k.exists()))
+    });
+    if keys_left {
+        return Err("a saved hub's key is still on disk".into());
+    }
+    results.insert("delete_for_everyone".into(), json!("both copies and keys deleted"));
+
     Ok(json!({ "markers": markers, "codes": codes, "results": results }))
 }
