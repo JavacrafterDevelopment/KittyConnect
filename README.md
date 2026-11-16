@@ -61,8 +61,15 @@ each thing.
 - Closing a saved hub you host hands it over: whoever has been in it longest
   (of those who saved it) opens their copy, and everyone moves there by
   themselves. A moment later your app scans and finds them. If the host's
-  app vanishes instead (a crash, a lost connection), after 15 seconds
-  everyone's app picks the same person to take over.
+  PC goes away without a word instead (it restarted, crashed or lost its
+  connection), everyone's app notices within 25 seconds of silence and, 15
+  seconds later, picks the same person to take over. If that person's copy
+  doesn't come up, everyone goes to the next one in line.
+- Two copies open at once (say you were away, opened yours, and a friend had
+  taken over meanwhile) join up by themselves: whoever hosts a saved hub
+  looks for other open copies of it now and then (soon after opening, then
+  every few minutes), and the one with fewer people in it moves everyone to
+  the other (the same: the one with the lower code stays).
 - The address book keeps itself up to date. Away for a couple of weeks while
   friends added friends? Joining anyone's open copy, or just scanning,
   brings in everyone added since (and Scan then looks for them too). Each
@@ -291,7 +298,8 @@ runtime into a `WebView2\` folder beside the exe.
   directly with a secret only its KittyConnect has (32 bytes from the OS's
   secure random source), which is what makes it the host. One JSON line per
   message: hello and welcome, the member list (name, host, direct or relay),
-  path updates, invites, remove, and a ping every 15 seconds. An invite
+  path updates, invites, remove, and a ping every 5 seconds (25 seconds of
+  silence means the other end is gone; older versions ping every 15). An invite
   carries a code, which the hub checks is one it can invite to (a room, file
   share, ports with their numbers, game server or folder) and writes out clean
   before passing it on only to the people it's for, at most 12 a minute from
@@ -310,12 +318,17 @@ runtime into a `WebView2\` folder beside the exe.
   taken as a day ahead, so a wrong clock can't win for good. A peek (Scan)
   carries a saved hub's book too, so scanning catches you up even without
   joining, and anyone new in it is scanned as well. **Scan** starts a TailCat to each code
-  in it for a moment (a few at a time) and asks `{"op":"peek"}`: an open copy
-  answers with the hub's id (only the same hub counts), its name and whose
-  copy it is. Each scan adds a client to that person's TailCat until their
-  hub closes (TailCat never forgets one), which is why scanning is a button,
-  not automatic. Protocol version 2: everyone in a hub needs KittyConnect
-  0.12 or newer.
+  in it for a moment (a few at a time) and asks `{"op":"peek"}`, again until
+  20 seconds are up (TailCat closes the connection if its first reach for the
+  other end fails): an open copy answers with the hub's id (only the same hub
+  counts), its name, whose copy it is and how many are in it. Each scan adds
+  a client to that person's TailCat until their hub closes (TailCat never
+  forgets one), so the only automatic looks are the host's, for another open
+  copy: 10, 20, 40, 80 and 160 seconds after opening (or after everyone else
+  left), then every 5 minutes, and only at codes that aren't in the hub with
+  it. Such a look says where it's open itself (`openAt`), so the copy it
+  finds looks back at once (at most every 30 seconds), checking for itself.
+  Protocol version 2: everyone in a hub needs KittyConnect 0.12 or newer.
 - **Files**: the sharer runs a small file server on `127.0.0.1` and exposes
   only that port with `tailcat serve`. The receiver forwards a local port to it
   and requests files by id. Only files you added can be fetched. Received names

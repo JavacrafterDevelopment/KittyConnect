@@ -79,8 +79,11 @@ const MAX_TITLE: usize = 60;
 /// Invites one person may send a minute; more are refused.
 const INVITES_PER_MINUTE: usize = 12;
 /// Each side pings every this often, and gives up after a few missed.
-const PING_EVERY: Duration = Duration::from_secs(15);
-const SILENT_FOR: Duration = Duration::from_secs(50);
+const PING_EVERY: Duration = Duration::from_secs(5);
+/// Silence for this long (5 missed pings) means the other end is gone: a
+/// PC that restarted or lost its connection says nothing. 0.12.2 and older
+/// ping every 15 s, so they still fit.
+const SILENT_FOR: Duration = Duration::from_secs(25);
 /// A friend's hello can take a while: the tunnel comes up first.
 const HELLO_WAIT: Duration = Duration::from_secs(25);
 
@@ -297,6 +300,13 @@ impl HubServer {
         Some(name)
     }
 
+    /// Another copy of this saved hub is open too, and it's where everyone
+    /// should be: everyone here hears to go there (`name`'s, at `code`).
+    pub fn send_moving(&self, code: &str, name: &str) {
+        let st = self.state.lock().unwrap();
+        st.broadcast(&json!({ "op": "moving", "code": code, "name": name }));
+    }
+
     /// How many are in the hub (the host included).
     #[cfg(test)]
     pub fn count(&self) -> usize {
@@ -374,6 +384,14 @@ fn serve_member(stream: TcpStream, state: &Mutex<State>, stop: &AtomicBool, toke
             let b = st.book_msg();
             for k in ["book", "gone", "goneAt"] {
                 reply[k] = b[k].clone();
+            }
+        }
+        // Another copy of this saved hub is open too, and looking at us: our
+        // host's app hears, so it looks back (it checks for itself; this is
+        // only a hint).
+        if let (true, Some(code)) = (st.meta.expires.is_some(), hubstore::clean_code(hello["openAt"].as_str().unwrap_or_default())) {
+            if let Some(h) = st.members.iter().find(|m| m.host) {
+                let _ = h.out.send(json!({ "op": "alsoOpen", "code": code }));
             }
         }
         drop(st);
@@ -646,6 +664,8 @@ pub enum HubEvent {
     Deleted { by: String },
     /// The host closed the saved hub: go to this code, `name`'s copy.
     Moving { code: String, name: String },
+    /// Our saved hub is open at `code` too (that copy just looked at ours).
+    AlsoOpen { code: String },
     /// How long the hub took to answer a ping, in ms.
     Rtt(u32),
     Members(Vec<Value>),
@@ -818,6 +838,11 @@ fn session(stream: TcpStream, hello: &Value, rx: &Arc<Mutex<Receiver<Value>>>, s
                     emit(HubEvent::Moving { code, name: clean(msg["name"].as_str().unwrap_or("Someone"), crate::peers::MAX_NAME) });
                 }
             }
+            "alsoOpen" => {
+                if let Some(code) = hubstore::clean_code(msg["code"].as_str().unwrap_or_default()) {
+                    emit(HubEvent::AlsoOpen { code });
+                }
+            }
             "pong" => {
                 if let Some(t) = pinged.lock().unwrap().take() {
                     emit(HubEvent::Rtt(t.elapsed().as_millis().min(60_000) as u32));
@@ -875,22 +900,42 @@ pub struct Peeked {
 /// Asks whatever answers at 127.0.0.1:`port` (the near end of a tunnel to
 /// someone's copy of a hub) whether it's open, without joining. Waits up to
 /// `wait`: the tunnel comes up first, and a copy that isn't open never answers.
+#[cfg(test)]
 pub fn peek(port: u16, wait: Duration) -> Result<Peeked, String> {
+    peek_from(port, wait, None)
+}
+
+/// A peek, from a copy of the hub that's open itself (at `mine`) if given:
+/// the copy we peek hears so, and looks back (two open copies join up).
+///
+/// TailCat takes our connection at once and only then reaches for the other
+/// end; if that first try fails (their relay connection was still coming
+/// up, say) it just closes ours. So we ask again, until `wait` is up.
+fn peek_from(port: u16, wait: Duration, mine: Option<&str>) -> Result<Peeked, String> {
     let until = Instant::now() + wait;
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
-    let stream = loop {
-        match TcpStream::connect_timeout(&addr, Duration::from_secs(2)) {
-            Ok(s) => break s,
-            Err(_) if Instant::now() < until => std::thread::sleep(Duration::from_millis(300)),
-            Err(e) => return Err(e.to_string()),
+    let mut ask = json!({ "op": "peek", "v": PROTOCOL });
+    if let Some(code) = mine {
+        ask["openAt"] = json!(code);
+    }
+    let v = loop {
+        let left = until.saturating_duration_since(Instant::now());
+        let answer = TcpStream::connect_timeout(&addr, Duration::from_secs(2)).ok().and_then(|stream| {
+            let mut writer = stream.try_clone().ok()?;
+            stream.set_read_timeout(Some(left.max(Duration::from_secs(1)))).ok();
+            if !send_line(&mut writer, &ask) {
+                return None;
+            }
+            read_line(&mut BufReader::new(stream))
+        });
+        match answer {
+            Some(v) => break v,
+            None if until.saturating_duration_since(Instant::now()) > Duration::from_secs(1) => {
+                std::thread::sleep(Duration::from_millis(500))
+            }
+            None => return Err("not open".into()),
         }
     };
-    let mut writer = stream.try_clone().map_err(|e| e.to_string())?;
-    stream.set_read_timeout(Some(until.saturating_duration_since(Instant::now()).max(Duration::from_secs(1)))).ok();
-    if !send_line(&mut writer, &json!({ "op": "peek", "v": PROTOCOL })) {
-        return Err("not open".into());
-    }
-    let v = read_line(&mut BufReader::new(stream)).ok_or("not open")?;
     if v["op"] != "peeked" {
         return Err("not open".into());
     }
@@ -930,9 +975,26 @@ struct Invite {
 /// The most invites kept; older ones go.
 const MAX_INVITES: usize = 20;
 /// Scan checks this many codes at once (each is a TailCat of its own for a moment).
-const SCAN_AT_ONCE: usize = 6;
+const SCAN_AT_ONCE: usize = 8;
 /// How long Scan waits for each copy to answer.
-const SCAN_WAIT: Duration = Duration::from_secs(15);
+const SCAN_WAIT: Duration = Duration::from_secs(20);
+/// While we host a saved hub, how long until we look again for another copy
+/// of it that's open too (someone took over while we were gone, say): soon
+/// at first, then every few minutes.
+fn look_after(n: u32) -> Duration {
+    Duration::from_secs((10u64 << n.min(5)).min(300))
+}
+/// When another open copy looks at ours, we look back, but no more often
+/// than this.
+const LOOK_BACK_EVERY: Duration = Duration::from_secs(30);
+
+/// Two copies of a saved hub are open at once, ours (at `mine`, `ours`
+/// people in it) and another (at `code`, `theirs`): does everyone belong in
+/// theirs? The one with more people in it wins; with the same, the lower
+/// code. Both sides ask it the same way round, so exactly one moves.
+fn theirs_wins(mine: &str, ours: u64, code: &str, theirs: u64) -> bool {
+    theirs > ours || (theirs == ours && code < mine)
+}
 
 /// A scan of a saved hub's address book: who has it open right now.
 #[derive(Default)]
@@ -946,6 +1008,11 @@ struct Scan {
     learned: usize,
     /// Started by Open: when it's done, open ours, or ask.
     open_after: bool,
+    /// Our own look while we host it, for another open copy to join up with
+    /// (not shown).
+    quiet: bool,
+    /// Which scan this is: answers to an older one are dropped.
+    no: u64,
 }
 
 /// Someone's copy of a saved hub, open right now.
@@ -961,6 +1028,8 @@ pub struct Hit {
 pub enum AfterScan {
     /// Nobody else has it open: open ours.
     OpenOwn(String),
+    /// Something to say (we moved to another open copy).
+    Said(String, &'static str),
 }
 
 /// A delete waiting to hear back from the hub before it finishes.
@@ -1032,10 +1101,20 @@ pub struct Hub {
     failover: Option<(String, Vec<Entry>)>,
     /// Scan a hub again soon (we handed ours over, so someone else has it now).
     rescan: Option<(String, Instant)>,
+    /// While we host a saved hub: when we next look for another open copy of
+    /// it, and how many looks so far.
+    watch: Option<(Instant, u32)>,
+    /// When our last such look started.
+    last_look: Option<Instant>,
+    scan_no: u64,
 }
 
 /// How long a saved hub's host can be gone before someone else takes over.
 const TAKE_OVER_AFTER: Duration = Duration::from_secs(15);
+/// How long we wait for the copy we went to (whoever's next in line) before
+/// going to the one after: they notice the host is gone a few seconds apart,
+/// and their copy takes a moment to open.
+const NEXT_AFTER: Duration = Duration::from_secs(45);
 
 impl Default for Hub {
     fn default() -> Self {
@@ -1080,6 +1159,9 @@ impl Default for Hub {
             lost_since: None,
             failover: None,
             rescan: None,
+            watch: None,
+            last_look: None,
+            scan_no: 0,
         }
     }
 }
@@ -1132,6 +1214,7 @@ impl Hub {
         self.offered.clear();
         self.finish = None;
         self.lost_since = None;
+        self.watch = None;
         self.gen += 1;
     }
 
@@ -1350,22 +1433,123 @@ impl Hub {
     pub fn scan(&mut self, id: &str, open_after: bool, proxy: &EventLoopProxy<UserEvent>) -> Option<AfterScan> {
         let s = self.saved.iter().find(|s| s.id == id)?;
         let targets: Vec<Entry> = s.book.iter().filter(|e| e.code != s.code).cloned().collect();
-        if self.scans.get(id).is_some_and(|sc| sc.checked < sc.total) {
+        // One of ours is still going (a quiet look of our own gives way).
+        if self.scans.get(id).is_some_and(|sc| sc.checked < sc.total && !sc.quiet) {
             return None;
         }
         self.prompt = None;
+        let empty = targets.is_empty();
+        self.start_scan(id, targets, open_after, false, proxy);
+        (empty && open_after).then(|| AfterScan::OpenOwn(id.to_string()))
+    }
+
+    fn start_scan(&mut self, id: &str, targets: Vec<Entry>, open_after: bool, quiet: bool, proxy: &EventLoopProxy<UserEvent>) {
+        self.scan_no += 1;
+        let no = self.scan_no;
         let seen = targets.iter().map(|e| e.code.clone()).collect();
-        self.scans.insert(id.to_string(), Scan { total: targets.len(), open_after, seen, ..Scan::default() });
-        if targets.is_empty() {
-            return open_after.then(|| AfterScan::OpenOwn(id.to_string()));
+        self.scans.insert(id.to_string(), Scan { total: targets.len(), open_after, quiet, no, seen, ..Scan::default() });
+        // Our own looks while we host it say so, so a copy we find looks back.
+        let mine = quiet.then(|| self.saved.iter().find(|s| s.id == id).map(|s| s.code.clone())).flatten();
+        if quiet {
+            self.last_look = Some(Instant::now());
         }
-        look(targets, id.to_string(), self.tag, proxy);
-        None
+        if !targets.is_empty() {
+            look(targets, id.to_string(), no, self.tag, mine, proxy);
+        }
+    }
+
+    /// Another copy of the saved hub we host looked at ours: look at it
+    /// (once in a while at most, so two copies don't keep looking at each
+    /// other), and if it's where everyone should be, go there.
+    fn look_back(&mut self, code: &str) {
+        if self.mode != Mode::Hosting || !self.is_live() || self.expires.is_none() {
+            return;
+        }
+        let id = self.id.clone();
+        let busy = self.scans.get(&id).is_some_and(|sc| sc.checked < sc.total);
+        if busy || self.last_look.is_some_and(|t| t.elapsed() < LOOK_BACK_EVERY) {
+            // Not right now: our next look at everyone comes early instead.
+            let soon = self.last_look.map_or_else(Instant::now, |t| t + LOOK_BACK_EVERY).max(Instant::now() + Duration::from_secs(5));
+            if let Some((at, _)) = self.watch.as_mut().filter(|(at, _)| *at > soon) {
+                *at = soon;
+            }
+            return;
+        }
+        let Some(proxy) = self.proxy.clone() else { return };
+        let Some(s) = self.saved.iter().find(|s| s.id == id) else { return };
+        if code == s.code {
+            return;
+        }
+        // Whose it is, if they're in our book; the look finds out anyway.
+        let name = s.book.iter().find(|e| e.code == code).map(|e| e.name.clone()).unwrap_or_else(|| "Someone".into());
+        let target = Entry { name, code: code.to_string(), at: 0 };
+        self.start_scan(&id, vec![target], false, true, &proxy);
+    }
+
+    /// While we host a saved hub: is another copy of it open too? Whoever is
+    /// in here with us isn't hosting it anywhere else, so only the others
+    /// are looked at.
+    fn look_for_others(&mut self) {
+        let Some(proxy) = self.proxy.clone() else { return };
+        let id = self.id.clone();
+        let Some(s) = self.saved.iter().find(|s| s.id == id) else { return };
+        let here: Vec<&str> = self.members.iter().filter_map(|m| m["code"].as_str()).collect();
+        let targets: Vec<Entry> = s.book.iter().filter(|e| e.code != s.code && !here.contains(&e.code.as_str())).cloned().collect();
+        if targets.is_empty() || self.scans.get(&id).is_some_and(|sc| sc.checked < sc.total) {
+            return;
+        }
+        self.start_scan(&id, targets, false, true, &proxy);
+    }
+
+    /// Two copies of our saved hub are open at once (ours, and `host`'s at
+    /// `code` with `theirs` people in it): everyone ends up in one. The one
+    /// with more people in it stays (the same: the lower code); if that's
+    /// theirs, everyone here goes there, us too. Both sides work it out the
+    /// same way, so only one moves.
+    fn join_up(&mut self, id: &str, code: &str, host: &str, theirs: u64) -> Option<AfterScan> {
+        if self.mode != Mode::Hosting || self.id != id || !self.is_live() {
+            return None;
+        }
+        let mine = self.saved.iter().find(|s| s.id == id).map(|s| s.code.clone())?;
+        let ours = self.members.len() as u64;
+        if code == mine || theirs == 0 || !theirs_wins(&mine, ours, code, theirs) {
+            return None;
+        }
+        let (Some(proxy), me) = (self.proxy.clone(), self.me_name.clone()) else { return None };
+        let (hub, expires, others) = (self.name.clone(), self.expires, ours.saturating_sub(1));
+        // Everyone here hears where to go first; our copy stays up a moment
+        // so they do.
+        if let Some(server) = &self.server {
+            server.send_moving(code, host);
+        }
+        let (server, proc) = (self.server.take(), self.proc.take());
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(1500));
+            drop(server);
+            drop(proc);
+        });
+        self.plan_failover();
+        self.join(code, &me, &proxy);
+        if self.mode == Mode::Joined {
+            self.id = id.to_string();
+            self.expires = expires;
+        }
+        let people = if theirs == 1 { "person" } else { "people" };
+        let with = match others {
+            0 => String::new(),
+            1 => ", and so did the one person in yours".into(),
+            n => format!(", and so did the {n} people in yours"),
+        };
+        Some(AfterScan::Said(format!("{host} had {hub} open too ({theirs} {people}): you moved there{with}."), "ok"))
     }
 
     /// One code's answer to a scan. An open copy's book is merged into ours,
     /// and anyone new in it is looked at too.
-    pub fn on_scan(&mut self, id: &str, entry: Entry, result: Result<Peeked, String>, proxy: &EventLoopProxy<UserEvent>) -> Option<AfterScan> {
+    pub fn on_scan(&mut self, id: &str, no: u64, entry: Entry, result: Result<Peeked, String>, proxy: &EventLoopProxy<UserEvent>) -> Option<AfterScan> {
+        // An answer to a scan that's been replaced since.
+        if self.scans.get(id).is_none_or(|sc| sc.no != no) {
+            return None;
+        }
         let found = result.ok().filter(|p| p.id == id);
         if let Some(p) = &found {
             let learned = self.learn(id, &p.book, &p.gone).unwrap_or(0);
@@ -1377,7 +1561,8 @@ impl Hub {
             if !more.is_empty() {
                 sc.seen.extend(more.iter().map(|e| e.code.clone()));
                 sc.total += more.len();
-                look(more, id.to_string(), self.tag, proxy);
+                let from = sc.quiet.then_some(mine);
+                look(more, id.to_string(), no, self.tag, from, proxy);
             }
         }
         let sc = self.scans.get_mut(id)?;
@@ -1386,7 +1571,10 @@ impl Hub {
         if let Some(p) = found {
             let host = if p.host.is_empty() { entry.name.clone() } else { p.host };
             sc.hits.retain(|h| h.code != entry.code);
-            sc.hits.push(Hit { code: entry.code, host, members: p.members });
+            sc.hits.push(Hit { code: entry.code.clone(), host: host.clone(), members: p.members });
+            if sc.quiet {
+                return self.join_up(id, &entry.code, &host, p.members);
+            }
         }
         if sc.checked < sc.total || !sc.open_after {
             return None;
@@ -1478,6 +1666,7 @@ impl Hub {
         let handed = if hand_over { self.hand_over() } else { None };
         let id = self.id.clone();
         self.reset();
+        self.failover = None;
         self.st = "off";
         self.error.clear();
         self.notice.clear();
@@ -1641,6 +1830,11 @@ impl Hub {
                 }
                 self.lost_since = None;
                 self.failover = None;
+                // Hosting a saved hub: someone may have it open elsewhere
+                // too (they took over while we were gone); look soon.
+                if self.mode == Mode::Hosting && self.expires.is_some() {
+                    self.watch = Some((Instant::now() + look_after(0), 0));
+                }
                 // A saved hub we joined is saved here too, by itself: our own
                 // key and code for it, so we can open it ourselves.
                 let auto_save = self.mode == Mode::Joined && self.expires.is_some() && self.saved_id.is_none() && self.making.is_none();
@@ -1658,7 +1852,14 @@ impl Hub {
                     return Some((msg, "ok"));
                 }
             }
-            HubEvent::Members(list) => self.members = list,
+            HubEvent::Members(list) => {
+                // Everyone else left our saved hub (or vanished): they may
+                // be in another copy of it now, so look again soon.
+                if self.mode == Mode::Hosting && self.expires.is_some() && list.len() <= 1 && self.members.len() > 1 {
+                    self.watch = Some((Instant::now() + look_after(0), 0));
+                }
+                self.members = list;
+            }
             HubEvent::Book { book, gone } => {
                 self.book = book;
                 self.gone = gone;
@@ -1736,6 +1937,7 @@ impl Hub {
                 }
             }
             HubEvent::Moving { code, name } => return self.move_to(&code, &name),
+            HubEvent::AlsoOpen { code } => self.look_back(&code),
             HubEvent::Kicked => {
                 self.end("The host removed you from the hub.");
                 return Some(("Removed from the hub.".into(), "bad"));
@@ -1750,30 +1952,46 @@ impl Hub {
     /// (everyone comes to us), or theirs, so we go there.
     fn move_to(&mut self, code: &str, name: &str) -> Status {
         let (Some(proxy), me) = (self.proxy.clone(), self.me_name.clone()) else { return None };
-        let (id, hub) = (self.id.clone(), self.name.clone());
+        let (id, hub, expires) = (self.id.clone(), self.name.clone(), self.expires);
+        // Who's next if that copy never comes (worked out now, while we still
+        // have the member list).
+        self.plan_failover();
         let mine = self.saved.iter().find(|s| s.id == id).map(|s| s.code.clone());
         if mine.as_deref() == Some(code) {
             self.open_saved(&id, &me, &proxy);
             return Some((format!("You're hosting {hub} now; everyone is coming over."), "ok"));
         }
         self.join(code, &me, &proxy);
+        // Still this hub until that copy answers, so if it never does, we go
+        // to the next in line rather than wait for it forever.
+        if self.mode == Mode::Joined {
+            self.id = id;
+            self.expires = expires;
+        }
         Some((format!("Moving to {name}'s copy of {hub}…"), "busy"))
+    }
+
+    /// Everyone's app works out the same list of who takes over a saved hub
+    /// (those in it who saved it, longest in first), from the last member
+    /// list, once per hub.
+    fn plan_failover(&mut self) {
+        if self.failover.as_ref().is_some_and(|(f, _)| *f == self.id) {
+            return;
+        }
+        let mut members: Vec<&Value> = self.members.iter().filter(|m| m["host"] != true).collect();
+        members.sort_by_key(|m| m["id"].as_u64().unwrap_or(u64::MAX));
+        let list = members
+            .into_iter()
+            .filter_map(|m| hubstore::entry(m["name"].as_str().unwrap_or(""), m["code"].as_str()?, 0))
+            .collect();
+        self.failover = Some((self.id.clone(), list));
     }
 
     /// A saved hub's host vanished: everyone's app takes the same list of who
     /// takes over (those in it who saved it, longest in first) and goes to the
     /// first one; if that one never comes, the next.
     fn take_over(&mut self) -> Status {
-        let id = self.id.clone();
-        if self.failover.as_ref().is_none_or(|(f, _)| *f != id) {
-            let mut members: Vec<&Value> = self.members.iter().filter(|m| m["host"] != true).collect();
-            members.sort_by_key(|m| m["id"].as_u64().unwrap_or(u64::MAX));
-            let list = members
-                .into_iter()
-                .filter_map(|m| hubstore::entry(m["name"].as_str().unwrap_or(""), m["code"].as_str()?, 0))
-                .collect();
-            self.failover = Some((id.clone(), list));
-        }
+        self.plan_failover();
         let lost = self.code.clone().unwrap_or_default();
         let next = self.failover.as_mut().and_then(|(_, l)| {
             while !l.is_empty() {
@@ -1800,8 +2018,16 @@ impl Hub {
     /// long enough, saved hubs that have expired, and taking over a saved
     /// hub whose host is gone.
     pub fn tick(&mut self) -> Status {
-        if self.lost_since.is_some_and(|t| t.elapsed() >= TAKE_OVER_AFTER) && self.mode == Mode::Joined {
+        // The host vanished; or the copy we went to after that never came.
+        let limit = if self.failover.as_ref().is_some_and(|(f, _)| *f == self.id) { NEXT_AFTER } else { TAKE_OVER_AFTER };
+        if self.lost_since.is_some_and(|t| t.elapsed() >= limit) && self.mode == Mode::Joined {
             return self.take_over();
+        }
+        if let Some((_, n)) = self.watch.filter(|(at, _)| Instant::now() >= *at) {
+            self.watch = Some((Instant::now() + look_after(n + 1), n + 1));
+            if self.mode == Mode::Hosting && self.is_live() && self.expires.is_some() {
+                self.look_for_others();
+            }
         }
         if let Some((id, _)) = self.rescan.as_ref().filter(|(_, at)| Instant::now() >= *at) {
             let id = id.clone();
@@ -1865,6 +2091,17 @@ impl Hub {
         self.close(false);
     }
 
+    /// For the end-to-end check: the PC this copy runs on restarts (or loses
+    /// power): TailCat is gone first, so nothing more reaches anyone, not
+    /// even a goodbye, and the app with it.
+    #[cfg(all(test, target_os = "linux"))]
+    pub fn test_power_off(&mut self) {
+        if let Some(p) = self.proc.as_mut() {
+            p.kill();
+        }
+        self.close(false);
+    }
+
     /// For the end-to-end check: events from two hubs in one process are
     /// told apart by generation.
     #[cfg(all(test, target_os = "linux"))]
@@ -1900,7 +2137,7 @@ impl Hub {
             "link": self.link.json(),
             "log": self.log.json(),
             "saved": self.saved.iter().map(|s| {
-                let scan = self.scans.get(&s.id);
+                let scan = self.scans.get(&s.id).filter(|sc| !sc.quiet);
                 json!({
                     "id": s.id, "name": s.name, "expiresIn": s.expires.saturating_sub(now),
                     "people": s.book.len(),
@@ -1925,7 +2162,8 @@ impl Hub {
 }
 
 /// Looks at each code (a few at a time) and reports each answer to the app.
-fn look(targets: Vec<Entry>, id: String, tag: u64, proxy: &EventLoopProxy<UserEvent>) {
+/// `mine`: our code, when we have this hub open ourselves.
+fn look(targets: Vec<Entry>, id: String, no: u64, tag: u64, mine: Option<String>, proxy: &EventLoopProxy<UserEvent>) {
     let proxy = proxy.clone();
     std::thread::spawn(move || {
         for chunk in targets.chunks(SCAN_AT_ONCE) {
@@ -1933,10 +2171,10 @@ fn look(targets: Vec<Entry>, id: String, tag: u64, proxy: &EventLoopProxy<UserEv
                 .iter()
                 .cloned()
                 .map(|e| {
-                    let (p, id) = (proxy.clone(), id.clone());
+                    let (p, id, mine) = (proxy.clone(), id.clone(), mine.clone());
                     std::thread::spawn(move || {
-                        let r = scan_one(&e, &p);
-                        let _ = p.send_event(UserEvent::HubScan(tag, id, e, r));
+                        let r = scan_one(&e, mine.as_deref(), &p);
+                        let _ = p.send_event(UserEvent::HubScan(tag, id, no, e, r));
                     })
                 })
                 .collect();
@@ -1948,12 +2186,12 @@ fn look(targets: Vec<Entry>, id: String, tag: u64, proxy: &EventLoopProxy<UserEv
 }
 
 /// One look at someone's copy: a TailCat to their code for a moment, and a peek.
-fn scan_one(e: &Entry, proxy: &EventLoopProxy<UserEvent>) -> Result<Peeked, String> {
+fn scan_one(e: &Entry, mine: Option<&str>, proxy: &EventLoopProxy<UserEvent>) -> Result<Peeked, String> {
     let c = code::parse(&e.code)?;
     let local = crate::free_port()?;
     let args = vec!["forward".into(), c.addr.clone(), format!("{local}:{}", c.ports[0])];
     let proc = tailcat::spawn(Role::HubScan, &args, proxy)?;
-    let r = peek(local, SCAN_WAIT);
+    let r = peek_from(local, SCAN_WAIT, mine);
     drop(proc);
     r
 }
@@ -2156,6 +2394,7 @@ mod tests {
                     HubEvent::Deleted { .. } => "deleted",
                     HubEvent::Rtt(_) => "rtt",
                     HubEvent::Moving { .. } => "moving",
+                    HubEvent::AlsoOpen { .. } => "alsoOpen",
                 };
                 if name == want {
                     return ev;
@@ -2395,6 +2634,87 @@ mod tests {
         // Nothing there: no answer.
         let nothing = crate::free_port().unwrap();
         assert!(peek(nothing, Duration::from_millis(800)).is_err());
+    }
+
+    #[test]
+    fn a_peek_asks_again_when_the_tunnel_drops_its_first_try() {
+        let (hub, id) = saved("Retry Hub");
+        let mut kit = Raw::join(hub.port, json!({ "op": "hello", "v": PROTOCOL, "peer": 1, "name": "Kit", "host": hub.host_token }));
+        kit.wait("welcome");
+        // Stands in for TailCat: takes the first connection and closes it
+        // (its first reach for the other end failed), then gets through.
+        let ln = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let near = ln.local_addr().unwrap().port();
+        let far = hub.port;
+        std::thread::spawn(move || {
+            let (first, _) = ln.accept().unwrap();
+            std::thread::sleep(Duration::from_millis(300));
+            drop(first);
+            let (mut near_side, _) = ln.accept().unwrap();
+            let mut far_side = TcpStream::connect((Ipv4Addr::LOCALHOST, far)).unwrap();
+            let (mut a, mut b) = (near_side.try_clone().unwrap(), far_side.try_clone().unwrap());
+            std::thread::spawn(move || {
+                let _ = std::io::copy(&mut a, &mut b);
+            });
+            let _ = std::io::copy(&mut far_side, &mut near_side);
+        });
+        let p = peek(near, Duration::from_secs(10)).expect("the second try answers");
+        assert_eq!((p.id.as_str(), p.hub.as_str()), (id.as_str(), "Retry Hub"));
+    }
+
+    #[test]
+    fn a_peek_from_another_open_copy_reaches_only_the_host() {
+        let (hub, _) = saved("h");
+        let mut kit = Raw::join(hub.port, json!({ "op": "hello", "v": PROTOCOL, "peer": 1, "name": "Kit", "host": hub.host_token }));
+        kit.wait("welcome");
+        let mut jo = Raw::join(hub.port, hello("Jo", 2));
+        jo.wait("welcome");
+        // A plain scan says nothing.
+        peek(hub.port, Duration::from_secs(5)).unwrap();
+        // A copy that's open itself says where.
+        peek_from(hub.port, Duration::from_secs(5), Some(&hub_code(7))).unwrap();
+        let also = kit.wait("alsoOpen");
+        assert_eq!(also["code"].as_str(), Some(hub_code(7).as_str()));
+        jo.r.get_ref().set_read_timeout(Some(Duration::from_millis(800))).unwrap();
+        loop {
+            let v = jo.next();
+            assert_ne!(v["op"], "alsoOpen", "only the host hears");
+            if v.is_null() {
+                break;
+            }
+        }
+        // Junk in place of a code: nothing.
+        peek_from(hub.port, Duration::from_secs(5), Some("not a code")).unwrap();
+        kit.r.get_ref().set_read_timeout(Some(Duration::from_millis(800))).unwrap();
+        loop {
+            let v = kit.next();
+            assert_ne!(v["op"], "alsoOpen");
+            if v.is_null() {
+                break;
+            }
+        }
+    }
+
+    #[test]
+    fn of_two_open_copies_exactly_one_moves() {
+        let (a, b) = (hub_code(1), hub_code(2));
+        for (na, nb) in [(1, 1), (1, 2), (2, 1), (3, 3), (5, 2), (2, 9)] {
+            let a_moves = theirs_wins(&a, na, &b, nb);
+            let b_moves = theirs_wins(&b, nb, &a, na);
+            assert!(a_moves != b_moves, "{na} vs {nb}: exactly one moves");
+            if na != nb {
+                assert_eq!(a_moves, na < nb, "{na} vs {nb}: the one with fewer people moves");
+            }
+        }
+    }
+
+    #[test]
+    fn looks_come_soon_then_every_few_minutes() {
+        let secs: Vec<u64> = (0..9).map(|n| look_after(n).as_secs()).collect();
+        assert_eq!(secs, [10, 20, 40, 80, 160, 300, 300, 300, 300]);
+        // Missing a few pings isn't gone; a restarted PC is, soon.
+        assert!(SILENT_FOR >= PING_EVERY * 4 && SILENT_FOR > Duration::from_secs(15) + Duration::from_secs(5));
+        assert!(SILENT_FOR + TAKE_OVER_AFTER <= Duration::from_secs(45));
     }
 
     #[test]

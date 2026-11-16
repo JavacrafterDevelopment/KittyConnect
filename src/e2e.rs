@@ -86,9 +86,9 @@ fn route(a: &mut Apps, ev: UserEvent) {
             let app = if tag == a.friend.hub.tag { &mut a.friend } else { &mut a.host };
             app.on_hub_key(saved, r, open_after);
         }
-        UserEvent::HubScan(tag, id, e, r) => {
+        UserEvent::HubScan(tag, id, no, e, r) => {
             let app = if tag == a.friend.hub.tag { &mut a.friend } else { &mut a.host };
-            app.on_hub_scan(&id, e, r);
+            app.on_hub_scan(&id, no, e, r);
         }
         UserEvent::Ping(t, r) => {
             a.friend.on_ping(t, r);
@@ -608,6 +608,67 @@ fn script(d: &Drive, work: &std::path::Path) -> Result<Value, String> {
         a.friend.hub.json()["st"] == "live" && a.host.hub.json()["members"].as_array().is_some_and(|m| m.len() == 2)
     })?;
     results.insert("take_over".into(), json!("the friend's copy vanished: the host took over by itself, and the friend came back to it"));
+
+    // The host's PC restarts mid-session: TailCat dies first, so not a word
+    // reaches the friend, who has to notice the silence and take over.
+    let off = Instant::now();
+    d.on(|a| a.host.hub.test_power_off());
+    d.wait("the friend to take over after the host's PC went off", 75, |a| {
+        a.friend.hub.json()["mode"] == "host" && a.friend.hub.json()["st"] == "live"
+    })?;
+    let took = off.elapsed().as_secs();
+    // The host's app starts again (a new app, the same saved hubs on disk)
+    // and scans: the friend has it open.
+    let hubs = work.join("host-hubs");
+    d.on(move |a| {
+        a.host.hub = hub::Hub::with_store(hubstore::Store::at(hubs));
+        a.host.hub.test_gen_base(HOST_GEN + 500_000);
+    });
+    let i2 = id.clone();
+    d.on(move |a| {
+        let p = a.host.proxy.clone();
+        a.host.hub.scan(&i2, false, &p);
+    });
+    let (i2, fc, fname) = (id.clone(), friend_code.clone(), friend_name.clone());
+    d.wait("the restarted host's scan to find the friend's copy", 60, move |a| {
+        a.host.hub.json()["saved"].as_array().is_some_and(|l| {
+            l.iter().any(|s| {
+                s["id"] == i2.as_str()
+                    && s["scan"]["running"] == false
+                    && s["scan"]["hits"].as_array().is_some_and(|h| h.iter().any(|x| x["code"] == fc.as_str() && x["host"] == fname.as_str()))
+            })
+        })
+    })?;
+    results.insert(
+        "restart".into(),
+        json!(format!("the host's PC went off without a word: the friend took over by themselves in {took} s; the host's app, started again, found them with Scan")),
+    );
+
+    // Opened twice at once (the host opens its own copy anyway): the two
+    // copies find each other and join up by themselves, in whichever has
+    // the lower code (one person in each).
+    let i2 = id.clone();
+    d.on(move |a| a.host.open_saved_hub(&i2));
+    let together = Instant::now();
+    d.wait("the two open copies to join up", 90, |a| {
+        let (h, f) = (a.host.hub.json(), a.friend.hub.json());
+        let two = |j: &Value| j["mode"] == "host" && j["st"] == "live" && j["members"].as_array().is_some_and(|m| m.len() == 2);
+        let joined = |j: &Value| j["mode"] == "join" && j["st"] == "live";
+        (two(&h) && joined(&f)) || (two(&f) && joined(&h))
+    })?;
+    let (who, expected) = d.on(|a| {
+        let host_code = a.host.hub.saved[0].code.clone();
+        let friend_code = a.friend.hub.saved[0].code.clone();
+        let stays = if a.host.hub.is_host() { "host" } else { "friend" };
+        (stays, if host_code < friend_code { "host" } else { "friend" })
+    });
+    if who != expected {
+        return Err(format!("the {who}'s copy stayed, but the lower code is the {expected}'s"));
+    }
+    results.insert(
+        "join_up".into(),
+        json!(format!("both opened it at once: they found each other and joined up in the {who}'s copy (the lower code) in {} s", together.elapsed().as_secs())),
+    );
 
     // Delete for everyone: both copies go, keys and all.
     let i2 = id.clone();

@@ -94,8 +94,9 @@ pub enum UserEvent {
     /// A saved hub's key was made (for the Hub with this tag): the hub, the
     /// key's address or why not, and whether to open it now.
     HubKey(u64, hubstore::Saved, Result<String, String>, bool),
-    /// Scan: one code of a saved hub's address book, and what answered there.
-    HubScan(u64, String, hubstore::Entry, Result<hub::Peeked, String>),
+    /// Scan: one code of a saved hub's address book (for that scan of that
+    /// hub), and what answered there.
+    HubScan(u64, String, u64, hubstore::Entry, Result<hub::Peeked, String>),
 }
 
 pub enum Xfer {
@@ -711,8 +712,8 @@ fn main() {
                 app.on_hub_key(saved, result, open_after);
                 true
             }
-            Event::UserEvent(UserEvent::HubScan(_, id, entry, result)) => {
-                app.on_hub_scan(&id, entry, result);
+            Event::UserEvent(UserEvent::HubScan(_, id, no, entry, result)) => {
+                app.on_hub_scan(&id, no, entry, result);
                 true
             }
             Event::UserEvent(UserEvent::WebdavLimit(limit)) => {
@@ -1322,6 +1323,7 @@ impl App {
                 let id = s("id");
                 match self.hub.scan(&id, true, &self.proxy) {
                     Some(hub::AfterScan::OpenOwn(id)) => self.open_saved_hub(&id),
+                    Some(hub::AfterScan::Said(text, kind)) => self.set_status(text, kind),
                     None => self.set_status("Looking for whoever has it open…", "busy"),
                 }
             }
@@ -2000,9 +2002,11 @@ impl App {
         }
     }
 
-    fn on_hub_scan(&mut self, id: &str, entry: hubstore::Entry, result: Result<hub::Peeked, String>) {
-        if let Some(hub::AfterScan::OpenOwn(id)) = self.hub.on_scan(id, entry, result, &self.proxy) {
-            self.open_saved_hub(&id);
+    fn on_hub_scan(&mut self, id: &str, no: u64, entry: hubstore::Entry, result: Result<hub::Peeked, String>) {
+        match self.hub.on_scan(id, no, entry, result, &self.proxy) {
+            Some(hub::AfterScan::OpenOwn(id)) => self.open_saved_hub(&id),
+            Some(hub::AfterScan::Said(text, kind)) => self.set_status(text, kind),
+            None => {}
         }
     }
 

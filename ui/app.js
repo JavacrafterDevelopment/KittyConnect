@@ -539,7 +539,9 @@ function savedTile(s, h) {
       body = `<p class="meta">Looking for whoever has it open… ${sc.checked} of ${sc.total}</p>`;
     } else if (sc) {
       body = sc.hits.length ? hitsHtml(sc.hits)
-        : `<p class="meta">${sc.total ? 'Nobody has it open right now.' : 'Nobody else has saved it yet.'}</p>`;
+        : `<p class="meta">${sc.total
+          ? 'Nobody has it open right now. Press Open to open it: anyone who opens it after you finds you, and if someone opens a copy of their own at the same time, the two join up by themselves.'
+          : 'Nobody else has saved it yet.'}</p>`;
     }
     if (sc && sc.learned && !sc.opening) {
       body += `<p class="okline">Its address book caught up: ${sc.learned} new ${sc.learned === 1 ? 'person' : 'people'}.</p>`;
