@@ -40,6 +40,8 @@
 //!   → {"op":"offer","oid":"voip","code":"kitty:voip:…","title":"Hangout"}   ("Open to hub")
 //!   → {"op":"withdraw","oid":"voip"}
 //!   → {"op":"delete"}  ← {"op":"deleted","by":"Sam"}   (delete it for everyone)
+//!   ← {"op":"moving","code":"kitty:hub:…","name":"Sam"}  (a saved hub's host closed it:
+//!                                    Sam's copy takes over, and everyone goes there)
 //!   → {"op":"kick","id":4}                                   (host only)
 //!   ← {"op":"kicked"}  (then the hub closes the connection)
 //!   → {"op":"ping"}  ← {"op":"pong"}                          (every 15 s; timed for the ping shown)
@@ -221,7 +223,7 @@ impl State {
         json!(self
             .members
             .iter()
-            .map(|m| json!({ "id": m.id, "name": m.name, "host": m.host, "path": m.path, "rtt": m.rtt }))
+            .map(|m| json!({ "id": m.id, "name": m.name, "host": m.host, "path": m.path, "rtt": m.rtt, "code": m.code }))
             .collect::<Vec<_>>())
     }
 
@@ -281,6 +283,18 @@ impl HubServer {
             std::thread::spawn(move || accept_loop(listener, state, stop, token, open));
         }
         Ok(HubServer { port, host_token, state, stop })
+    }
+
+    /// The host is closing a saved hub: whoever has been in it longest, of
+    /// those who saved it, takes over with their own copy, and everyone hears
+    /// where to go. Returns who, if anyone.
+    pub fn hand_over(&self) -> Option<String> {
+        let st = self.state.lock().unwrap();
+        st.meta.expires?;
+        let next = st.members.iter().filter(|m| !m.host && m.code.is_some()).min_by_key(|m| m.id)?;
+        let (name, code) = (next.name.clone(), next.code.clone()?);
+        st.broadcast(&json!({ "op": "moving", "code": code, "name": name }));
+        Some(name)
     }
 
     /// How many are in the hub (the host included).
@@ -487,8 +501,12 @@ fn serve_member(stream: TcpStream, state: &Mutex<State>, stop: &AtomicBool, toke
                         let at = st.stamp(&code);
                         match hubstore::entry(&name, &code, at) {
                             Some(e) => {
-                                if let Some(m) = st.members.iter_mut().find(|m| m.id == id) {
+                                // Everyone's member list says who could take over.
+                                let new_code = st.members.iter_mut().find(|m| m.id == id).filter(|m| m.code.as_ref() != Some(&e.code)).map(|m| {
                                     m.code = Some(e.code.clone());
+                                });
+                                if new_code.is_some() {
+                                    st.broadcast_members();
                                 }
                                 hubstore::merge(&mut st.book, &mut st.gone, &[e], &[])
                             }
@@ -626,6 +644,8 @@ pub enum HubEvent {
     Offers(Vec<Value>),
     /// Someone deleted the hub for everyone.
     Deleted { by: String },
+    /// The host closed the saved hub: go to this code, `name`'s copy.
+    Moving { code: String, name: String },
     /// How long the hub took to answer a ping, in ms.
     Rtt(u32),
     Members(Vec<Value>),
@@ -793,6 +813,11 @@ fn session(stream: TcpStream, hello: &Value, rx: &Arc<Mutex<Receiver<Value>>>, s
             }
             "offers" => emit(HubEvent::Offers(msg["list"].as_array().cloned().unwrap_or_default())),
             "deleted" => emit(HubEvent::Deleted { by: clean(msg["by"].as_str().unwrap_or("Someone"), crate::peers::MAX_NAME) }),
+            "moving" => {
+                if let Some(code) = hubstore::clean_code(msg["code"].as_str().unwrap_or_default()) {
+                    emit(HubEvent::Moving { code, name: clean(msg["name"].as_str().unwrap_or("Someone"), crate::peers::MAX_NAME) });
+                }
+            }
             "pong" => {
                 if let Some(t) = pinged.lock().unwrap().take() {
                     emit(HubEvent::Rtt(t.elapsed().as_millis().min(60_000) as u32));
@@ -996,7 +1021,21 @@ pub struct Hub {
     /// Open found the hub already open somewhere: which hub, and where.
     prompt: Option<(String, Vec<Hit>)>,
     finish: Option<Finish>,
+    /// To act on our own when the hub moves or its host vanishes: the event
+    /// loop and our name, from the last start or join.
+    proxy: Option<EventLoopProxy<UserEvent>>,
+    me_name: String,
+    /// We lost a saved hub's host (reconnecting since).
+    lost_since: Option<Instant>,
+    /// Who takes over a saved hub whose host vanished, in order (everyone's
+    /// app works out the same list from the last member list).
+    failover: Option<(String, Vec<Entry>)>,
+    /// Scan a hub again soon (we handed ours over, so someone else has it now).
+    rescan: Option<(String, Instant)>,
 }
+
+/// How long a saved hub's host can be gone before someone else takes over.
+const TAKE_OVER_AFTER: Duration = Duration::from_secs(15);
 
 impl Default for Hub {
     fn default() -> Self {
@@ -1036,6 +1075,11 @@ impl Default for Hub {
             scans: HashMap::new(),
             prompt: None,
             finish: None,
+            proxy: None,
+            me_name: String::new(),
+            lost_since: None,
+            failover: None,
+            rescan: None,
         }
     }
 }
@@ -1087,6 +1131,7 @@ impl Hub {
         self.offers.clear();
         self.offered.clear();
         self.finish = None;
+        self.lost_since = None;
         self.gen += 1;
     }
 
@@ -1138,6 +1183,8 @@ impl Hub {
         }
         let hello = json!({ "op": "hello", "v": PROTOCOL, "peer": crate::peers::new_id(), "name": me, "host": server.host_token });
         self.conn = Some(connect(server.port, hello, to_app(self.gen, proxy)));
+        self.proxy = Some(proxy.clone());
+        self.me_name = me.to_string();
         self.name = meta.name;
         self.id = meta.id;
         self.expires = meta.expires;
@@ -1283,6 +1330,8 @@ impl Hub {
         }
         let hello = json!({ "op": "hello", "v": PROTOCOL, "peer": crate::peers::new_id(), "name": me, "path": "unknown" });
         self.conn = Some(connect(local, hello, to_app(self.gen, proxy)));
+        self.proxy = Some(proxy.clone());
+        self.me_name = me.clone();
         self.code = Some(code::hub(c.ports[0], &c.addr));
         self.mode = Mode::Joined;
         self.st = "starting";
@@ -1403,7 +1452,9 @@ impl Hub {
         }
         self.finish = None;
         if self.is_on() && self.id == id {
-            self.leave();
+            // Just ours deleted: the others keep it (handed over). For
+            // everyone: nobody does.
+            self.close(!everyone && by.is_none());
         }
         let msg = match by {
             Some(by) if !everyone => format!("{by} deleted {name} for everyone."),
@@ -1416,11 +1467,40 @@ impl Hub {
 
     /// Leaves the hub, or closes it if it's ours (everyone in it is
     /// disconnected; a saved hub stays saved).
-    pub fn leave(&mut self) {
+    pub fn leave(&mut self) -> bool {
+        self.close(true)
+    }
+
+    /// Leaves or closes. A saved hub we host is handed over first (if
+    /// `hand_over` and someone in it saved it): they keep it open, with
+    /// everyone else. True if it was.
+    fn close(&mut self, hand_over: bool) -> bool {
+        let handed = if hand_over { self.hand_over() } else { None };
+        let id = self.id.clone();
         self.reset();
         self.st = "off";
         self.error.clear();
         self.notice.clear();
+        let Some(name) = handed else { return false };
+        self.notice = format!("{name} has it open now, with everyone who was in it. Scan finds it.");
+        // A moment for them to open it, then look for it.
+        self.rescan = Some((id, Instant::now() + Duration::from_secs(6)));
+        true
+    }
+
+    fn hand_over(&mut self) -> Option<String> {
+        if self.mode != Mode::Hosting || self.expires.is_none() {
+            return None;
+        }
+        let name = self.server.as_ref()?.hand_over()?;
+        // Our copy stays up a moment longer, so everyone hears where to go.
+        let (server, proc) = (self.server.take(), self.proc.take());
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(1500));
+            drop(server);
+            drop(proc);
+        });
+        Some(name)
     }
 
     fn end(&mut self, why: &str) {
@@ -1559,11 +1639,23 @@ impl Hub {
                 if self.mode == Mode::Joined || self.code.is_some() {
                     self.st = "live";
                 }
+                self.lost_since = None;
+                self.failover = None;
+                // A saved hub we joined is saved here too, by itself: our own
+                // key and code for it, so we can open it ourselves.
+                let auto_save = self.mode == Mode::Joined && self.expires.is_some() && self.saved_id.is_none() && self.making.is_none();
+                if auto_save {
+                    if let Some(p) = self.proxy.clone() {
+                        self.save_joined(&p);
+                    }
+                }
                 if was != "live" && self.st == "live" {
-                    return Some((
-                        if host { format!("{} is open. Send its code to your friends.", self.name) } else { format!("Joined {}.", self.name) },
-                        "ok",
-                    ));
+                    let msg = match (host, auto_save) {
+                        (true, _) => format!("{} is open. Send its code to your friends.", self.name),
+                        (false, true) => format!("Joined {}, and saved it here too.", self.name),
+                        (false, false) => format!("Joined {}.", self.name),
+                    };
+                    return Some((msg, "ok"));
                 }
             }
             HubEvent::Members(list) => self.members = list,
@@ -1636,7 +1728,14 @@ impl Hub {
                 if self.st == "live" {
                     self.reconnecting = true;
                 }
+                // A saved hub's host is gone (or the one we were taking over
+                // to never came): someone else takes over before long.
+                let taking_over = self.failover.as_ref().is_some_and(|(id, _)| *id == self.id);
+                if self.mode == Mode::Joined && self.expires.is_some() && (self.st == "live" || taking_over) && self.lost_since.is_none() {
+                    self.lost_since = Some(Instant::now());
+                }
             }
+            HubEvent::Moving { code, name } => return self.move_to(&code, &name),
             HubEvent::Kicked => {
                 self.end("The host removed you from the hub.");
                 return Some(("Removed from the hub.".into(), "bad"));
@@ -1647,9 +1746,70 @@ impl Hub {
         None
     }
 
+    /// The saved hub moves to `code` (`name`'s copy): ours, so we open it
+    /// (everyone comes to us), or theirs, so we go there.
+    fn move_to(&mut self, code: &str, name: &str) -> Status {
+        let (Some(proxy), me) = (self.proxy.clone(), self.me_name.clone()) else { return None };
+        let (id, hub) = (self.id.clone(), self.name.clone());
+        let mine = self.saved.iter().find(|s| s.id == id).map(|s| s.code.clone());
+        if mine.as_deref() == Some(code) {
+            self.open_saved(&id, &me, &proxy);
+            return Some((format!("You're hosting {hub} now; everyone is coming over."), "ok"));
+        }
+        self.join(code, &me, &proxy);
+        Some((format!("Moving to {name}'s copy of {hub}…"), "busy"))
+    }
+
+    /// A saved hub's host vanished: everyone's app takes the same list of who
+    /// takes over (those in it who saved it, longest in first) and goes to the
+    /// first one; if that one never comes, the next.
+    fn take_over(&mut self) -> Status {
+        let id = self.id.clone();
+        if self.failover.as_ref().is_none_or(|(f, _)| *f != id) {
+            let mut members: Vec<&Value> = self.members.iter().filter(|m| m["host"] != true).collect();
+            members.sort_by_key(|m| m["id"].as_u64().unwrap_or(u64::MAX));
+            let list = members
+                .into_iter()
+                .filter_map(|m| hubstore::entry(m["name"].as_str().unwrap_or(""), m["code"].as_str()?, 0))
+                .collect();
+            self.failover = Some((id.clone(), list));
+        }
+        let lost = self.code.clone().unwrap_or_default();
+        let next = self.failover.as_mut().and_then(|(_, l)| {
+            while !l.is_empty() {
+                let e = l.remove(0);
+                if e.code != lost {
+                    return Some(e);
+                }
+            }
+            None
+        });
+        self.lost_since = None;
+        match next {
+            Some(e) => self.move_to(&e.code, &e.name),
+            None => {
+                self.failover = None;
+                let hub = self.name.clone();
+                self.end(&format!("{hub}'s host is gone, and nobody else in it can take over. Open it yourself, or Scan."));
+                Some((self.notice.clone(), "bad"))
+            }
+        }
+    }
+
     /// Once a second: our path and ping to the hub, a delete that's waited
-    /// long enough, and saved hubs that have expired.
+    /// long enough, saved hubs that have expired, and taking over a saved
+    /// hub whose host is gone.
     pub fn tick(&mut self) -> Status {
+        if self.lost_since.is_some_and(|t| t.elapsed() >= TAKE_OVER_AFTER) && self.mode == Mode::Joined {
+            return self.take_over();
+        }
+        if let Some((id, _)) = self.rescan.as_ref().filter(|(_, at)| Instant::now() >= *at) {
+            let id = id.clone();
+            self.rescan = None;
+            if let (Some(p), false) = (self.proxy.clone(), self.is_on()) {
+                self.scan(&id, false, &p);
+            }
+        }
         if let Some(f) = self.finish.as_ref().filter(|f| Instant::now() >= f.until) {
             let id = f.id.clone();
             return self.finish_delete(&id, None);
@@ -1661,7 +1821,7 @@ impl Hub {
             self.saved.retain(|s| s.id != id);
             self.scans.remove(&id);
             if self.is_on() && self.id == id {
-                self.leave();
+                self.close(false);
             }
             self.notice = format!("{name} expired and was deleted.");
             return Some((self.notice.clone(), "idle"));
@@ -1696,6 +1856,13 @@ impl Hub {
     /// A saved hub (closing it keeps it), rather than a temporary one.
     pub fn is_saved(&self) -> bool {
         self.expires.is_some()
+    }
+
+    /// For the end-to-end check: our copy dies without a word (as if the
+    /// app crashed), no hand-over.
+    #[cfg(all(test, target_os = "linux"))]
+    pub fn test_crash(&mut self) {
+        self.close(false);
     }
 
     /// For the end-to-end check: events from two hubs in one process are
@@ -1742,6 +1909,8 @@ impl Hub {
                     "here": self.is_on() && self.id == s.id,
                     "scan": scan.map(|sc| json!({
                         "running": sc.checked < sc.total, "checked": sc.checked, "total": sc.total, "learned": sc.learned,
+                        // Open is checking whether anyone has it open first.
+                        "opening": sc.open_after && sc.checked < sc.total,
                         "hits": sc.hits.iter().map(|h| json!({ "code": h.code, "host": h.host, "members": h.members })).collect::<Vec<_>>(),
                     })),
                 })
@@ -1986,6 +2155,7 @@ mod tests {
                     HubEvent::Offers(_) => "offers",
                     HubEvent::Deleted { .. } => "deleted",
                     HubEvent::Rtt(_) => "rtt",
+                    HubEvent::Moving { .. } => "moving",
                 };
                 if name == want {
                     return ev;
@@ -2130,6 +2300,36 @@ mod tests {
         assert_eq!(p.book.len(), 3);
         assert!(p.book.iter().all(|e| e.at > 0));
         assert!(p.book.iter().any(|e| e.name == "Joanna"));
+    }
+
+    /// Closing a saved hub hands it to whoever has been in it longest, of
+    /// those who saved it, and tells everyone where to go.
+    #[test]
+    fn closing_hands_the_hub_over() {
+        let (hub, _) = saved("h");
+        let mut kit = Raw::join(hub.port, json!({ "op": "hello", "v": PROTOCOL, "peer": 1, "name": "Kit", "host": hub.host_token }));
+        kit.wait("welcome");
+        kit.send(json!({ "op": "address", "code": hub_code(1) }));
+        // Jo came first but never saved it; Sam saved it.
+        let mut jo = Raw::join(hub.port, hello("Jo", 2));
+        jo.wait("welcome");
+        let mut sam = Raw::join(hub.port, hello("Sam", 3));
+        sam.wait("welcome");
+        sam.send(json!({ "op": "address", "code": hub_code(3) }));
+        // The member list carries codes (who could take over).
+        loop {
+            let m = jo.wait("members");
+            if m["list"].as_array().unwrap().iter().any(|x| x["name"] == "Sam" && x["code"] == hub_code(3)) {
+                break;
+            }
+        }
+        assert_eq!(hub.hand_over().as_deref(), Some("Sam"));
+        let mv = jo.wait("moving");
+        assert_eq!((mv["code"].as_str(), mv["name"].as_str()), (Some(hub_code(3).as_str()), Some("Sam")));
+        // A temporary hub has nobody to hand over to.
+        let t = temporary("t");
+        let _a = Raw::join(t.port, hello("A", 9));
+        assert!(t.hand_over().is_none());
     }
 
     #[test]

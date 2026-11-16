@@ -143,7 +143,11 @@
             <p class="warn" id="hub-notice"></p>
           </div>
 
-          <!-- In a hub. -->
+
+
+
+
+          <!-- In a temporary hub (a saved hub shows all this in its own tile). -->
           <div id="hub-room" class="hide">
             <div class="card roombar">
               <div class="roombar-head">
@@ -152,9 +156,6 @@
                 <span class="kind" id="hub-kind-badge"></span>
                 <span id="hub-link"></span>
                 <span class="grow"></span>
-                <button class="btn small primary hide" id="hub-save" title="Keep this hub on this PC until it expires, so you can open it yourself and scan for whoever has it open">Save this hub?</button>
-                <button class="btn small hide" id="hub-close" title="Turn it off. It stays saved, with the same code, until it expires.">Close</button>
-                <button class="btn small danger hide" id="hub-delete">Delete…</button>
                 <button class="btn small danger" id="hub-leave">Leave hub</button>
               </div>
               <div class="roomcode" id="hub-codebox">
@@ -162,34 +163,20 @@
                 <button class="btn small primary" data-copy="hub-room-code" data-code="1">Copy code</button>
               </div>
             </div>
-            <div class="panes">
-              <div class="card pane">
-                <div class="card-head"><h3>In the hub</h3><span class="meta" id="hub-count"></span></div>
-                <div id="hub-members"></div>
-              </div>
-              <div class="card pane">
-                <div class="card-head"><h3>Invite</h3></div>
-                <span class="field-label">Send to</span>
-                <div id="hub-picks"></div>
-                <div id="hub-invitables"></div>
-                <p class="meta" id="hub-sent"></p>
-                <label class="set-row hub-open-row">
-                  <span class="set-text">
-                    <span class="set-title">Open to hub</span>
-                    <span class="set-desc">Everything you open (a room, files, ports, a game server, a folder) shows up for everyone in the hub while it's open, to join with one press.</span>
-                  </span>
-                  <input type="checkbox" id="hub-open-to-hub" class="switch">
-                </label>
-              </div>
+            <div class="card hub-people">
+              <div class="card-head"><h3>In the hub</h3><span class="meta" id="hub-count"></span></div>
+              <div id="hub-members"></div>
             </div>
           </div>
 
-          <div class="lib-section hide" id="hub-offers-section">
+          <div class="lib-section hide" id="hub-saved-section">
             <div class="lib-head">
-              <h2 class="section-title">Open in the hub</h2>
-              <span class="meta" id="hub-offer-count"></span>
+              <h2 class="section-title">Saved hubs</h2>
+              <span class="meta" id="hub-saved-count"></span>
             </div>
-            <div class="sessions" id="hub-offers"></div>
+            <p class="set-desc">Open one again with the same code, or scan for whoever in it has it open
+              right now. Joining a saved hub saves it here too.</p>
+            <div class="sessions" id="hub-saved"></div>
           </div>
 
           <div class="lib-section">
@@ -200,14 +187,30 @@
             <div class="sessions" id="hub-invites"></div>
           </div>
 
-          <div class="lib-section hide" id="hub-saved-section">
-            <div class="lib-head">
-              <h2 class="section-title">Saved hubs</h2>
-              <span class="meta" id="hub-saved-count"></span>
+          <!-- In any hub: invite people, and what you have open. -->
+          <div class="lib-section hide" id="hub-share">
+            <div class="card pane">
+              <div class="card-head"><h3>Invite</h3></div>
+              <span class="field-label">Send to</span>
+              <div id="hub-picks"></div>
+              <div id="hub-invitables"></div>
+              <p class="meta" id="hub-sent"></p>
+              <label class="set-row hub-open-row">
+                <span class="set-text">
+                  <span class="set-title">Open to hub</span>
+                  <span class="set-desc">Everything you open (a room, files, ports, a game server, a folder) shows up for everyone in the hub while it's open, to join with one press.</span>
+                </span>
+                <input type="checkbox" id="hub-open-to-hub" class="switch">
+              </label>
             </div>
-            <p class="set-desc">Open one again with the same code, or scan for whoever in it has it open
-              right now. Each scan takes a few seconds.</p>
-            <div class="sessions" id="hub-saved"></div>
+          </div>
+
+          <div class="lib-section hide" id="hub-offers-section">
+            <div class="lib-head">
+              <h2 class="section-title">Open in the hub</h2>
+              <span class="meta" id="hub-offer-count"></span>
+            </div>
+            <div class="sessions" id="hub-offers"></div>
           </div>
 
           <div class="lib-section">
@@ -740,7 +743,7 @@
       <span class="avatar small" id="toast-avatar"></span>
       <span class="toast-text" id="toast-text"></span>
       <button class="btn small primary" id="toast-join">Join</button>
-      <button class="btn small ghost" id="toast-dismiss">Later</button>
+      <button class="btn small ghost" id="toast-dismiss">No</button>
     </div>
 
     <footer id="status">

@@ -32,8 +32,9 @@ this for you. Everything works as on Windows, except:
   voice) and before it saves into Downloads (the first download).
 - Shortcuts use ⌘ instead of Ctrl.
 
-Each time it opens, it asks for your name. The box shows a random suggestion in
-grey: press **OK** to use it, or type your own. Your name is used everywhere
+The first time it opens, it asks for your name (and remembers it, in the data
+folder). The box shows a random suggestion in grey: press **OK** to use it, or
+type your own. Your name is used everywhere
 in the app (shown top right; click it to change it). It's what people see in
 rooms, and the host of a port or file share you join sees it next to how
 you're connected. It only travels inside the encrypted TailCat tunnel.
@@ -47,18 +48,28 @@ each thing.
   once, or paste a friend's hub code and *Join hub*. Everyone in it is listed
   by name, each with **Direct** or **Relay** and their ping.
 - *Saved hubs* keep the same code until they expire, so friends join with one
-  press whenever it's open. Anyone who joins one gets **Save this hub?**:
-  their copy expires when yours does, they get their own code for it, and it
+  press whenever it's open. Joining one saves it on your PC too, by itself:
+  your copy expires when the hub does, you get your own code for it, and it
   goes into the hub's address book, which everyone who saved it keeps. Then
   any of them can **Open** it, and **Scan** shows who has it open right now,
-  by name, to **Join**. Open scans first: if someone already has it open, it
-  offers to join them instead of opening a second copy.
+  by name, to **Join**. Open checks first ("Please wait… checking to see if
+  this hub is already online"): if someone already has it open, it offers to
+  join them instead of opening a second copy.
+- The saved hub you're in shows everything in its own tile, under **Saved
+  hubs** (right below Start and Join): whether it's open, its code, and who's
+  in it with their ping.
+- Closing a saved hub you host hands it over: whoever has been in it longest
+  (of those who saved it) opens their copy, and everyone moves there by
+  themselves. A moment later your app scans and finds them. If the host's
+  app vanishes instead (a crash, a lost connection), after 15 seconds
+  everyone's app picks the same person to take over.
 - The address book keeps itself up to date. Away for a couple of weeks while
   friends added friends? Joining anyone's open copy, or just scanning,
   brings in everyone added since (and Scan then looks for them too). Each
   entry and each deletion carries when it happened, and the newest wins, so
   your old copy can't bring back an old name or someone who was deleted.
-- **Close** turns a saved hub off (it stays saved); **Delete…** deletes it
+- **Close** (red) turns your copy off; it stays saved. **Delete…** is behind
+  **⋯** on the tile, so it isn't pressed by accident: it deletes the hub
   just for you (your code leaves everyone's address book) or **for everyone**
   in it right now (anyone in it can; whoever isn't keeps theirs until it
   expires). A temporary hub only has **Delete hub**. Expired hubs delete
@@ -72,9 +83,10 @@ each thing.
   under **Open in the hub**, while it's open, to join with one press.
 - Rooms, file shares, ports, game servers and folders shared through a hub
   still get new keys every time; only the hub itself can be saved.
-- *Invites* you get show up in the Hub tab, and pop up on whatever tab you're
-  on. Nothing is joined until you press **Join**; it then connects in that
-  thing's own tab, the same as pasting its code there.
+- *Invites* you get show up in the Hub tab (under Saved hubs), and in the
+  bottom right of whatever tab you're on, where they stay until you answer
+  **Join** or **No**. Nothing is joined until you press **Join**; it then
+  connects in that thing's own tab, the same as pasting its code there.
 - The host can **Remove** someone (they could join again with the code; to
   keep someone out, close the hub and send a new code to the rest).
   **Close hub** disconnects everyone.

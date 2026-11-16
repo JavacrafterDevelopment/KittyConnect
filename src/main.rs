@@ -635,6 +635,11 @@ fn main() {
     });
 
     let mut app = App::new(proxy);
+    // The name from last time, so nobody is asked again.
+    let name = saved_name();
+    if !name.is_empty() {
+        app.set_name(&name);
+    }
 
     event_loop.run(move |event, _, flow| {
         *flow = ControlFlow::Wait;
@@ -796,12 +801,34 @@ fn menu_bar(proxy: EventLoopProxy<UserEvent>) -> muda::Menu {
 /// "windows" or "macos", for the page.
 const OS: &str = if cfg!(target_os = "macos") { "macos" } else { "windows" };
 
+/// The name picked last time, kept in the data folder (`settings.json`) so
+/// it isn't asked for every time.
+fn saved_name() -> String {
+    std::fs::read(data_dir().join("settings.json"))
+        .ok()
+        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+        .and_then(|v| v["name"].as_str().map(peers::clean_name))
+        .unwrap_or_default()
+}
+
+fn save_name(name: &str) {
+    let path = data_dir().join("settings.json");
+    let mut v = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok()).filter(Value::is_object).unwrap_or(json!({}));
+    v["name"] = json!(name);
+    let tmp = data_dir().join("settings.json.part");
+    if std::fs::write(&tmp, v.to_string()).is_ok() {
+        let _ = std::fs::rename(&tmp, &path);
+    }
+}
+
 fn page_html() -> String {
     let boot = json!({
         "version": VERSION,
         "tailcat": tailcat::VERSION,
         "dataDir": data_dir().display().to_string(),
         "os": OS,
+        // The name from last time: used without asking again.
+        "name": saved_name(),
     });
     INDEX_HTML
         .replace("/*{{CSS}}*/", APP_CSS)
@@ -958,7 +985,10 @@ impl App {
         self.hosts.clear();
         self.joins.clear();
         self.voip.shutdown();
-        self.hub.leave();
+        // Hosting a saved hub: someone in it takes over; a moment for them to hear.
+        if self.hub.leave() {
+            std::thread::sleep(Duration::from_millis(800));
+        }
     }
 
     /// Tells the sharer we're leaving, then closes the tunnel.
@@ -982,6 +1012,7 @@ impl App {
         }
         self.name = name;
         peers::set_my_name(&self.name);
+        save_name(&self.name);
         self.hub.rename(&self.name);
         // Everyone we're connected to hears the new name now.
         let now = Instant::now();
@@ -1318,8 +1349,11 @@ impl App {
                 }
             }
             "hub.close" => {
-                self.hub.leave();
-                self.set_status("Closed the hub. It's still saved: open it again any time before it expires.", "idle");
+                if self.hub.leave() {
+                    self.set_status("Closed your copy. Someone else in it took over, so it's still open for everyone; Scan finds it.", "ok");
+                } else {
+                    self.set_status("Closed the hub. It's still saved: open it again any time before it expires.", "idle");
+                }
             }
             "hub.delete" => {
                 if let Some((text, kind)) = self.hub.delete(&s("id"), msg["everyone"] == true) {
@@ -2330,7 +2364,8 @@ impl App {
     fn connections(&self) -> Value {
         let mut rows = Vec::new();
         let person = |m: &Value, drop: Option<String>| json!({ "name": m["name"], "path": m["path"], "rtt": m["rtt"], "drop": drop });
-        if self.hub.is_on() {
+        // A saved hub shows who's connected in its own tile, not here too.
+        if self.hub.is_on() && !self.hub.is_saved() {
             let host = self.hub.is_host();
             let people: Vec<Value> = self
                 .hub

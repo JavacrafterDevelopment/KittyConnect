@@ -235,7 +235,7 @@ let hubState = HUB_OFF;
 const hubPicked = new Set();
 /* Invites already shown as a toast, so each pops up once. */
 const toasted = new Set();
-let toastInvite = null, toastTimer = 0;
+let toastInvite = null;
 let lastInvitables = [];
 
 /* "3 days 4 h", "2 weeks 1 day", "45 min". */
@@ -355,12 +355,6 @@ $('hub-leave').addEventListener('click', () => {
     && !confirm('Delete your hub? Everyone in it is disconnected, and its code stops working.')) return;
   post({ cmd: 'hub.leave' });
 });
-$('hub-close').addEventListener('click', () => {
-  if (hubState.members.length > 1 && !confirm('Close the hub? Everyone in it is disconnected. It stays saved, with the same code.')) return;
-  post({ cmd: 'hub.close' });
-});
-$('hub-save').addEventListener('click', () => post({ cmd: 'hub.save' }));
-$('hub-delete').addEventListener('click', () => openDelete(hubState.id, hubState.name, true, hubState.savedHere));
 $('hub-open-to-hub').addEventListener('change', (e) => post({ cmd: 'hub.openToHub', on: e.target.checked }));
 
 /* ------------------------------------------------------------- delete */
@@ -488,40 +482,82 @@ function hitsHtml(hits) {
     </div>`).join('');
 }
 
-function savedHtml(h) {
-  return h.saved.map((s) => {
-    const sc = s.scan;
-    const prompt = h.prompt && h.prompt.id === s.id ? h.prompt : null;
-    let scan = '';
-    if (prompt) {
-      scan = `<p class="okline">Someone already has it open. Join them, or open your own copy anyway.</p>${hitsHtml(prompt.hits)}
+/* Which saved hub's ⋯ menu is open. */
+let tileMenu = null;
+
+/* A saved hub's tile. The one you're in holds everything about it: whether
+   it's open, its code, who's in it with their ping, and Close (or Leave).
+   Delete is behind ⋯, so it isn't pressed by accident. */
+function savedTile(s, h) {
+  const sc = s.scan;
+  const here = s.here && h.mode !== 'off';
+  const prompt = h.prompt && h.prompt.id === s.id ? h.prompt : null;
+  const busy = sc && sc.running;
+  const updated = s.updatedAgo != null ? ` · book updated ${s.updatedAgo < 120 ? 'just now' : `${timeLeft(s.updatedAgo)} ago`}` : '';
+  const meta = `<span class="meta">${timeLeft(s.expiresIn)} left · ${s.people} saved it${updated}</span>`;
+  const more = `
+    <div class="tile-more">
+      <button class="btn small ghost more-btn" data-saved-more="${s.id}" title="More" aria-label="More">⋯</button>
+      ${tileMenu === s.id ? `<div class="tile-menu"><button class="menu-item danger" data-saved-del="${s.id}" data-saved-name="${esc(s.name)}" data-saved-here="${here ? 1 : ''}">Delete…</button></div>` : ''}
+    </div>`;
+  let head, body = '';
+  if (here) {
+    const host = h.mode === 'host';
+    const [cls, text] = h.reconnecting ? ['busy', 'Reconnecting'] : h.st === 'live' ? ['ok', host ? 'Hosting' : 'Connected'] : ['busy', 'Connecting'];
+    head = `
+      <span class="sess-title">${esc(s.name)}</span>
+      <span class="pill ${cls}"><span class="dot"></span><span class="pill-text">${text}</span></span>
+      ${!host && h.st === 'live' ? linkPill(h.link, 'whoever has it open') : ''}
+      ${meta}
+      <span class="grow"></span>
+      <button class="btn small danger" data-tile-close="${host ? 'close' : 'leave'}">${host ? 'Close' : 'Leave'}</button>
+      ${more}`;
+    body = (host && h.code ? `
+      <div class="sess-code">
+        <code class="code">${esc(h.code)}</code>
+        <div class="row">
+          <button class="btn small primary" data-copytext="${esc(h.code)}" data-code="1">Copy code</button>
+          <span class="meta">Friends join with this code. It's the same every time this hub is opened by you.</span>
+        </div>
+      </div>` : '')
+      + `<div class="peers"><div class="peers-head"><span class="field-label">In the hub</span><span class="meta">${h.members.length || ''}</span></div>${hubMembersHtml(h)}</div>`;
+  } else {
+    head = `
+      <span class="sess-title">${esc(s.name)}</span>
+      ${meta}
+      <span class="grow"></span>
+      <button class="btn small primary" data-saved-open="${s.id}"${busy ? ' disabled' : ''}>Open</button>
+      <button class="btn small" data-saved-scan="${s.id}"${busy ? ' disabled' : ''}>Scan</button>
+      ${more}`;
+    if (sc && sc.opening) {
+      body = `<p class="okline">Please wait while it looks for anyone hosting it. Checking to see if this hub is already online… (${sc.checked} of ${sc.total})</p>`;
+    } else if (prompt) {
+      body = `<p class="okline">It's already online. Join them, or open your own copy anyway.</p>${hitsHtml(prompt.hits)}
         <div class="row"><button class="btn small" data-prompt-open="${s.id}">Open my own</button>
         <button class="btn small ghost" data-prompt-cancel="1">Cancel</button></div>`;
     } else if (sc && sc.running) {
-      scan = `<p class="meta">Looking for whoever has it open… ${sc.checked} of ${sc.total}</p>`;
+      body = `<p class="meta">Looking for whoever has it open… ${sc.checked} of ${sc.total}</p>`;
     } else if (sc) {
-      scan = sc.hits.length ? hitsHtml(sc.hits)
+      body = sc.hits.length ? hitsHtml(sc.hits)
         : `<p class="meta">${sc.total ? 'Nobody has it open right now.' : 'Nobody else has saved it yet.'}</p>`;
     }
-    if (sc && sc.learned) {
-      scan += `<p class="okline">Its address book caught up: ${sc.learned} new ${sc.learned === 1 ? 'person' : 'people'}.</p>`;
+    if (sc && sc.learned && !sc.opening) {
+      body += `<p class="okline">Its address book caught up: ${sc.learned} new ${sc.learned === 1 ? 'person' : 'people'}.</p>`;
     }
-    const busy = sc && sc.running;
-    return `
-      <div class="sess${s.here ? ' live' : ''}">
-        <div class="sess-head">
-          <span class="sess-title">${esc(s.name)}</span>
-          ${s.here ? '<span class="pill ok"><span class="dot"></span><span class="pill-text">You\'re in it</span></span>' : ''}
-          <span class="meta">${timeLeft(s.expiresIn)} left · ${s.people} saved it${s.updatedAgo != null ? ` · book updated ${s.updatedAgo < 120 ? 'just now' : `${timeLeft(s.updatedAgo)} ago`}` : ''}</span>
-          <span class="grow"></span>
-          <button class="btn small primary" data-saved-open="${s.id}"${s.here || busy ? ' disabled' : ''}>Open</button>
-          <button class="btn small" data-saved-scan="${s.id}"${busy ? ' disabled' : ''}>Scan</button>
-          <button class="btn small danger" data-saved-del="${s.id}" data-saved-name="${esc(s.name)}" data-saved-here="${s.here ? 1 : ''}">Delete…</button>
-        </div>
-        ${scan}
-      </div>`;
-  }).join('');
+  }
+  return `<div class="sess saved-tile${here ? ' live' : ''}"><div class="sess-head">${head}</div>${body}</div>`;
 }
+
+function savedHtml(h) {
+  return h.saved.map((s) => savedTile(s, h)).join('');
+}
+
+document.addEventListener('click', (e) => {
+  if (tileMenu && !e.target.closest('.tile-more')) {
+    tileMenu = null;
+    setHtml($('hub-saved'), savedHtml(hubState));
+  }
+});
 
 /* Leaving the hub you're in for another one: say so first. */
 function leaveFirst() {
@@ -534,8 +570,11 @@ function renderHub(h, items) {
   hubState = h;
   const on = h.mode !== 'off';
   const saved = h.kind === 'saved';
+  const live = on && h.st === 'live';
   hide($('hub-lobby'), on);
-  hide($('hub-room'), !on);
+  // A temporary hub has its own bar; a saved one lives in its tile.
+  hide($('hub-room'), !on || saved);
+  hide($('hub-share'), !live);
   $('hub-error').textContent = h.error;
   show($('hub-error'), h.error);
   $('hub-notice').textContent = h.notice;
@@ -545,61 +584,54 @@ function renderHub(h, items) {
   $('hub-host').disabled = making;
   $('hub-host').textContent = making ? 'Making its key…' : 'Start hub';
   $('hub-host-meta').textContent = making ? 'A few seconds: it measures the relays once.' : 'You get a code to send your friends.';
-  if (on) {
+  const ids = new Set(h.members.map((m) => m.id));
+  [...hubPicked].forEach((id) => { if (!ids.has(id)) hubPicked.delete(id); });
+  if (on && !saved) {
+    const host = h.mode === 'host';
     $('hub-title').textContent = h.name || 'Hub';
     const [cls, text] = h.reconnecting ? ['busy', 'Reconnecting'] : (HUB_PILL[h.st] || HUB_PILL.starting);
     $('hub-pill').className = `pill ${cls}`;
     $('hub-pill').querySelector('.pill-text').textContent = text;
-    $('hub-kind-badge').textContent = saved ? `Saved · ${timeLeft(h.expiresIn || 0)} left` : 'Temporary';
+    $('hub-kind-badge').textContent = 'Temporary';
     setHtml($('hub-link'), h.mode === 'join' && h.st === 'live' ? linkPill(h.link, 'the hub host') : '');
-    // Temporary hub of ours: Delete. Saved one: Close (stays saved) and Delete…
-    const host = h.mode === 'host';
-    hide($('hub-leave'), host && saved);
     $('hub-leave').textContent = host ? 'Delete hub' : 'Leave hub';
-    hide($('hub-close'), !(host && saved));
-    hide($('hub-delete'), !saved);
-    hide($('hub-save'), !(h.canSave || h.making === 'save'));
-    $('hub-save').disabled = h.making === 'save';
-    $('hub-save').textContent = h.making === 'save' ? 'Saving…' : 'Save this hub?';
     $('hub-room-code').textContent = h.code || '';
     $('hub-codebox').classList.toggle('on', !!h.code && host);
-    const ids = new Set(h.members.map((m) => m.id));
-    [...hubPicked].forEach((id) => { if (!ids.has(id)) hubPicked.delete(id); });
     setHtml($('hub-members'), hubMembersHtml(h));
     $('hub-count').textContent = h.members.length ? `${h.members.length} in it` : '';
-    setHtml($('hub-picks'), h.st === 'live' ? hubPicksHtml(h) : '');
-    setHtml($('hub-invitables'), h.st === 'live' ? hubInvitablesHtml(h, items) : '<div class="peers-empty">Connecting…</div>');
+  }
+  if (live) {
+    setHtml($('hub-picks'), hubPicksHtml(h));
+    setHtml($('hub-invitables'), hubInvitablesHtml(h, items));
     $('hub-sent').textContent = h.sent;
     $('hub-open-to-hub').checked = h.openToHub;
-  } else {
-    hubPicked.clear();
   }
+  if (!on) hubPicked.clear();
   const offers = on ? h.offers : [];
   hide($('hub-offers-section'), !offers.length);
   $('hub-offer-count').textContent = offers.length ? String(offers.length) : '';
   setHtml($('hub-offers'), offersHtml(offers));
   $('hub-invite-count').textContent = h.invites.length ? String(h.invites.length) : '';
   setHtml($('hub-invites'), invitesHtml(h.invites));
+  if (tileMenu && !h.saved.some((s) => s.id === tileMenu)) tileMenu = null;
   hide($('hub-saved-section'), !h.saved.length);
   $('hub-saved-count').textContent = h.saved.length ? String(h.saved.length) : '';
   setHtml($('hub-saved'), savedHtml(h));
   renderLog('hub', h.log);
 
-  // A new invite pops up wherever you are.
-  const fresh = h.invites.find((i) => !toasted.has(i.id));
-  h.invites.forEach((i) => toasted.add(i.id));
-  if (fresh && fresh.ago < 30) showToast(fresh);
-  if (toastInvite && !h.invites.some((i) => i.id === toastInvite.id)) hideToast();
+  // The oldest invite not answered yet waits in the corner until it is.
+  const pending = h.invites.length ? h.invites[h.invites.length - 1] : null;
+  if (!pending) hideToast();
+  else if (!toastInvite || toastInvite.id !== pending.id) showToast(pending);
 }
 
+/* Stays until it's answered: Join, or No. */
 function showToast(inv) {
   toastInvite = inv;
   $('toast-avatar').style.setProperty('--h', hue(inv.from));
   $('toast-avatar').textContent = initials(inv.from);
   $('toast-text').innerHTML = inviteText(inv);
   hide($('invite-toast'), false);
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(hideToast, 20000);
 }
 
 function hideToast() {
@@ -621,7 +653,10 @@ function joinInvite(id) {
 }
 
 $('toast-join').addEventListener('click', () => { if (toastInvite) joinInvite(toastInvite.id); });
-$('toast-dismiss').addEventListener('click', hideToast);
+$('toast-dismiss').addEventListener('click', () => {
+  if (toastInvite) post({ cmd: 'hub.dismiss', id: toastInvite.id });
+  hideToast();
+});
 
 $('hub-room').addEventListener('click', (e) => {
   const inv = e.target.closest('[data-hub-invite]');
@@ -655,12 +690,42 @@ $('hub-offers').addEventListener('click', (e) => {
 });
 $('hub-saved').addEventListener('click', (e) => {
   const t = e.target;
+  const more = t.closest('[data-saved-more]');
+  if (more) {
+    tileMenu = tileMenu === more.dataset.savedMore ? null : more.dataset.savedMore;
+    return setHtml($('hub-saved'), savedHtml(hubState));
+  }
+  const close = t.closest('[data-tile-close]');
+  if (close) {
+    if (close.dataset.tileClose === 'close') {
+      // Someone in it who saved it takes over, so the others stay in.
+      const others = hubState.members.length > 1;
+      if (others && !confirm('Close your copy? Someone else in it takes over, so everyone stays in the hub.')) return;
+      return post({ cmd: 'hub.close' });
+    }
+    return post({ cmd: 'hub.leave' });
+  }
+  const copy = t.closest('[data-copytext]');
+  if (copy) {
+    copyCode(copy.dataset.copytext, !!copy.dataset.code);
+    copy.classList.add('flash');
+    return setTimeout(() => copy.classList.remove('flash'), 700);
+  }
+  const kick = t.closest('[data-hub-kick]');
+  if (kick) {
+    const m = hubState.members.find((x) => x.id === Number(kick.dataset.hubKick));
+    if (m && confirm(`Remove ${m.name} from the hub?`)) post({ cmd: 'hub.kick', id: m.id });
+    return;
+  }
   const open = t.closest('[data-saved-open]');
   if (open && leaveFirst()) return post({ cmd: 'hub.open', id: open.dataset.savedOpen });
   const scan = t.closest('[data-saved-scan]');
   if (scan) return post({ cmd: 'hub.scan', id: scan.dataset.savedScan });
   const del = t.closest('[data-saved-del]');
-  if (del) return openDelete(del.dataset.savedDel, del.dataset.savedName, !!del.dataset.savedHere, true);
+  if (del) {
+    tileMenu = null;
+    return openDelete(del.dataset.savedDel, del.dataset.savedName, !!del.dataset.savedHere, true);
+  }
   const join = t.closest('[data-scan-join]');
   if (join && leaveFirst()) return post({ cmd: 'hub.joinCode', code: join.dataset.scanJoin });
   const own = t.closest('[data-prompt-open]');
@@ -2104,8 +2169,13 @@ $('me-chip').addEventListener('click', () => openName(false));
 window.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && !nameRequired) hide($('name-modal'), true);
 });
-hide($('me-chip'), true);
-openName(true);
+// The name from last time is kept; it's only asked for the first time.
+if (BOOT.name) {
+  setMe(BOOT.name);
+} else {
+  hide($('me-chip'), true);
+  openName(true);
+}
 
 window.onHost = (msg) => {
   switch (msg.type) {
@@ -2263,7 +2333,9 @@ if (window.ipc) {
       id: 'a1', kind: 'saved', expiresIn: 6 * 86400 + 5 * 3600, savedHere: true, canSave: false, making: null, openToHub: true,
       offers: [{ from: 2, oid: 'host:3', kind: 'game', code: '', name: 'Priya', title: 'Minecraft: Java Edition · port 25565' }],
       saved: [
-        { id: 'a1', name: 'Minecraft Hub', expiresIn: 6 * 86400 + 5 * 3600, people: 3, here: true, scan: null },
+        { id: 'a1', name: 'Minecraft Hub', expiresIn: 6 * 86400 + 5 * 3600, people: 3, here: true, scan: null, updatedAgo: 7200 },
+        { id: 'c3', name: 'Survival SMP', expiresIn: 30 * 86400, people: 4, here: false,
+          scan: { running: true, opening: true, checked: 1, total: 3, hits: [], learned: 0 } },
         { id: 'b2', name: 'Friday crew', expiresIn: 9 * 604800, people: 5, here: false,
           scan: { running: false, checked: 4, total: 4, hits: [{ code: 'x', host: 'Sam', members: 3 }] } },
       ],

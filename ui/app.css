@@ -1260,15 +1260,15 @@ select.input { padding: 7px 9px; }
 
 /* An invite from the hub, over whatever tab is showing. */
 .toast {
-  position: fixed; left: 50%; bottom: 46px; transform: translateX(-50%); z-index: 50;
-  display: flex; align-items: center; gap: 10px; max-width: min(640px, calc(100vw - 32px));
+  position: fixed; right: 16px; bottom: 46px; z-index: 50;
+  display: flex; align-items: center; gap: 10px; max-width: min(520px, calc(100vw - 32px));
   padding: 10px 12px 10px 14px; border-radius: 14px; background: var(--card);
   border: 1px solid var(--rule-strong); box-shadow: 0 10px 34px var(--shadow-drop);
 }
 .toast.hide { display: none; }
 .toast-text { min-width: 0; color: var(--ink-soft); overflow: hidden; text-overflow: ellipsis; }
 .toast-text b { color: var(--ink); }
-#hub-room .panes { margin-top: 12px; }
+#hub-room .hub-people { margin-top: 12px; }
 
 /* Start a hub: Temporary or Saved. */
 .seg { display: inline-flex; gap: 2px; padding: 3px; margin-top: 10px; border-radius: 10px; background: var(--paper-deep); border: 1px solid var(--rule); align-self: flex-start; }
@@ -1316,3 +1316,18 @@ select.input { padding: 7px 9px; }
 #hub-kind-badge:empty { display: none; }
 .del-actions { flex-wrap: wrap; }
 #hub-saved .sess .row { display: flex; gap: 8px; margin-top: 4px; }
+
+/* A saved hub's tile: ⋯ holds Delete, so it isn't pressed by accident. */
+.saved-tile .sess-head { flex-wrap: wrap; row-gap: 6px; }
+.tile-more { position: relative; }
+.more-btn { font-size: 16px; line-height: 1; padding: 3px 9px; letter-spacing: 1px; }
+.tile-menu {
+  position: absolute; right: 0; top: calc(100% + 4px); z-index: 20; min-width: 150px; padding: 4px;
+  background: var(--card); border: 1px solid var(--rule-strong); border-radius: 10px; box-shadow: 0 10px 30px var(--shadow-drop);
+}
+.menu-item { display: block; width: 100%; text-align: left; border: 0; background: transparent; font: inherit; font-size: 13px; padding: 7px 10px; border-radius: 7px; cursor: pointer; color: var(--ink); }
+.menu-item:hover { background: var(--card-hover); }
+.menu-item.danger { color: var(--danger); }
+.saved-tile .sess-code { margin-top: 4px; }
+.saved-tile .peers { margin-top: 8px; }
+#hub-share .card { max-width: none; }

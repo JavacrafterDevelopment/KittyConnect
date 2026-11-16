@@ -522,12 +522,8 @@ fn script(d: &Drive, work: &std::path::Path) -> Result<Value, String> {
         let (name, p) = (a.friend.name.clone(), a.friend.proxy.clone());
         a.friend.hub.join(&sc, &name, &p);
     });
-    d.wait("the friend in the saved hub, offered Save this hub?", 60, |a| a.friend.hub.json()["canSave"] == true)?;
-    d.on(|a| {
-        let p = a.friend.proxy.clone();
-        a.friend.hub.save_joined(&p);
-    });
-    d.wait("the friend's copy, and their code in the host's book", 90, |a| {
+    // Joining saves it, by itself.
+    d.wait("the friend's copy saved by itself, and their code in the host's book", 90, |a| {
         a.friend.hub.saved.len() == 1 && a.host.hub.saved.first().is_some_and(|s| s.book.len() == 2)
     })?;
     let (friend_code, host_expires, friend_expires) =
@@ -540,14 +536,9 @@ fn script(d: &Drive, work: &std::path::Path) -> Result<Value, String> {
     d.wait("the friend's ping in the member list", 30, |a| {
         a.host.hub.json()["members"].as_array().is_some_and(|l| l.iter().any(|m| m["host"] == false && m["rtt"].is_u64()))
     })?;
-    results.insert("saved_hub".into(), json!("made with a real key; the friend saved it with the same expiry; both codes in the book; ping shown"));
+    results.insert("saved_hub".into(), json!("made with a real key; the friend saved it by joining, with the same expiry; both codes in the book; ping shown"));
 
-    // The host closes it; the friend opens their own copy; the host's Scan finds it.
-    d.on(|a| {
-        a.host.hub.leave();
-        a.friend.hub.leave();
-    });
-    // Someone new saved it while the host was away: only the friend's copy knows them.
+    // Someone new saved it while the host wasn't around: only the friend's copy knows them.
     let zed = code::hub(21999, &format!("tc{}", "z".repeat(60)));
     let (i2, z) = (id.clone(), zed.clone());
     d.on(move |a| {
@@ -556,25 +547,21 @@ fn script(d: &Drive, work: &std::path::Path) -> Result<Value, String> {
         let s = s.clone();
         a.friend.hub.store.store(&s).unwrap();
     });
-    let i2 = id.clone();
-    d.on(move |a| {
-        let (name, p) = (a.friend.name.clone(), a.friend.proxy.clone());
-        a.friend.hub.open_saved(&i2, &name, &p);
+
+    // The host closes it: the friend takes over by themselves, and the
+    // host's own scan, a moment later, finds them.
+    d.on(|a| {
+        a.host.hub.leave();
     });
-    if let Err(e) = d.wait("the friend's copy open", 60, |a| a.friend.hub.json()["st"] == "live") {
+    if let Err(e) = d.wait("the friend to take over", 60, |a| a.friend.hub.json()["mode"] == "host" && a.friend.hub.json()["st"] == "live") {
         let j = d.on(|a| {
             let j = a.friend.hub.json();
             json!({ "st": j["st"], "mode": j["mode"], "error": j["error"], "notice": j["notice"], "code": j["code"], "log": j["log"] })
         });
         return Err(format!("{e}: {j}"));
     }
-    let i2 = id.clone();
-    d.on(move |a| {
-        let p = a.host.proxy.clone();
-        a.host.hub.scan(&i2, false, &p);
-    });
     let (i2, fc, fname) = (id.clone(), friend_code.clone(), friend_name.clone());
-    d.wait("the scan to find the friend's copy", 60, move |a| {
+    d.wait("the host's scan to find the friend's copy", 90, move |a| {
         a.host.hub.json()["saved"].as_array().is_some_and(|l| {
             l.iter().any(|s| {
                 s["id"] == i2.as_str()
@@ -582,14 +569,6 @@ fn script(d: &Drive, work: &std::path::Path) -> Result<Value, String> {
                     && s["scan"]["hits"].as_array().is_some_and(|h| h.iter().any(|x| x["code"] == fc.as_str() && x["host"] == fname.as_str()))
             })
         })
-    })?;
-    let fc = friend_code.clone();
-    d.on(move |a| {
-        let (name, p) = (a.host.name.clone(), a.host.proxy.clone());
-        a.host.hub.join(&fc, &name, &p);
-    });
-    d.wait("the host to join the friend's copy", 60, |a| {
-        a.host.hub.json()["st"] == "live" && a.friend.hub.json()["members"].as_array().is_some_and(|m| m.len() == 2)
     })?;
     // The scan caught the host's book up from the friend's copy, and looked at Zed too.
     let (i2, z) = (id.clone(), zed.clone());
@@ -602,7 +581,33 @@ fn script(d: &Drive, work: &std::path::Path) -> Result<Value, String> {
     if !knows_zed || learned != 1 || total != 2 {
         return Err(format!("the scan didn't catch the book up: knows Zed {knows_zed}, learned {learned}, looked at {total}"));
     }
-    results.insert("scan".into(), json!("found the friend's open copy by their name and joined it; caught the address book up (+Zed) and looked at Zed too"));
+    let fc = friend_code.clone();
+    d.on(move |a| {
+        let (name, p) = (a.host.name.clone(), a.host.proxy.clone());
+        a.host.hub.join(&fc, &name, &p);
+    });
+    d.wait("the host to join the friend's copy", 60, |a| {
+        a.host.hub.json()["st"] == "live" && a.friend.hub.json()["members"].as_array().is_some_and(|m| m.len() == 2)
+    })?;
+    results.insert(
+        "hand_over".into(),
+        json!("the host closed it: the friend took over by themselves; the host's scan found them (and caught the book up, +Zed) and joined"),
+    );
+
+    // The friend's copy dies without a word: the host takes over by itself.
+    d.on(|a| a.friend.hub.test_crash());
+    d.wait("the host to take over after the friend vanished", 90, |a| {
+        a.host.hub.json()["mode"] == "host" && a.host.hub.json()["st"] == "live"
+    })?;
+    let sc = saved_code.clone();
+    d.on(move |a| {
+        let (name, p) = (a.friend.name.clone(), a.friend.proxy.clone());
+        a.friend.hub.join(&sc, &name, &p);
+    });
+    d.wait("the friend back in", 60, |a| {
+        a.friend.hub.json()["st"] == "live" && a.host.hub.json()["members"].as_array().is_some_and(|m| m.len() == 2)
+    })?;
+    results.insert("take_over".into(), json!("the friend's copy vanished: the host took over by itself, and the friend came back to it"));
 
     // Delete for everyone: both copies go, keys and all.
     let i2 = id.clone();
