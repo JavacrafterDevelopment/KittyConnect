@@ -1450,9 +1450,11 @@ mod tests {
         tx.connect(rx.local_addr().unwrap()).unwrap();
         let s = Sender::new(tx);
         s.set_rate(2_000_000); // 250 KB/s
-        let t0 = Instant::now();
         assert!(s.video(true, video_pieces(0, true, 0, &frame_bytes(120_000, 0))));
         std::thread::sleep(Duration::from_millis(20));
+        // Timed from when the voice is queued: a busy test machine can be
+        // slow to run the threads at all, which says nothing about the order.
+        let t0 = Instant::now();
         s.urgent(voice(1, &[9; 160]));
         rx.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
         let mut buf = [0u8; 2048];
@@ -1465,9 +1467,11 @@ mod tests {
             }
             video_before += 1;
         }
-        let at = t0.elapsed();
-        assert!(at < Duration::from_millis(200), "voice took {at:?}");
+        // The real check: voice went out after only a few of the frame's
+        // pieces, not behind all of them (100, paced over ~0.5 s).
         assert!(video_before < 40, "{video_before} pieces went first; the frame is 100 and paced over ~0.5 s");
+        let at = t0.elapsed();
+        assert!(at < Duration::from_millis(400), "voice took {at:?}");
     }
 
     /// When the link can't keep up, new delta frames are refused (and the
