@@ -529,14 +529,18 @@ function savedTile(s, h) {
       <button class="btn small primary" data-saved-open="${s.id}"${busy ? ' disabled' : ''}>Open</button>
       <button class="btn small" data-saved-scan="${s.id}"${busy ? ' disabled' : ''}>Scan</button>
       ${more}`;
-    if (sc && sc.opening) {
-      body = `<p class="okline">Please wait while it looks for anyone hosting it. Checking to see if this hub is already online… (${sc.checked} of ${sc.total})</p>`;
-    } else if (prompt) {
-      body = `<p class="okline">It's already online. Join them, or open your own copy anyway.</p>${hitsHtml(prompt.hits)}
-        <div class="row"><button class="btn small" data-prompt-open="${s.id}">Open my own</button>
-        <button class="btn small ghost" data-prompt-cancel="1">Cancel</button></div>`;
+    // Whoever is found shows at once, while the rest are still looked at.
+    const still = busy ? `<p class="meta">Still checking ${sc.total - sc.checked} more…</p>` : '';
+    if (prompt) {
+      // Open found it already online: join them (your own copy only opens
+      // when nobody has it open; two open copies would join up anyway).
+      body = `<p class="okline">It's already online. Join them:</p>${hitsHtml(prompt.hits)}${still}
+        <div class="row"><button class="btn small ghost" data-prompt-cancel="1">Cancel</button></div>`;
+    } else if (sc && sc.opening) {
+      body = `<p class="okline">Please wait while it looks for anyone hosting it. Checking to see if this hub is already online… This can take some time. (${sc.checked} of ${sc.total})</p>`;
     } else if (sc && sc.running) {
-      body = `<p class="meta">Looking for whoever has it open… ${sc.checked} of ${sc.total}</p>`;
+      body = sc.hits.length ? hitsHtml(sc.hits) + still
+        : `<p class="meta">Looking for whoever has it open… This can take some time. (${sc.checked} of ${sc.total})</p>`;
     } else if (sc) {
       body = sc.hits.length ? hitsHtml(sc.hits)
         : `<p class="meta">${sc.total
@@ -730,8 +734,6 @@ $('hub-saved').addEventListener('click', (e) => {
   }
   const join = t.closest('[data-scan-join]');
   if (join && leaveFirst()) return post({ cmd: 'hub.joinCode', code: join.dataset.scanJoin });
-  const own = t.closest('[data-prompt-open]');
-  if (own) return post({ cmd: 'hub.openNow', id: own.dataset.promptOpen });
   if (t.closest('[data-prompt-cancel]')) post({ cmd: 'hub.dismissPrompt' });
 });
 

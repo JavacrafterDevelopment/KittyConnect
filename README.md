@@ -52,9 +52,11 @@ each thing.
   your copy expires when the hub does, you get your own code for it, and it
   goes into the hub's address book, which everyone who saved it keeps. Then
   any of them can **Open** it, and **Scan** shows who has it open right now,
-  by name, to **Join**. Open checks first ("Please wait… checking to see if
-  this hub is already online"): if someone already has it open, it offers to
-  join them instead of opening a second copy.
+  by name, to **Join**: each one the moment they're found, while the rest
+  are still being checked ("This can take some time"). Open checks first
+  ("Please wait… checking to see if this hub is already online"): the first
+  copy it finds is offered at once, to join; your own copy only opens when
+  nobody has it open. Joining (or Cancel) stops the checks still going.
 - The saved hub you're in shows everything in its own tile, under **Saved
   hubs** (right below Start and Join): whether it's open, its code, and who's
   in it with their ping.
@@ -68,8 +70,10 @@ each thing.
 - Two copies open at once (say you were away, opened yours, and a friend had
   taken over meanwhile) join up by themselves: whoever hosts a saved hub
   looks for other open copies of it now and then (soon after opening, then
-  every few minutes), and the one with fewer people in it moves everyone to
-  the other (the same: the one with the lower code stays).
+  every minute), and the one with fewer people in it moves everyone to the
+  other by itself, no questions asked (the same: the one with the lower code
+  stays). Only the hub moves: voice rooms, games and anything else you have
+  open carry on.
 - The address book keeps itself up to date. Away for a couple of weeks while
   friends added friends? Joining anyone's open copy, or just scanning,
   brings in everyone added since (and Scan then looks for them too). Each
@@ -321,12 +325,16 @@ runtime into a `WebView2\` folder beside the exe.
   in it for a moment (a few at a time) and asks `{"op":"peek"}`, again until
   20 seconds are up (TailCat closes the connection if its first reach for the
   other end fails): an open copy answers with the hub's id (only the same hub
-  counts), its name, whose copy it is and how many are in it. Each scan adds
-  a client to that person's TailCat until their hub closes (TailCat never
-  forgets one), so the only automatic looks are the host's, for another open
-  copy: 10, 20, 40, 80 and 160 seconds after opening (or after everyone else
-  left), then every 5 minutes, and only at codes that aren't in the hub with
-  it. Such a look says where it's open itself (`openAt`), so the copy it
+  counts), its name, whose copy it is and how many are in it. Each answer
+  shows as it comes; once you join or open a hub (or press Cancel), the
+  looks still going end and their TailCats close. Each look that reaches an
+  open copy adds a client to that copy's TailCat, in memory only, until it
+  closes (TailCat never forgets one; each look's key is new and kept
+  nowhere), so the only automatic looks are the host's, for another open
+  copy: 10, 20 and 40 seconds after opening (or after everyone else left),
+  then every minute, and only at codes that aren't in the hub with it (a
+  look at a copy that isn't open adds nothing anywhere; roughly 10 to 20 KB
+  each). Such a look says where it's open itself (`openAt`), so the copy it
   finds looks back at once (at most every 30 seconds), checking for itself.
   Protocol version 2: everyone in a hub needs KittyConnect 0.12 or newer.
 - **Files**: the sharer runs a small file server on `127.0.0.1` and exposes

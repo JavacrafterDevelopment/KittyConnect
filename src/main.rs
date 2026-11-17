@@ -1324,17 +1324,13 @@ impl App {
                 match self.hub.scan(&id, true, &self.proxy) {
                     Some(hub::AfterScan::OpenOwn(id)) => self.open_saved_hub(&id),
                     Some(hub::AfterScan::Said(text, kind)) => self.set_status(text, kind),
-                    None => self.set_status("Looking for whoever has it open…", "busy"),
+                    None => self.set_status("Checking whether it's already online… This can take some time.", "busy"),
                 }
-            }
-            "hub.openNow" => {
-                let id = s("id");
-                self.open_saved_hub(&id);
             }
             "hub.scan" => {
                 let id = s("id");
                 if self.hub.scan(&id, false, &self.proxy).is_none() {
-                    self.set_status("Scanning for whoever has it open…", "busy");
+                    self.set_status("Scanning for whoever has it open… This can take some time.", "busy");
                 }
             }
             "hub.joinCode" => {

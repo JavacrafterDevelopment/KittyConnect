@@ -902,7 +902,7 @@ pub struct Peeked {
 /// `wait`: the tunnel comes up first, and a copy that isn't open never answers.
 #[cfg(test)]
 pub fn peek(port: u16, wait: Duration) -> Result<Peeked, String> {
-    peek_from(port, wait, None)
+    peek_from(port, wait, None, &AtomicBool::new(false))
 }
 
 /// A peek, from a copy of the hub that's open itself (at `mine`) if given:
@@ -910,8 +910,9 @@ pub fn peek(port: u16, wait: Duration) -> Result<Peeked, String> {
 ///
 /// TailCat takes our connection at once and only then reaches for the other
 /// end; if that first try fails (their relay connection was still coming
-/// up, say) it just closes ours. So we ask again, until `wait` is up.
-fn peek_from(port: u16, wait: Duration, mine: Option<&str>) -> Result<Peeked, String> {
+/// up, say) it just closes ours. So we ask again, until `wait` is up, or
+/// until `stopped` (then our TailCat is closed, which ends a wait at once).
+fn peek_from(port: u16, wait: Duration, mine: Option<&str>, stopped: &AtomicBool) -> Result<Peeked, String> {
     let until = Instant::now() + wait;
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
     let mut ask = json!({ "op": "peek", "v": PROTOCOL });
@@ -930,6 +931,7 @@ fn peek_from(port: u16, wait: Duration, mine: Option<&str>) -> Result<Peeked, St
         });
         match answer {
             Some(v) => break v,
+            None if stopped.load(Ordering::Relaxed) => return Err("stopped".into()),
             None if until.saturating_duration_since(Instant::now()) > Duration::from_secs(1) => {
                 std::thread::sleep(Duration::from_millis(500))
             }
@@ -979,10 +981,15 @@ const SCAN_AT_ONCE: usize = 8;
 /// How long Scan waits for each copy to answer.
 const SCAN_WAIT: Duration = Duration::from_secs(20);
 /// While we host a saved hub, how long until we look again for another copy
-/// of it that's open too (someone took over while we were gone, say): soon
-/// at first, then every few minutes.
+/// of it that's open too (someone took over while we were gone, or opened
+/// theirs not knowing where it was): soon at first, then every minute.
 fn look_after(n: u32) -> Duration {
-    Duration::from_secs((10u64 << n.min(5)).min(300))
+    Duration::from_secs(match n {
+        0 => 10,
+        1 => 20,
+        2 => 40,
+        _ => 60,
+    })
 }
 /// When another open copy looks at ours, we look back, but no more often
 /// than this.
@@ -1013,6 +1020,42 @@ struct Scan {
     quiet: bool,
     /// Which scan this is: answers to an older one are dropped.
     no: u64,
+    /// Ends the checks still going, once they're no use.
+    stop: Arc<Stop>,
+}
+
+/// Ends a scan's checks early (we joined or opened a hub, or Cancel): none
+/// more start, and the TailCat of each one still going is closed, which ends
+/// its wait at once.
+#[derive(Default)]
+struct Stop {
+    stopped: AtomicBool,
+    running: Mutex<Vec<Arc<Mutex<Option<Proc>>>>>,
+}
+
+impl Stop {
+    fn stop(&self) {
+        self.stopped.store(true, Ordering::Relaxed);
+        for p in self.running.lock().unwrap().drain(..) {
+            p.lock().unwrap().take();
+        }
+    }
+
+    fn is_stopped(&self) -> bool {
+        self.stopped.load(Ordering::Relaxed)
+    }
+
+    /// Keeps a check's TailCat where `stop` can close it; None (and it's
+    /// closed) if the scan has been stopped already.
+    fn hold(&self, p: Proc) -> Option<Arc<Mutex<Option<Proc>>>> {
+        let mut running = self.running.lock().unwrap();
+        if self.is_stopped() {
+            return None;
+        }
+        let slot = Arc::new(Mutex::new(Some(p)));
+        running.push(slot.clone());
+        Some(slot)
+    }
 }
 
 /// Someone's copy of a saved hub, open right now.
@@ -1218,8 +1261,11 @@ impl Hub {
         self.gen += 1;
     }
 
+    /// Before we host or join a hub: whatever scans are still going are no
+    /// use any more, so they end.
     fn begin(&mut self) {
         self.reset();
+        self.stop_scans(None);
         self.error.clear();
         self.notice.clear();
         self.prompt = None;
@@ -1444,17 +1490,35 @@ impl Hub {
     }
 
     fn start_scan(&mut self, id: &str, targets: Vec<Entry>, open_after: bool, quiet: bool, proxy: &EventLoopProxy<UserEvent>) {
+        // One still going for this hub (a quiet look of ours) gives way.
+        self.stop_scans(Some(id));
         self.scan_no += 1;
         let no = self.scan_no;
         let seen = targets.iter().map(|e| e.code.clone()).collect();
-        self.scans.insert(id.to_string(), Scan { total: targets.len(), open_after, quiet, no, seen, ..Scan::default() });
+        let stop = Arc::new(Stop::default());
+        self.scans.insert(id.to_string(), Scan { total: targets.len(), open_after, quiet, no, seen, stop: stop.clone(), ..Scan::default() });
         // Our own looks while we host it say so, so a copy we find looks back.
         let mine = quiet.then(|| self.saved.iter().find(|s| s.id == id).map(|s| s.code.clone())).flatten();
         if quiet {
             self.last_look = Some(Instant::now());
         }
         if !targets.is_empty() {
-            look(targets, id.to_string(), no, self.tag, mine, proxy);
+            look(targets, id.to_string(), no, self.tag, mine, stop, proxy);
+        }
+    }
+
+    /// Ends the checks still going (of hub `only`, or every hub's): we've
+    /// joined or opened a hub, or Cancel was pressed. Their TailCats close,
+    /// and answers still on the way are dropped; what was found stays.
+    fn stop_scans(&mut self, only: Option<&str>) {
+        for (_, sc) in self.scans.iter_mut().filter(|(id, _)| only.is_none_or(|o| o == id.as_str())) {
+            if sc.checked < sc.total {
+                sc.stop.stop();
+                sc.total = sc.checked;
+                sc.open_after = false;
+                // No scan has number 0: whatever else comes for this one is dropped.
+                sc.no = 0;
+            }
         }
     }
 
@@ -1562,12 +1626,13 @@ impl Hub {
                 sc.seen.extend(more.iter().map(|e| e.code.clone()));
                 sc.total += more.len();
                 let from = sc.quiet.then_some(mine);
-                look(more, id.to_string(), no, self.tag, from, proxy);
+                look(more, id.to_string(), no, self.tag, from, sc.stop.clone(), proxy);
             }
         }
         let sc = self.scans.get_mut(id)?;
         sc.checked += 1;
-        // Only a copy of this same hub counts.
+        // Only a copy of this same hub counts. Each one shows the moment
+        // it's found, while the rest are still being looked at.
         if let Some(p) = found {
             let host = if p.host.is_empty() { entry.name.clone() } else { p.host };
             sc.hits.retain(|h| h.code != entry.code);
@@ -1575,16 +1640,18 @@ impl Hub {
             if sc.quiet {
                 return self.join_up(id, &entry.code, &host, p.members);
             }
+            // Open: it's already online, so offer to join at once (anyone
+            // else found joins the list).
+            if sc.open_after {
+                self.prompt = Some((id.to_string(), sc.hits.clone()));
+            }
         }
         if sc.checked < sc.total || !sc.open_after {
             return None;
         }
+        // Open, and every look is done: nobody has it open, so ours opens.
         sc.open_after = false;
-        if sc.hits.is_empty() {
-            return Some(AfterScan::OpenOwn(id.to_string()));
-        }
-        self.prompt = Some((id.to_string(), sc.hits.clone()));
-        None
+        sc.hits.is_empty().then(|| AfterScan::OpenOwn(id.to_string()))
     }
 
     /// Merges another copy's book into our saved copy of hub `id`, newest
@@ -1601,8 +1668,13 @@ impl Hub {
         Some(s.book.iter().filter(|e| !before.contains(&e.code) && e.code != s.code).count())
     }
 
+    /// Cancel on "It's already online": the looking stops, and the tile is
+    /// as it was.
     pub fn dismiss_prompt(&mut self) {
-        self.prompt = None;
+        if let Some((id, _)) = self.prompt.take() {
+            self.stop_scans(Some(&id));
+            self.scans.remove(&id);
+        }
     }
 
     /// Deletes a saved hub: just ours (our code leaves everyone's address
@@ -2091,6 +2163,13 @@ impl Hub {
         self.close(false);
     }
 
+    /// For the end-to-end check: how many of hub `id`'s scan's looks still
+    /// have their TailCat running.
+    #[cfg(all(test, target_os = "linux"))]
+    pub fn test_looks_running(&self, id: &str) -> usize {
+        self.scans.get(id).map_or(0, |sc| sc.stop.running.lock().unwrap().iter().filter(|p| p.lock().unwrap().is_some()).count())
+    }
+
     /// For the end-to-end check: the PC this copy runs on restarts (or loses
     /// power): TailCat is gone first, so nothing more reaches anyone, not
     /// even a goodbye, and the app with it.
@@ -2161,19 +2240,23 @@ impl Hub {
     }
 }
 
-/// Looks at each code (a few at a time) and reports each answer to the app.
-/// `mine`: our code, when we have this hub open ourselves.
-fn look(targets: Vec<Entry>, id: String, no: u64, tag: u64, mine: Option<String>, proxy: &EventLoopProxy<UserEvent>) {
+/// Looks at each code (a few at a time) and reports each answer to the app
+/// the moment it comes. `mine`: our code, when we have this hub open
+/// ourselves. `stop` ends it early.
+fn look(targets: Vec<Entry>, id: String, no: u64, tag: u64, mine: Option<String>, stop: Arc<Stop>, proxy: &EventLoopProxy<UserEvent>) {
     let proxy = proxy.clone();
     std::thread::spawn(move || {
         for chunk in targets.chunks(SCAN_AT_ONCE) {
+            if stop.is_stopped() {
+                return;
+            }
             let looks: Vec<_> = chunk
                 .iter()
                 .cloned()
                 .map(|e| {
-                    let (p, id, mine) = (proxy.clone(), id.clone(), mine.clone());
+                    let (p, id, mine, stop) = (proxy.clone(), id.clone(), mine.clone(), stop.clone());
                     std::thread::spawn(move || {
-                        let r = scan_one(&e, mine.as_deref(), &p);
+                        let r = scan_one(&e, mine.as_deref(), &stop, &p);
                         let _ = p.send_event(UserEvent::HubScan(tag, id, no, e, r));
                     })
                 })
@@ -2186,13 +2269,16 @@ fn look(targets: Vec<Entry>, id: String, no: u64, tag: u64, mine: Option<String>
 }
 
 /// One look at someone's copy: a TailCat to their code for a moment, and a peek.
-fn scan_one(e: &Entry, mine: Option<&str>, proxy: &EventLoopProxy<UserEvent>) -> Result<Peeked, String> {
+fn scan_one(e: &Entry, mine: Option<&str>, stop: &Stop, proxy: &EventLoopProxy<UserEvent>) -> Result<Peeked, String> {
+    if stop.is_stopped() {
+        return Err("stopped".into());
+    }
     let c = code::parse(&e.code)?;
     let local = crate::free_port()?;
     let args = vec!["forward".into(), c.addr.clone(), format!("{local}:{}", c.ports[0])];
-    let proc = tailcat::spawn(Role::HubScan, &args, proxy)?;
-    let r = peek_from(local, SCAN_WAIT, mine);
-    drop(proc);
+    let Some(slot) = stop.hold(tailcat::spawn(Role::HubScan, &args, proxy)?) else { return Err("stopped".into()) };
+    let r = peek_from(local, SCAN_WAIT, mine, &stop.stopped);
+    slot.lock().unwrap().take();
     r
 }
 
@@ -2672,7 +2758,7 @@ mod tests {
         // A plain scan says nothing.
         peek(hub.port, Duration::from_secs(5)).unwrap();
         // A copy that's open itself says where.
-        peek_from(hub.port, Duration::from_secs(5), Some(&hub_code(7))).unwrap();
+        peek_from(hub.port, Duration::from_secs(5), Some(&hub_code(7)), &AtomicBool::new(false)).unwrap();
         let also = kit.wait("alsoOpen");
         assert_eq!(also["code"].as_str(), Some(hub_code(7).as_str()));
         jo.r.get_ref().set_read_timeout(Some(Duration::from_millis(800))).unwrap();
@@ -2684,7 +2770,7 @@ mod tests {
             }
         }
         // Junk in place of a code: nothing.
-        peek_from(hub.port, Duration::from_secs(5), Some("not a code")).unwrap();
+        peek_from(hub.port, Duration::from_secs(5), Some("not a code"), &AtomicBool::new(false)).unwrap();
         kit.r.get_ref().set_read_timeout(Some(Duration::from_millis(800))).unwrap();
         loop {
             let v = kit.next();
@@ -2709,9 +2795,42 @@ mod tests {
     }
 
     #[test]
-    fn looks_come_soon_then_every_few_minutes() {
+    fn a_stopped_check_ends_at_once() {
+        // Stands in for a TailCat that never gets through: takes the
+        // connection and says nothing. Stopping closes it (as closing the
+        // TailCat would), and the peek ends then, not 20 s later.
+        let ln = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let near = ln.local_addr().unwrap().port();
+        let stop = Arc::new(Stop::default());
+        let s = stop.clone();
+        std::thread::spawn(move || {
+            let (conn, _) = ln.accept().unwrap();
+            std::thread::sleep(Duration::from_millis(500));
+            s.stop();
+            drop(conn);
+        });
+        let t = Instant::now();
+        let r = peek_from(near, Duration::from_secs(20), None, &stop.stopped);
+        assert_eq!(r.err().as_deref(), Some("stopped"));
+        assert!(t.elapsed() < Duration::from_secs(3), "{:?}", t.elapsed());
+    }
+
+    #[test]
+    fn stopping_closes_the_checks_tailcats_and_no_more_start() {
+        let stop = Stop::default();
+        let slot = stop.hold(Proc::stand_in()).expect("held while not stopped");
+        assert!(slot.lock().unwrap().is_some());
+        stop.stop();
+        assert!(slot.lock().unwrap().is_none(), "its TailCat is closed");
+        assert!(stop.is_stopped());
+        // One that starts after: closed straight away, not held.
+        assert!(stop.hold(Proc::stand_in()).is_none());
+    }
+
+    #[test]
+    fn looks_come_soon_then_every_minute() {
         let secs: Vec<u64> = (0..9).map(|n| look_after(n).as_secs()).collect();
-        assert_eq!(secs, [10, 20, 40, 80, 160, 300, 300, 300, 300]);
+        assert_eq!(secs, [10, 20, 40, 60, 60, 60, 60, 60, 60]);
         // Missing a few pings isn't gone; a restarted PC is, soon.
         assert!(SILENT_FOR >= PING_EVERY * 4 && SILENT_FOR > Duration::from_secs(15) + Duration::from_secs(5));
         assert!(SILENT_FOR + TAKE_OVER_AFTER <= Duration::from_secs(45));

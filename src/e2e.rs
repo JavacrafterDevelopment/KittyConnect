@@ -539,7 +539,10 @@ fn script(d: &Drive, work: &std::path::Path) -> Result<Value, String> {
     results.insert("saved_hub".into(), json!("made with a real key; the friend saved it by joining, with the same expiry; both codes in the book; ping shown"));
 
     // Someone new saved it while the host wasn't around: only the friend's copy knows them.
-    let zed = code::hub(21999, &format!("tc{}", "z".repeat(60)));
+    // A real code (the official genkey) whose copy is never open: a look at
+    // it keeps its TailCat running for the whole wait, nobody answering.
+    let zed_addr = tailcat::genkey(&work.join("zed.key.json"))?;
+    let zed = code::hub(21999, &zed_addr);
     let (i2, z) = (id.clone(), zed.clone());
     d.on(move |a| {
         let s = a.friend.hub.saved.iter_mut().find(|s| s.id == i2).unwrap();
@@ -625,28 +628,78 @@ fn script(d: &Drive, work: &std::path::Path) -> Result<Value, String> {
         a.host.hub.test_gen_base(HOST_GEN + 500_000);
     });
     let i2 = id.clone();
+    let scanned = Instant::now();
     d.on(move |a| {
         let p = a.host.proxy.clone();
         a.host.hub.scan(&i2, false, &p);
     });
+    // The friend shows the moment they're found, while the look at Zed
+    // (nobody there) is still waiting.
     let (i2, fc, fname) = (id.clone(), friend_code.clone(), friend_name.clone());
-    d.wait("the restarted host's scan to find the friend's copy", 60, move |a| {
-        a.host.hub.json()["saved"].as_array().is_some_and(|l| {
-            l.iter().any(|s| {
-                s["id"] == i2.as_str()
-                    && s["scan"]["running"] == false
-                    && s["scan"]["hits"].as_array().is_some_and(|h| h.iter().any(|x| x["code"] == fc.as_str() && x["host"] == fname.as_str()))
-            })
-        })
+    let tile = move |a: &mut Apps| a.host.hub.json()["saved"].as_array().and_then(|l| l.iter().find(|s| s["id"] == i2.as_str()).cloned()).unwrap_or_default();
+    let t2 = tile.clone();
+    d.wait("the restarted host's scan to show the friend's copy while it still looks at Zed", 30, move |a| {
+        let s = t2(a);
+        s["scan"]["running"] == true && s["scan"]["hits"].as_array().is_some_and(|h| h.iter().any(|x| x["code"] == fc.as_str() && x["host"] == fname.as_str()))
+    })?;
+    let shown = scanned.elapsed().as_secs();
+    let i2 = id.clone();
+    if d.on(move |a| a.host.hub.test_looks_running(&i2)) != 1 {
+        return Err("the look at Zed isn't still going".into());
+    }
+    // Join, before the look at Zed is done: it stops at once.
+    let fc = friend_code.clone();
+    d.on(move |a| {
+        let (name, p) = (a.host.name.clone(), a.host.proxy.clone());
+        a.host.hub.join(&fc, &name, &p);
+    });
+    let (i2, t2) = (id.clone(), tile.clone());
+    let (running, looks) = d.on(move |a| (t2(a)["scan"]["running"] == true, a.host.hub.test_looks_running(&i2)));
+    if running || looks != 0 {
+        return Err(format!("joining didn't stop the rest of the scan: running {running}, TailCats still looking {looks}"));
+    }
+    d.wait("the restarted host in the friend's copy", 60, |a| {
+        a.host.hub.json()["st"] == "live" && a.friend.hub.json()["members"].as_array().is_some_and(|m| m.len() == 2)
     })?;
     results.insert(
         "restart".into(),
-        json!(format!("the host's PC went off without a word: the friend took over by themselves in {took} s; the host's app, started again, found them with Scan")),
+        json!(format!(
+            "the host's PC went off without a word: the friend took over by themselves in {took} s; the host's app, started again, showed them {shown} s into its Scan (another look still going), and joining stopped that look at once"
+        )),
     );
 
-    // Opened twice at once (the host opens its own copy anyway): the two
-    // copies find each other and join up by themselves, in whichever has
-    // the lower code (one person in each).
+    // Open, when it's already online: offered at once, while the rest is
+    // still looked at; Cancel stops it.
+    d.on(|a| {
+        a.host.hub.leave();
+    });
+    let i2 = id.clone();
+    let opened = Instant::now();
+    d.on(move |a| {
+        let p = a.host.proxy.clone();
+        a.host.hub.scan(&i2, true, &p);
+    });
+    let (fc, t2) = (friend_code.clone(), tile.clone());
+    d.wait("Open to offer the friend's copy while it still looks at Zed", 30, move |a| {
+        let j = a.host.hub.json();
+        t2(a)["scan"]["running"] == true && j["prompt"]["hits"].as_array().is_some_and(|h| h.iter().any(|x| x["code"] == fc.as_str()))
+    })?;
+    let offered = opened.elapsed().as_secs();
+    let i2 = id.clone();
+    d.on(|a| a.host.hub.dismiss_prompt());
+    let (i2, t2) = (i2.clone(), tile.clone());
+    let (prompt, scan, looks, on) = d.on(move |a| (a.host.hub.json()["prompt"].clone(), t2(a)["scan"].clone(), a.host.hub.test_looks_running(&i2), a.host.hub.is_on()));
+    if !prompt.is_null() || !scan.is_null() || looks != 0 || on {
+        return Err(format!("Cancel didn't stop Open: prompt {prompt}, scan {scan}, TailCats still looking {looks}, a hub on {on}"));
+    }
+    results.insert(
+        "open_finds".into(),
+        json!(format!("Open offered the friend's copy {offered} s in, with another look still going (no 'open my own'); Cancel stopped it")),
+    );
+
+    // Opened twice at once (both press Open at the same moment, before
+    // either can see the other): the two copies find each other and join up
+    // by themselves, in whichever has the lower code (one person in each).
     let i2 = id.clone();
     d.on(move |a| a.host.open_saved_hub(&i2));
     let together = Instant::now();
