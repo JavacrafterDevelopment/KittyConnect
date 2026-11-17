@@ -1452,24 +1452,35 @@ mod tests {
         s.set_rate(2_000_000); // 250 KB/s
         assert!(s.video(true, video_pieces(0, true, 0, &frame_bytes(120_000, 0))));
         std::thread::sleep(Duration::from_millis(20));
-        // Timed from when the voice is queued: a busy test machine can be
-        // slow to run the threads at all, which says nothing about the order.
+        // Only what goes after the voice is queued counts: a busy test
+        // machine can oversleep and let the pacer send many pieces first,
+        // which says nothing about the order.
+        let mut buf = [0u8; 2048];
+        rx.set_nonblocking(true).unwrap();
+        let mut sent_already = 0;
+        while rx.recv(&mut buf).is_ok() {
+            sent_already += 1;
+        }
+        rx.set_nonblocking(false).unwrap();
+        if sent_already >= 100 {
+            // The whole frame went before the voice was queued: nothing to check.
+            return;
+        }
         let t0 = Instant::now();
         s.urgent(voice(1, &[9; 160]));
         rx.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
-        let mut buf = [0u8; 2048];
-        let mut video_before = 0;
+        let mut video_after = 0;
         loop {
             let n = rx.recv(&mut buf).unwrap();
             if buf[0] == VOICE {
                 assert_eq!(n, 165);
                 break;
             }
-            video_before += 1;
+            video_after += 1;
         }
-        // The real check: voice went out after only a few of the frame's
-        // pieces, not behind all of them (100, paced over ~0.5 s).
-        assert!(video_before < 40, "{video_before} pieces went first; the frame is 100 and paced over ~0.5 s");
+        // The real check: voice goes next (the pacer looks for it after every
+        // piece), not behind the rest of the frame (100 pieces over ~0.5 s).
+        assert!(video_after < 10, "{video_after} pieces went ahead of the voice ({sent_already} had gone before it was queued)");
         let at = t0.elapsed();
         assert!(at < Duration::from_millis(400), "voice took {at:?}");
     }
