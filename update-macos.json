@@ -2,26 +2,26 @@
   "schema": 1,
   "channels": {
     "beta": {
-      "version": "0.12.4",
-      "published": "2026-11-17T08:38:43Z",
-      "notes": "**Full Changelog**: https://github.com/JavacrafterDevelopment/KittyConnect/compare/v0.12.3...v0.12.4",
-      "page": "https://github.com/JavacrafterDevelopment/KittyConnect/releases/tag/v0.12.4",
+      "version": "0.13.0",
+      "published": "2026-11-17T18:06:11Z",
+      "notes": "**Full Changelog**: https://github.com/JavacrafterDevelopment/KittyConnect/compare/v0.12.4...v0.13.0",
+      "page": "https://github.com/JavacrafterDevelopment/KittyConnect/releases/tag/v0.13.0",
       "package": {
-        "url": "https://github.com/JavacrafterDevelopment/KittyConnect/releases/download/v0.12.4/KittyConnect-macos.zip",
-        "size": 56481905,
-        "sha256": "b38050d739a959736eb822893a81ec8370a92fbd334366ea01184ad7373dc87c"
+        "url": "https://github.com/JavacrafterDevelopment/KittyConnect/releases/download/v0.13.0/KittyConnect-macos.zip",
+        "size": 56483788,
+        "sha256": "4139ecb009eb5d8f185646e62f6f1ceec905d224eaf05c553b323c61d7e362ac"
       },
       "exe": "KittyConnect.app/Contents/MacOS/KittyConnect",
       "files": [
         {
           "path": "KittyConnect.app/Contents/Info.plist",
-          "size": 1269,
-          "sha256": "8ed5f28c9ab2aa63398d3fdb50ba13174c566cce236a4dea1b0955487f8e04ee"
+          "size": 1302,
+          "sha256": "9bb0b24abb68d9d30855c3e19ed4874dccfc2b07ddb236c8dd9b75e4b6969246"
         },
         {
           "path": "KittyConnect.app/Contents/MacOS/KittyConnect",
           "size": 142698400,
-          "sha256": "308f6b8eb6b76aaa7d40cf24575eb0d88e3f19c0aa9e025c07775e9cb5247106"
+          "sha256": "7ff90af124519e36e82bef3b692d3eec5db4fb6fec1a187c28df606ca49e76a5"
         },
         {
           "path": "KittyConnect.app/Contents/Resources/KittyConnect.icns",
@@ -29,14 +29,19 @@
           "sha256": "048b28aeebc192a74153ece3ae0fbf6bd770e72b09c526db3890fba38f1a3b62"
         },
         {
+          "path": "KittyConnect.app/Contents/Resources/en.lproj/InfoPlist.strings",
+          "size": 61,
+          "sha256": "779cf3eaf56dfb8d2aad2cbfd91eb86a01fcc878578dd3c646d244d69069450b"
+        },
+        {
           "path": "KittyConnect.app/Contents/_CodeSignature/CodeResources",
-          "size": 2456,
-          "sha256": "60ede5f84aa006a5f47f63bb359f2e7ecaec2d1976006ced390d6a2149b6fdb5"
+          "size": 2823,
+          "sha256": "b359ae947aa56d8e76baf05c83ea4b7033e66ac38fca4dc3f460dfbd6e176806"
         },
         {
           "path": "Start KittyConnect.command",
-          "size": 319,
-          "sha256": "eb09ae4d5096e8a3a7f0007fb68641df451c3663e557e0273766928481c900a3"
+          "size": 315,
+          "sha256": "29747c35fd14fa2e6df916f5f7870db01fb1fa3021c596bf6e579cc8d22176ad"
         },
         {
           "path": "licenses/LICENSE-APACHE",
@@ -776,26 +781,26 @@
       ]
     },
     "stable": {
-      "version": "0.12.4",
-      "published": "2026-11-17T08:38:43Z",
-      "notes": "**Full Changelog**: https://github.com/JavacrafterDevelopment/KittyConnect/compare/v0.12.3...v0.12.4",
-      "page": "https://github.com/JavacrafterDevelopment/KittyConnect/releases/tag/v0.12.4",
+      "version": "0.13.0",
+      "published": "2026-11-17T18:06:11Z",
+      "notes": "**Full Changelog**: https://github.com/JavacrafterDevelopment/KittyConnect/compare/v0.12.4...v0.13.0",
+      "page": "https://github.com/JavacrafterDevelopment/KittyConnect/releases/tag/v0.13.0",
       "package": {
-        "url": "https://github.com/JavacrafterDevelopment/KittyConnect/releases/download/v0.12.4/KittyConnect-macos.zip",
-        "size": 56481905,
-        "sha256": "b38050d739a959736eb822893a81ec8370a92fbd334366ea01184ad7373dc87c"
+        "url": "https://github.com/JavacrafterDevelopment/KittyConnect/releases/download/v0.13.0/KittyConnect-macos.zip",
+        "size": 56483788,
+        "sha256": "4139ecb009eb5d8f185646e62f6f1ceec905d224eaf05c553b323c61d7e362ac"
       },
       "exe": "KittyConnect.app/Contents/MacOS/KittyConnect",
       "files": [
         {
           "path": "KittyConnect.app/Contents/Info.plist",
-          "size": 1269,
-          "sha256": "8ed5f28c9ab2aa63398d3fdb50ba13174c566cce236a4dea1b0955487f8e04ee"
+          "size": 1302,
+          "sha256": "9bb0b24abb68d9d30855c3e19ed4874dccfc2b07ddb236c8dd9b75e4b6969246"
         },
         {
           "path": "KittyConnect.app/Contents/MacOS/KittyConnect",
           "size": 142698400,
-          "sha256": "308f6b8eb6b76aaa7d40cf24575eb0d88e3f19c0aa9e025c07775e9cb5247106"
+          "sha256": "7ff90af124519e36e82bef3b692d3eec5db4fb6fec1a187c28df606ca49e76a5"
         },
         {
           "path": "KittyConnect.app/Contents/Resources/KittyConnect.icns",
@@ -803,14 +808,19 @@
           "sha256": "048b28aeebc192a74153ece3ae0fbf6bd770e72b09c526db3890fba38f1a3b62"
         },
         {
+          "path": "KittyConnect.app/Contents/Resources/en.lproj/InfoPlist.strings",
+          "size": 61,
+          "sha256": "779cf3eaf56dfb8d2aad2cbfd91eb86a01fcc878578dd3c646d244d69069450b"
+        },
+        {
           "path": "KittyConnect.app/Contents/_CodeSignature/CodeResources",
-          "size": 2456,
-          "sha256": "60ede5f84aa006a5f47f63bb359f2e7ecaec2d1976006ced390d6a2149b6fdb5"
+          "size": 2823,
+          "sha256": "b359ae947aa56d8e76baf05c83ea4b7033e66ac38fca4dc3f460dfbd6e176806"
         },
         {
           "path": "Start KittyConnect.command",
-          "size": 319,
-          "sha256": "eb09ae4d5096e8a3a7f0007fb68641df451c3663e557e0273766928481c900a3"
+          "size": 315,
+          "sha256": "29747c35fd14fa2e6df916f5f7870db01fb1fa3021c596bf6e579cc8d22176ad"
         },
         {
           "path": "licenses/LICENSE-APACHE",

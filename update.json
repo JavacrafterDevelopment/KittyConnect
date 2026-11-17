@@ -2,21 +2,21 @@
   "schema": 1,
   "channels": {
     "beta": {
-      "version": "0.12.4",
-      "published": "2026-11-17T08:38:43Z",
-      "notes": "**Full Changelog**: https://github.com/JavacrafterDevelopment/KittyConnect/compare/v0.12.3...v0.12.4",
-      "page": "https://github.com/JavacrafterDevelopment/KittyConnect/releases/tag/v0.12.4",
+      "version": "0.13.0",
+      "published": "2026-11-17T18:06:11Z",
+      "notes": "**Full Changelog**: https://github.com/JavacrafterDevelopment/KittyConnect/compare/v0.12.4...v0.13.0",
+      "page": "https://github.com/JavacrafterDevelopment/KittyConnect/releases/tag/v0.13.0",
       "package": {
-        "url": "https://github.com/JavacrafterDevelopment/KittyConnect/releases/download/v0.12.4/KittyConnect-windows-x64.zip",
-        "size": 15942859,
-        "sha256": "91d074627078fafa8e2d2897b88bab321e69ffd2979ff0d1bc378e9a3150bd28"
+        "url": "https://github.com/JavacrafterDevelopment/KittyConnect/releases/download/v0.13.0/KittyConnect-windows-x64.zip",
+        "size": 15942795,
+        "sha256": "3a07fd2b607f244b8a6e5cdf48f4de1750e153d203f58abd03b997460a102831"
       },
       "exe": "KittyConnect.exe",
       "files": [
         {
           "path": "KittyConnect.exe",
           "size": 39331328,
-          "sha256": "bc8af7fbb58fe626400ca6d848527caf1db26664bc826d8316f0d87b3fb14681"
+          "sha256": "5344f4592d917e3ba043edef6c240bb0b05a0edc6b7a2e4bf444517dd9c7b4ac"
         },
         {
           "path": "licenses/kc-voip/github.com_anmitsu_go-shlex/LICENSE",
@@ -380,27 +380,27 @@
         },
         {
           "path": "Start KittyConnect.bat",
-          "size": 363,
-          "sha256": "f2b7d884121173c368dea8d481d2a72ea6cc5ccc9dfe49152d633b6eae387b0b"
+          "size": 359,
+          "sha256": "5ffb002d75fab56ce2cf8c970065cfb15da199612ecee7c730fc9796c78187f3"
         }
       ]
     },
     "stable": {
-      "version": "0.12.4",
-      "published": "2026-11-17T08:38:43Z",
-      "notes": "**Full Changelog**: https://github.com/JavacrafterDevelopment/KittyConnect/compare/v0.12.3...v0.12.4",
-      "page": "https://github.com/JavacrafterDevelopment/KittyConnect/releases/tag/v0.12.4",
+      "version": "0.13.0",
+      "published": "2026-11-17T18:06:11Z",
+      "notes": "**Full Changelog**: https://github.com/JavacrafterDevelopment/KittyConnect/compare/v0.12.4...v0.13.0",
+      "page": "https://github.com/JavacrafterDevelopment/KittyConnect/releases/tag/v0.13.0",
       "package": {
-        "url": "https://github.com/JavacrafterDevelopment/KittyConnect/releases/download/v0.12.4/KittyConnect-windows-x64.zip",
-        "size": 15942859,
-        "sha256": "91d074627078fafa8e2d2897b88bab321e69ffd2979ff0d1bc378e9a3150bd28"
+        "url": "https://github.com/JavacrafterDevelopment/KittyConnect/releases/download/v0.13.0/KittyConnect-windows-x64.zip",
+        "size": 15942795,
+        "sha256": "3a07fd2b607f244b8a6e5cdf48f4de1750e153d203f58abd03b997460a102831"
       },
       "exe": "KittyConnect.exe",
       "files": [
         {
           "path": "KittyConnect.exe",
           "size": 39331328,
-          "sha256": "bc8af7fbb58fe626400ca6d848527caf1db26664bc826d8316f0d87b3fb14681"
+          "sha256": "5344f4592d917e3ba043edef6c240bb0b05a0edc6b7a2e4bf444517dd9c7b4ac"
         },
         {
           "path": "licenses/kc-voip/github.com_anmitsu_go-shlex/LICENSE",
@@ -764,8 +764,8 @@
         },
         {
           "path": "Start KittyConnect.bat",
-          "size": 363,
-          "sha256": "f2b7d884121173c368dea8d481d2a72ea6cc5ccc9dfe49152d633b6eae387b0b"
+          "size": 359,
+          "sha256": "5ffb002d75fab56ce2cf8c970065cfb15da199612ecee7c730fc9796c78187f3"
         }
       ]
     }
