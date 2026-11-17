@@ -986,8 +986,10 @@ impl App {
         self.hosts.clear();
         self.joins.clear();
         self.voip.shutdown();
-        // Hosting a saved hub: someone in it takes over; a moment for them to hear.
-        if self.hub.leave() {
+        // Hosting a saved hub: someone in it takes over; in someone else's
+        // hub: they see us go. Either way, a moment for them to hear.
+        let joined = self.hub.is_on() && !self.hub.is_host();
+        if self.hub.leave() || joined {
             std::thread::sleep(Duration::from_millis(800));
         }
     }

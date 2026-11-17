@@ -1237,7 +1237,19 @@ impl Hub {
 
     fn reset(&mut self) {
         self.conn = None; // says bye
-        self.proc = None;
+        // A hub we joined hears our bye through the tunnel, so our TailCat
+        // stays a moment for it (closed at once, the bye was often lost and
+        // we stayed listed there until the silence ran out). Its key is a
+        // new one each time, so the next TailCat doesn't clash with it.
+        match (self.mode, self.proc.take()) {
+            (Mode::Joined, Some(p)) => {
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_millis(1500));
+                    drop(p);
+                });
+            }
+            (_, p) => drop(p),
+        }
         self.server = None;
         self.mode = Mode::Off;
         self.code = None;

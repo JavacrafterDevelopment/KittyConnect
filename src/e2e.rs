@@ -670,9 +670,14 @@ fn script(d: &Drive, work: &std::path::Path) -> Result<Value, String> {
 
     // Open, when it's already online: offered at once, while the rest is
     // still looked at; Cancel stops it.
+    let left = Instant::now();
     d.on(|a| {
         a.host.hub.leave();
     });
+    // Leave gets through: the friend sees the host go at once, not when the
+    // silence runs out.
+    d.wait("the friend to see the host leave", 5, |a| a.friend.hub.json()["members"].as_array().is_some_and(|m| m.len() == 1))?;
+    let gone = left.elapsed().as_millis();
     let i2 = id.clone();
     let opened = Instant::now();
     d.on(move |a| {
@@ -694,7 +699,9 @@ fn script(d: &Drive, work: &std::path::Path) -> Result<Value, String> {
     }
     results.insert(
         "open_finds".into(),
-        json!(format!("Open offered the friend's copy {offered} s in, with another look still going (no 'open my own'); Cancel stopped it")),
+        json!(format!(
+            "after Leave the friend saw the host go in {gone} ms; Open offered the friend's copy {offered} s in, with another look still going (no 'open my own'); Cancel stopped it"
+        )),
     );
 
     // Opened twice at once (both press Open at the same moment, before
