@@ -1,4 +1,4 @@
-/* KittyConnect page. Commands go to the host through window.ipc; the host answers
+/* Portside page. Commands go to the host through window.ipc; the host answers
    by calling window.onHost with a whole-state snapshot after every change. */
 
 'use strict';
@@ -92,7 +92,7 @@ function peersHtml(peers, empty) {
     // On a relay: ask them to reconnect, which tries for a direct path from scratch.
     const retry = p.path !== 'relay' ? ''
       : p.retrying ? '<span class="meta">Retrying…</span>'
-        : `<button class="btn small" data-peer-retry="${esc(p.id)}" title="Ask ${esc(p.name)}'s KittyConnect to reconnect and try for a direct connection. Whatever they're doing through it drops for a moment.">Retry direct</button>`;
+        : `<button class="btn small" data-peer-retry="${esc(p.id)}" title="Ask ${esc(p.name)}'s Portside to reconnect and try for a direct connection. Whatever they're doing through it drops for a moment.">Retry direct</button>`;
     return `
       <div class="person">
         <span class="avatar" style="--h:${hue(p.name)}">${esc(initials(p.name))}</span>
@@ -197,7 +197,7 @@ function renderLog(name, lines) {
 
 /* One Copy code button everywhere. A code always goes out in backticks:
    Discord (and Slack, Telegram) would otherwise turn the underscores in it
-   into italics and drop them, breaking the code. KittyConnect ignores the
+   into italics and drop them, breaking the code. Portside ignores the
    backticks when it's pasted back in. Addresses (127.0.0.1:…) copy as they are. */
 function copyCode(text, code) {
   post({ cmd: 'copy', text: code ? '`' + text + '`' : text, code });
@@ -741,7 +741,7 @@ $('hub-saved').addEventListener('click', (e) => {
 
 const VIA = {
   official: ['TailCat', 'The official TailCat, end-to-end encrypted'],
-  voip: ['VOIP helper', 'KittyConnect’s VOIP helper: TailCat’s own library, so voice can go over UDP. End-to-end encrypted the same way.'],
+  voip: ['VOIP helper', 'Portside’s VOIP helper: TailCat’s own library, so voice can go over UDP. End-to-end encrypted the same way.'],
 };
 
 function connHtml(c) {
@@ -1121,7 +1121,7 @@ function joinCard(j) {
     <div class="sess${j.st === 'live' ? ' live' : ''}">
       ${sessHead(title, 'join', j.st, `data-stop-join="${j.key}"`, hostHtml(j.hostName, j.link, { label: 'Host', who: 'your friend' }, `data-join-retry="${j.key}"`))}
       ${j.st === 'starting' ? '<p class="meta">Reaching your friend through TailCat…</p>' : ''}
-      ${j.st === 'unreachable' ? '<p class="warn on">Can\'t reach your friend. Check the code, and that they still have the port open. KittyConnect keeps trying.</p>' : ''}
+      ${j.st === 'unreachable' ? '<p class="warn on">Can\'t reach your friend. Check the code, and that they still have the port open. Portside keeps trying.</p>' : ''}
       ${body}
       ${j.st === 'error' && j.error ? `<p class="err on">${esc(j.error)}</p>` : ''}
       ${sessLog(`j${j.key}`, j.log)}
@@ -2075,7 +2075,7 @@ function mountJoinCard(j) {
     <div class="sess${j.st === 'live' ? ' live' : ''}">
       ${sessHead(`<span class="mount-title">${ICON_DIR}<b>${esc(name)}</b></span> ${tag}`, 'join', j.st, `data-stop-join="${j.key}"`, hostHtml(j.hostName, j.link, { label: 'From', who: 'your friend' }, `data-join-retry="${j.key}"`))}
       ${j.st === 'starting' ? '<p class="meta">Reaching your friend through TailCat…</p>' : ''}
-      ${j.st === 'unreachable' ? '<p class="warn on">Can\'t reach your friend. Check the code, and that they\'re still sharing the folder. KittyConnect keeps trying.</p>' : ''}
+      ${j.st === 'unreachable' ? '<p class="warn on">Can\'t reach your friend. Check the code, and that they\'re still sharing the folder. Portside keeps trying.</p>' : ''}
       ${body}
       ${j.st === 'error' && j.error ? `<p class="err on">${esc(j.error)}</p>` : ''}
       ${sessLog(`j${j.key}`, j.log)}

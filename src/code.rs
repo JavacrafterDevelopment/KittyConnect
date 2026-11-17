@@ -92,7 +92,7 @@ pub fn parse(input: &str) -> Result<Code, String> {
         if let Some(addr) = cleaned.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-')).find(|t| is_addr(t)) {
             return Ok(Code { kind: Kind::Bare, ports: vec![], addr: addr.to_string(), game: None });
         }
-        return Err("That doesn't look like a KittyConnect code. It should start with kitty:".into());
+        return Err("That doesn't look like a Portside code. It should start with kitty:".into());
     };
 
     let mut parts = cleaned[start + "kitty:".len()..].splitn(3, ':');

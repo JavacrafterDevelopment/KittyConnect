@@ -1776,7 +1776,7 @@ dependencies = [
 
 [[package]]
 name = "kittyconnect"
-version = "0.12.4"
+version = "0.13.0"
 dependencies = [
  "arboard",
  "base64 0.22.1",

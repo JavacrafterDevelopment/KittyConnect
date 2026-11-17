@@ -1,5 +1,5 @@
 @echo off
-rem Starts KittyConnect from this folder, the same as double-clicking
+rem Starts Portside from this folder, the same as double-clicking
 rem KittyConnect.exe. Its data (and the TailCat programs it unpacks into
 rem data\bin) stay in this folder.
 cd /d "%~dp0"

@@ -287,7 +287,7 @@ pub fn connect(
         };
         let Some((id, key)) = udp_room(&welcome) else {
             emit(&proxy, gen, VoipEvent::Failed(
-                "The host has an older KittyConnect. Ask them to update to 0.6 or newer (the Launcher can do it), then join again.".into(),
+                "The host has an older Portside (it was called KittyConnect then). Ask them to update to 0.6 or newer (the Launcher can do it), then join again.".into(),
             ));
             return;
         };

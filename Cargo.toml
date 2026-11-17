@@ -1,6 +1,6 @@
 [package]
 name = "kittyconnect"
-version = "0.12.4"
+version = "0.13.0"
 edition = "2021"
 description = "Portable peer-to-peer file sharing and port opening over TailCat."
 license = "MIT OR Apache-2.0"

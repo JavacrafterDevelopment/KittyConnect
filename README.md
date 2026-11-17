@@ -1,4 +1,10 @@
-# KittyConnect
+# Portside
+
+Formerly KittyConnect. Only the name you see changed: the program and its
+folders keep their old names (`KittyConnect.exe`, `KittyConnect.app`,
+`KittyConnectData`, the `KittyConnect` folder the Launcher installs into), so
+updates swap in place and everything you saved carries over, and codes still
+start with `kitty:`.
 
 Portable peer-to-peer file sharing, port opening, shared folders and voice/text rooms, with a Hub that ties
 them together for a group of friends, for Windows and macOS, built in Rust on
@@ -12,11 +18,11 @@ sent over Discord, and run `KittyConnect.exe` (or `Start KittyConnect.bat`,
 which does the same; the Launcher offers both).
 
 **On a Mac** (macOS 11 or newer, Apple Silicon or Intel): install it from the
-Launcher, or open `KittyConnect-macos.dmg` and drag KittyConnect to
+Launcher, or open `Portside-macos.dmg` and drag it to
 Applications (or unzip `KittyConnect-macos.zip` anywhere and open
 `KittyConnect.app` or `Start KittyConnect.command`). The app isn't notarized by
 Apple, so the first time macOS says it can't check it: right-click
-KittyConnect.app and choose **Open** (on macOS 15, open it once, then press
+the app (Finder shows `KittyConnect.app` as Portside) and choose **Open** (on macOS 15, open it once, then press
 **Open Anyway** in System Settings → Privacy & Security). The Launcher does
 this for you. Everything works as on Windows, except:
 
@@ -25,10 +31,10 @@ this for you. Everything works as on Windows, except:
   (macOS 13.3 or newer).
 - **Network permission** is a Windows Firewall fix and isn't shown. The Mac
   firewall is off unless you turned it on; if it is, macOS asks the first time
-  KittyConnect connects. macOS 15 may also ask to let KittyConnect find
+  Portside connects. macOS 15 may also ask to let Portside find
   devices on your local network: allow it, or direct connections between
   people on the same network fall back to Relay.
-- macOS asks before KittyConnect uses the microphone (the first time you join
+- macOS asks before Portside uses the microphone (the first time you join
   voice) and before it saves into Downloads (the first download).
 - Shortcuts use ⌘ instead of Ctrl.
 
@@ -127,7 +133,7 @@ each thing.
   having picked a different port). A dedicated server on that port shows up
   the same way, as "*name*'s Minecraft server".
 - Terraria/tModLoader (7777), Starbound (21025) and Vintage Story (42420) open
-  their port; friends join with the address KittyConnect shows them.
+  their port; friends join with the address Portside shows them.
 
 *Manual port forward*: any TCP port by number.
 - *Open a port*: enter the port your server listens on (e.g. `8080`) and press
@@ -138,7 +144,7 @@ each thing.
   **Relay**.
 - *Join a port*: paste the TailCat code, type the port number, and press **Connect**. Then connect your game or
   app to `127.0.0.1:<port>`. It says **Connected** once your friend's
-  KittyConnect has answered through the tunnel **and said that port is one it
+  Portside has answered through the tunnel **and said that port is one it
   opened**; until then **Reaching**, and if nothing answers within 30 seconds,
   **Not reached** (check the code, and that they still have the port open; it
   keeps trying). A port number your friend didn't open stops with an error
@@ -147,7 +153,7 @@ each thing.
   a console or another device on your Wi-Fi use it too (only the ports you
   joined; nothing else).
 - **Only the ports you open can be reached.** TailCat is given exactly those
-  ports (and KittyConnect's own check port, 47474, which answers only its
+  ports (and Portside's own check port, 47474, which answers only its
   check), and it silently drops a connection to any other port. Joining your
   own code on the same PC picks another local port by itself, so the tunnel
   never feeds back into itself.
@@ -169,7 +175,7 @@ TailCat forwards **TCP** ports. Games that only use UDP won't work this way.
   speaking light and how they're connected. Use headphones: there's no echo
   cancellation.
 - When the host ends the room, everyone sees it closed.
-- Everyone in a room needs KittyConnect 0.6 or newer: voice and screen share
+- Everyone in a room needs Portside 0.6 or newer: voice and screen share
   moved to UDP in 0.6, so older versions are told to update.
 - **Share screen**: pick a resolution (it starts at your screen's own, e.g.
   2560×1440, with 1440p/1080p/720p/480p below it) and a frame rate (15, 30 or
@@ -207,7 +213,7 @@ TailCat forwards **TCP** ports. Games that only use UDP won't work this way.
 - *Open*: paste the code and press **Connect**. Then **Map as drive** (Windows:
   a drive letter in Explorer) or **Mount** (Mac: in Finder's sidebar), or
   **Browse here** to look through it and download (or upload, if allowed)
-  inside KittyConnect. **Disconnect** unmounts it first.
+  inside Portside. **Disconnect** unmounts it first.
 - Windows opens files up to 50 MB from a drive like this, unless that's
   raised: **Allow big files** does that (to 4 GB, Windows' most; it asks for
   an administrator's OK). Bigger files: download them from **Browse here**.
@@ -229,13 +235,13 @@ their own.
   Forward. On your own connection it reconnects your end of the tunnel, which
   tries for a direct path from scratch. Whatever goes through it drops for a
   moment, so it's hidden while you're downloading. Next to someone connected
-  to you, it asks their KittyConnect to do the same at its next check (every
+  to you, it asks their Portside to do the same at its next check (every
   10 seconds while on a relay).
 - **Network permission** (bottom bar): if Windows' "allow on your network?"
   question for TailCat was cancelled or missed, Windows blocks direct
   connections and never asks again by itself. This makes Windows forget its
-  answer for KittyConnect and its TailCat programs (after an administrator's
-  OK), so it asks again when you reconnect. Press **Allow**. KittyConnect checks every 30 seconds through the tunnel,
+  answer for Portside and its TailCat programs (after an administrator's
+  OK), so it asks again when you reconnect. Press **Allow**. Portside checks every 30 seconds through the tunnel,
 and when the other side stops sharing, closes the port or ends the room, your
 side disconnects by itself and says so. Downloads show their speed.
 
@@ -270,8 +276,8 @@ share kills its code for good, and the next start gets a new one.
   two never share any.
 - The WebView2 profile lives in `data\webview\`.
 - Every TailCat process is tied to a Windows job object, so they all close when
-  KittyConnect does, even if it crashes. macOS has no job objects, so a small
-  watchdog (`sh`, in its own process group) waits for KittyConnect to exit,
+  Portside does, even if it crashes. macOS has no job objects, so a small
+  watchdog (`sh`, in its own process group) waits for Portside to exit,
   however it exits, and then ends the TailCat programs it started. Only
   programs in `data/bin/` are ever ended. Leftovers from a run whose watchdog
   was stopped too are ended at the next start.
@@ -299,7 +305,7 @@ runtime into a `WebView2\` folder beside the exe.
 - **Hub**: the host runs a small server on `127.0.0.1` and `::1`, served with
   the official `tailcat serve --key=new <port>` (one port, nothing else);
   members join with the official `tailcat forward`, and the host connects
-  directly with a secret only its KittyConnect has (32 bytes from the OS's
+  directly with a secret only its Portside has (32 bytes from the OS's
   secure random source), which is what makes it the host. One JSON line per
   message: hello and welcome, the member list (name, host, direct or relay),
   path updates, invites, remove, and a ping every 5 seconds (25 seconds of
@@ -336,7 +342,7 @@ runtime into a `WebView2\` folder beside the exe.
   look at a copy that isn't open adds nothing anywhere; roughly 10 to 20 KB
   each). Such a look says where it's open itself (`openAt`), so the copy it
   finds looks back at once (at most every 30 seconds), checking for itself.
-  Protocol version 2: everyone in a hub needs KittyConnect 0.12 or newer.
+  Protocol version 2: everyone in a hub needs Portside 0.12 or newer.
 - **Files**: the sharer runs a small file server on `127.0.0.1` and exposes
   only that port with `tailcat serve`. The receiver forwards a local port to it
   and requests files by id. Only files you added can be fetched. Received names
@@ -382,7 +388,7 @@ runtime into a `WebView2\` folder beside the exe.
     sharer's bitrate follows the watcher doing best.
 - **Minecraft LAN worlds**: Minecraft announces a LAN world with a UDP message
   on port 4445 every 1.5 seconds (`[MOTD]name[/MOTD][AD]port[/AD]`). The host's
-  KittyConnect listens on 4445 (sharing it with Minecraft) for messages from
+  Portside listens on 4445 (sharing it with Minecraft) for messages from
   this PC's own addresses only. Joiners ask the host's beacon every 3 seconds,
   through the tunnel, which worlds are open on the port they joined, and send
   the same message to their own Minecraft on `127.0.0.1:4445`, pointing at the
@@ -406,7 +412,7 @@ runtime into a `WebView2\` folder beside the exe.
 - **Every byte between peers goes through the WireGuard-encrypted TailCat
   tunnel** (Noise IK, ChaCha20-Poly1305), with a new key and a WireGuard
   pre-shared key for every share, port, room and hub. TailCat relays only
-  ever see ciphertext. KittyConnect's own servers listen only on `127.0.0.1`
+  ever see ciphertext. Portside's own servers listen only on `127.0.0.1`
   (and `::1`, at the same port, since TailCat tries that first: no other
   program can sit there and get your friends' connections). The exceptions
   are *Share with my network* on a joined port, which lets devices on your
@@ -417,7 +423,7 @@ runtime into a `WebView2\` folder beside the exe.
   `magicsock … now using <ip:port>` line marks the switch to a direct path. The
   30-second check is a ping through the tunnel itself: to the file server, to
   the room, or for ports to a small beacon (`127.0.0.1:47474`) the host serves
-  in the same tunnel. KittyConnect doesn't use `tailcat ping`, because each
+  in the same tunnel. Portside doesn't use `tailcat ping`, because each
   run adds a new client to the host that's never removed.
 - **Who's connected**: only the joining side can tell whether its own tunnel
   went direct, so each joiner reports it, with its name, a random id for that
@@ -459,7 +465,7 @@ To move to a newer TailCat, change the version and hash in
 
 ### Encryption check
 
-`tools/encryption-check/run.sh` (Linux, as root) runs two KittyConnects, a
+`tools/encryption-check/run.sh` (Linux, as root) runs two copies of the app, a
 host and a friend, through real tunnels: the official TailCat for the Hub,
 File Share, Port Forward (and a wrong port) and Mounts, and the VOIP helper
 for a room (chat, an attachment, voice and screen video). It uses the app's
@@ -475,7 +481,7 @@ the capture sees exactly what a relay operator would.
 
 ## Releases and the Launcher
 
-KittyConnect is listed in the Javacrafter Launcher, which installs and updates
+Portside is listed in the Javacrafter Launcher, which installs and updates
 it. To publish a version:
 
 1. Bump `version` in `Cargo.toml` (e.g. `0.1.1`) and commit.
@@ -485,7 +491,7 @@ it. To publish a version:
 [`.github/workflows/release.yml`](.github/workflows/release.yml) then builds
 both on GitHub, attaches `KittyConnect-windows-x64.zip` and
 `KittyConnect-macos.zip` (each with a SHA-256 manifest of every file) and
-`KittyConnect-macos.dmg` to the release, and updates `update.json` and
+`Portside-macos.dmg` to the release, and updates `update.json` and
 `update-macos.json` on the `updates` branch, which is where the Launcher looks
 for new versions. [`check.yml`](.github/workflows/check.yml) builds and tests
 both on every push to a work branch, and keeps the Mac app as a download.

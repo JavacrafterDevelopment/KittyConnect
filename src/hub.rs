@@ -942,7 +942,7 @@ fn peek_from(port: u16, wait: Duration, mine: Option<&str>, stopped: &AtomicBool
         return Err("not open".into());
     }
     if v["v"].as_u64() != Some(PROTOCOL) {
-        return Err("a different version of KittyConnect".into());
+        return Err("a different version of Portside".into());
     }
     let (book, gone) = read_book(&v);
     Ok(Peeked {
@@ -2027,7 +2027,7 @@ impl Hub {
                 return Some(("Removed from the hub.".into(), "bad"));
             }
             HubEvent::Full => self.end("That hub is full."),
-            HubEvent::Old => self.end("That hub runs a different version of KittyConnect. Update both to the latest."),
+            HubEvent::Old => self.end("That hub runs a different version of Portside. Update both to the latest."),
         }
         None
     }

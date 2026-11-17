@@ -286,7 +286,7 @@ fn list_once(port: u16) -> Result<Vec<Remote>, String> {
     }
     serde_json::from_str::<ListReply>(&line)
         .map(|r| r.files)
-        .map_err(|_| "Got a reply that isn't from KittyConnect file sharing. Is this a port code?".to_string())
+        .map_err(|_| "Got a reply that isn't from Portside file sharing. Is this a port code?".to_string())
 }
 
 pub struct Job {

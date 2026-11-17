@@ -469,7 +469,7 @@ impl PortJoin {
         } else {
             format!("Not every one of ports {} is open on this code. Check the numbers with your friend.", list.join(", "))
         };
-        self.log.push("KittyConnect: the host said this code didn't open that port; stopped");
+        self.log.push("Portside: the host said this code didn't open that port; stopped");
     }
 
     /// Joining, and nothing has answered for a while.
@@ -549,7 +549,7 @@ fn main() {
 
     #[cfg_attr(not(any(windows, target_os = "macos")), allow(unused_mut))]
     let mut window_builder = WindowBuilder::new()
-        .with_title("KittyConnect")
+        .with_title("Portside")
         .with_inner_size(LogicalSize::new(1060.0, 720.0))
         .with_min_inner_size(LogicalSize::new(760.0, 520.0))
         .with_decorations(false)
@@ -761,14 +761,14 @@ fn menu_bar(proxy: EventLoopProxy<UserEvent>) -> muda::Menu {
 
     let quit = Accelerator::new(Modifiers::META, Code::KeyQ);
     let app_menu = Submenu::with_items(
-        "KittyConnect",
+        "Portside",
         true,
         &[
             &PredefinedMenuItem::hide(None),
             &PredefinedMenuItem::hide_others(None),
             &PredefinedMenuItem::show_all(None),
             &PredefinedMenuItem::separator(),
-            &MenuItem::with_id(MENU_QUIT, "Quit KittyConnect", true, Some(quit)),
+            &MenuItem::with_id(MENU_QUIT, "Quit Portside", true, Some(quit)),
         ],
     )
     .expect("app menu");
@@ -908,7 +908,7 @@ pub(crate) fn last_words(log: &Log) -> String {
     log.0
         .iter()
         .rev()
-        .find(|l| !l.starts_with("KittyConnect:"))
+        .find(|l| !l.starts_with("Portside:"))
         .map(|l| l.trim_start_matches('#').trim().to_string())
         .unwrap_or_default()
 }
@@ -1448,7 +1448,7 @@ impl App {
             Err(e) => return self.fail_share(e),
         };
         let args = vec!["serve".into(), "--key=new".into(), server.port.to_string()];
-        self.share.log.push(format!("KittyConnect: file server on 127.0.0.1:{}, starting TailCat", server.port));
+        self.share.log.push(format!("Portside: file server on 127.0.0.1:{}, starting TailCat", server.port));
         match tailcat::spawn(Role::ShareHost, &args, &self.proxy) {
             Ok(p) => {
                 self.share.proc = Some(p);
@@ -1500,7 +1500,7 @@ impl App {
             Err(e) => return self.fail_recv(e),
         };
         let args: Vec<String> = vec!["forward".into(), c.addr.clone(), format!("{local}:{}", c.ports[0])];
-        self.recv.log.push(format!("KittyConnect: tunnelling 127.0.0.1:{local} to the sharer"));
+        self.recv.log.push(format!("Portside: tunnelling 127.0.0.1:{local} to the sharer"));
         match tailcat::spawn(Role::RecvForward, &args, &self.proxy) {
             Ok(p) => {
                 let cancel = Arc::new(AtomicBool::new(false));
@@ -1851,9 +1851,9 @@ impl App {
                 self.share.sending.remove(&conn);
                 if ok {
                     self.share.sent += 1;
-                    self.share.log.push(format!("KittyConnect: sent {name}"));
+                    self.share.log.push(format!("Portside: sent {name}"));
                 } else {
-                    self.share.log.push(format!("KittyConnect: transfer of {name} was interrupted"));
+                    self.share.log.push(format!("Portside: transfer of {name} was interrupted"));
                 }
             }
         }
@@ -2174,7 +2174,7 @@ impl App {
                 if self.recv.link.ping_result(result) {
                     self.fail_recv("The sharer stopped sharing or went offline.".into());
                 } else if retry && self.recv.link.path() == "relay" {
-                    self.recv.log.push("KittyConnect: the sharer asked to retry a direct connection");
+                    self.recv.log.push("Portside: the sharer asked to retry a direct connection");
                     self.retry_recv();
                 }
             }
@@ -2196,7 +2196,7 @@ impl App {
                     Checked::Nothing => {}
                 }
                 if retry && j.proc.is_some() && j.link.path() == "relay" {
-                    j.log.push("KittyConnect: the host asked to retry a direct connection");
+                    j.log.push("Portside: the host asked to retry a direct connection");
                     self.retry_join(key);
                 }
             }
@@ -2216,7 +2216,7 @@ impl App {
             Ok(p) => {
                 self.recv.proc = Some(p);
                 self.recv.link.restarted();
-                self.recv.log.push("KittyConnect: reconnecting to try for a direct connection");
+                self.recv.log.push("Portside: reconnecting to try for a direct connection");
                 self.set_status("Reconnecting to try for a direct connection…", "busy");
             }
             Err(e) => self.fail_recv(e),
@@ -2235,7 +2235,7 @@ impl App {
                 j.started = Instant::now();
                 j.ports_checked = false;
                 j.link.restarted();
-                j.log.push("KittyConnect: reconnecting to try for a direct connection");
+                j.log.push("Portside: reconnecting to try for a direct connection");
                 self.status = ("Reconnecting to try for a direct connection…".into(), "busy");
             }
             Err(e) => {
@@ -2932,12 +2932,12 @@ fn reveal_in_shell(path: &std::path::Path) {
 fn missing_webview2(detail: &str) {
     use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, IDOK, MB_ICONWARNING, MB_OKCANCEL};
     let text = format!(
-        "KittyConnect needs the Microsoft Edge WebView2 Runtime, which comes with Windows 11 \
+        "Portside needs the Microsoft Edge WebView2 Runtime, which comes with Windows 11 \
          and most Windows 10 installs, but couldn't start it here.\n\n\
          Press OK to open Microsoft's download page.\n\n({detail})"
     );
     let wide = |s: &str| s.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
-    let (text, title) = (wide(&text), wide("KittyConnect"));
+    let (text, title) = (wide(&text), wide("Portside"));
     let choice = unsafe { MessageBoxW(std::ptr::null_mut(), text.as_ptr(), title.as_ptr(), MB_OKCANCEL | MB_ICONWARNING) };
     if choice == IDOK {
         open_in_shell("https://developer.microsoft.com/microsoft-edge/webview2/");
@@ -2946,7 +2946,7 @@ fn missing_webview2(detail: &str) {
 
 #[cfg(not(windows))]
 fn missing_webview2(detail: &str) {
-    eprintln!("KittyConnect couldn't start the system WebView ({detail})");
+    eprintln!("Portside couldn't start the system WebView ({detail})");
 }
 
 #[cfg(test)]

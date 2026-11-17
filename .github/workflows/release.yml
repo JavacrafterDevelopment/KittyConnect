@@ -153,7 +153,7 @@ jobs:
           name: dist-macos
           path: |
             dist/KittyConnect-macos.zip
-            dist/KittyConnect-macos.dmg
+            dist/Portside-macos.dmg
             dist/release-entry-macos.json
 
   publish:
@@ -180,9 +180,9 @@ jobs:
           $tag = '${{ github.ref_name }}'
           $pre = if ($tag -match '-') { '--prerelease' } else { $null }
           $assets = @('release/KittyConnect-windows-x64.zip', 'dist/KittyConnect-macos.zip')
-          if (Test-Path 'dist/KittyConnect-macos.dmg') { $assets += 'dist/KittyConnect-macos.dmg' }
+          if (Test-Path 'dist/Portside-macos.dmg') { $assets += 'dist/Portside-macos.dmg' }
           gh release create $tag @assets `
-            --title "KittyConnect $($tag.TrimStart('v'))" --generate-notes $pre
+            --title "Portside $($tag.TrimStart('v'))" --generate-notes $pre
 
       # update.json (Windows) and update-macos.json (macOS) live on their own
       # `updates` branch so releases never add commits to main. The launcher

@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>KittyConnect</title>
+  <title>Portside</title>
   <style>/*{{CSS}}*/</style>
   <script>/*{{BOOT}}*/</script>
 </head>
@@ -14,7 +14,7 @@
     <header id="top">
       <div id="brandcol">
         <div id="brandrow">
-          <span id="wordmark">Kitty<span class="gilt">Connect</span></span>
+          <span id="wordmark">Port<span class="gilt">side</span></span>
           <span class="meta">peer to peer, over TailCat</span>
         </div>
 
@@ -99,7 +99,7 @@
             folder with one press, so nobody copies a code for each. The hub and its invites go
             through the encrypted <b>TailCat</b> tunnel, using the official TailCat<span class="mac-only">
             (on a Mac, built from TailCat's own source, since Tailscale doesn't sign a Mac build)</span>.
-            Voice rooms still connect through KittyConnect's VOIP helper, as always.</p>
+            Voice rooms still connect through Portside's VOIP helper, as always.</p>
 
           <!-- Not in a hub: start one or join one. -->
           <div id="hub-lobby">
@@ -218,7 +218,7 @@
               <h2 class="section-title">Connections</h2>
               <span class="meta" id="conn-count"></span>
             </div>
-            <p class="set-desc">Everything connected right now, anywhere in KittyConnect: who's on it and
+            <p class="set-desc">Everything connected right now, anywhere in Portside: who's on it and
               whether each is direct or on a relay. Drop ends it, the same as its own tab's Stop or Leave.</p>
             <div class="sessions" id="conn-list"></div>
           </div>
@@ -796,7 +796,7 @@
   </div>
 
   <!-- Network permission: removes Windows Firewall's remembered answer for
-       KittyConnect's programs, so Windows asks again. -->
+       Portside's programs, so Windows asks again. -->
   <div class="modal hide" id="fw-modal" role="dialog" aria-labelledby="fw-title">
     <div class="modal-card namecard">
       <div class="card-head">
@@ -808,7 +808,7 @@
       <p class="set-desc">The first time TailCat connects, Windows asks whether to allow it on your
         network. If that was cancelled or missed, Windows blocks direct connections and everything
         stays on <b>Relay</b>, and it never asks again by itself.</p>
-      <p class="set-desc">This makes Windows forget its answer for KittyConnect and its TailCat
+      <p class="set-desc">This makes Windows forget its answer for Portside and its TailCat
         programs (Windows asks for an administrator's OK first). Then reconnect: Windows asks again,
         and you press <b>Allow</b>. Do it on whichever PC is stuck; if you're not sure, do it on both.</p>
       <p class="set-desc">If it still stays on Relay, the network may be blocking devices from

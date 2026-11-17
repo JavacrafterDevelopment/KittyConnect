@@ -94,7 +94,7 @@ pub fn reset() -> Result<usize, String> {
     let programs = programs();
     let command = command(&programs);
     if command.is_empty() {
-        return Err("Couldn't find KittyConnect's programs to reset.".into());
+        return Err("Couldn't find Portside's programs to reset.".into());
     }
     // /d: skip any AutoRun command; /v:off: no !var! expansion; /s: strip only
     // the outer quotes, keeping the quoted paths inside.

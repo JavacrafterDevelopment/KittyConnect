@@ -67,7 +67,7 @@ pub fn read(r: &mut impl Read) -> io::Result<(u8, Vec<u8>)> {
     r.read_exact(&mut head)?;
     let len = u32::from_be_bytes([head[1], head[2], head[3], head[4]]) as usize;
     if len > MAX_FRAME || !matches!(head[0], JSON | FILE) {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "not a KittyConnect room"));
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "not a Portside room"));
     }
     let mut payload = vec![0u8; len];
     r.read_exact(&mut payload)?;

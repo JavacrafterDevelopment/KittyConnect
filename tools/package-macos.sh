@@ -12,7 +12,7 @@
 #   <Out>/KittyConnect/licenses/                    KittyConnect's, and everything in both TailCat programs
 #   <Out>/KittyConnect/launcher-manifest.json      every file with its size and SHA-256
 #   <Out>/KittyConnect-macos.zip                   what the Launcher downloads
-#   <Out>/KittyConnect-macos.dmg                   for installing by hand (when hdiutil is there)
+#   <Out>/Portside-macos.dmg                       for installing by hand (when hdiutil is there)
 #   <Out>/release-entry-macos.json                 this release's entry for update-macos.json
 
 set -euo pipefail
@@ -33,7 +33,7 @@ OUT="$(cd "$OUT" && pwd)"
 FOLDER="$OUT/KittyConnect"
 APP="$FOLDER/KittyConnect.app"
 ZIP_PATH="$OUT/KittyConnect-macos.zip"
-DMG_PATH="$OUT/KittyConnect-macos.dmg"
+DMG_PATH="$OUT/Portside-macos.dmg"
 MANIFEST="launcher-manifest.json"
 EXE_REL="KittyConnect.app/Contents/MacOS/KittyConnect"
 
@@ -54,7 +54,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleDevelopmentRegion</key>
   <string>en</string>
   <key>CFBundleDisplayName</key>
-  <string>KittyConnect</string>
+  <string>Portside</string>
   <key>CFBundleExecutable</key>
   <string>KittyConnect</string>
   <key>CFBundleIconFile</key>
@@ -64,24 +64,35 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleInfoDictionaryVersion</key>
   <string>6.0</string>
   <key>CFBundleName</key>
-  <string>KittyConnect</string>
+  <string>Portside</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
   <string>${VERSION}</string>
   <key>CFBundleVersion</key>
   <string>${VERSION}</string>
+  <key>LSHasLocalizedDisplayName</key>
+  <true/>
   <key>LSMinimumSystemVersion</key>
   <string>11.0</string>
   <key>NSHighResolutionCapable</key>
   <true/>
   <key>NSMicrophoneUsageDescription</key>
-  <string>KittyConnect uses your microphone only while you're in voice in a VOIP room.</string>
+  <string>Portside uses your microphone only while you're in voice in a VOIP room.</string>
   <key>NSLocalNetworkUsageDescription</key>
-  <string>KittyConnect connects directly to the people you share with when they're on your network, and finds Minecraft LAN worlds on this Mac.</string>
+  <string>Portside connects directly to the people you share with when they're on your network, and finds Minecraft LAN worlds on this Mac.</string>
 </dict>
 </plist>
 PLIST
+
+# The name Finder, the Dock and the menu bar show: Portside. The bundle and
+# its program keep their file names (KittyConnect.app, KittyConnect), so the
+# Launcher's updates swap it in place and its data (KittyConnectData) stays.
+mkdir -p "$APP/Contents/Resources/en.lproj"
+cat > "$APP/Contents/Resources/en.lproj/InfoPlist.strings" <<'STRINGS'
+CFBundleDisplayName = "Portside";
+CFBundleName = "Portside";
+STRINGS
 
 cp "$ROOT/Start KittyConnect.command" "$FOLDER/Start KittyConnect.command"
 chmod 755 "$FOLDER/Start KittyConnect.command"
@@ -158,8 +169,8 @@ if command -v hdiutil >/dev/null 2>&1; then
   mkdir -p "$STAGE"
   cp -R "$APP" "$STAGE/KittyConnect.app"
   ln -s /Applications "$STAGE/Applications"
-  hdiutil create -volname "KittyConnect" -fs HFS+ -srcfolder "$STAGE" -ov -format UDZO "$DMG_PATH" >/dev/null || true
+  hdiutil create -volname "Portside" -fs HFS+ -srcfolder "$STAGE" -ov -format UDZO "$DMG_PATH" >/dev/null || true
   rm -rf "$STAGE"
 fi
 
-echo "Packaged KittyConnect $VERSION for macOS -> $ZIP_PATH"
+echo "Packaged Portside $VERSION for macOS -> $ZIP_PATH"

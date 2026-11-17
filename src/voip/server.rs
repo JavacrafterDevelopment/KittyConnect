@@ -567,7 +567,7 @@ fn serve_member(stream: TcpStream, room: &Arc<Mutex<Room>>, host_token: &str) {
     }
     // Voice and video moved to UDP in protocol 3; older versions send them on TCP.
     if hello["v"].as_u64().unwrap_or(1) < PROTOCOL {
-        let bye = json!({ "t": "closed", "reason": "This room needs KittyConnect 0.6 or newer. Update KittyConnect (the Launcher can do it) and join again." });
+        let bye = json!({ "t": "closed", "reason": "This room needs Portside (KittyConnect) 0.6 or newer. Update it (the Launcher can do it) and join again." });
         let _ = reader.write_all(&wire::json(&bye));
         return;
     }
