@@ -24,6 +24,9 @@ on:
   push:
     tags: ['v*']
 
+# A job that hangs is stopped after timeout-minutes (normal runs take about
+# 10 minutes) instead of using GitHub's 6-hour limit.
+#
 # One release at a time, so two tags pushed together can't race on update.json.
 concurrency: release
 
@@ -33,6 +36,7 @@ permissions:
 jobs:
   build-windows:
     runs-on: windows-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
@@ -101,6 +105,7 @@ jobs:
 
   build-macos:
     runs-on: macos-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
@@ -159,6 +164,7 @@ jobs:
   publish:
     needs: [build-windows, build-macos]
     runs-on: windows-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 

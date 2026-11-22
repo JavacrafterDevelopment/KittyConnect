@@ -1,18 +1,25 @@
-# Builds and tests both versions on every push to a work branch (and on pull
-# requests), so a broken build shows up before a release tag. The macOS app is
+# Builds and tests both versions on every push to main or a work branch (and
+# on pull requests), so a broken build shows up before a release tag. The macOS app is
 # kept as a download (KittyConnect-macos-test) for trying it out.
 
 name: Check
 
 on:
   push:
-    branches: ['claude/**']
+    branches: [main, 'claude/**']
   pull_request:
   workflow_dispatch:
+
+# A newer push to the same branch or pull request replaces a run still going,
+# so old runs don't hold up the (scarce) macOS machines.
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   windows:
     runs-on: windows-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -40,6 +47,7 @@ jobs:
 
   macos:
     runs-on: macos-latest
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
 
