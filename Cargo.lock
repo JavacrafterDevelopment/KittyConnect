@@ -1780,6 +1780,7 @@ version = "0.13.0"
 dependencies = [
  "arboard",
  "base64 0.22.1",
+ "block2",
  "cpal",
  "dav-server",
  "futures-util",
@@ -1788,6 +1789,7 @@ dependencies = [
  "hyper-util",
  "muda",
  "nnnoiseless",
+ "objc2",
  "opus1",
  "percent-encoding",
  "rfd",
@@ -1796,6 +1798,8 @@ dependencies = [
  "socket2 0.5.10",
  "tao",
  "tokio",
+ "windows 0.62.2",
+ "windows-core 0.62.2",
  "windows-sys 0.61.2",
  "wry",
 ]

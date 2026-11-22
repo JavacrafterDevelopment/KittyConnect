@@ -49,6 +49,8 @@ pub struct Conn {
     pub media: Option<media::Sender>,
     /// What's being watched, shared with the media thread.
     pub link: Arc<media::Link>,
+    /// The sound of the share being watched.
+    pub shared_sound: Arc<super::share_audio::ShareAudio>,
     sides: Arc<Sides>,
     alive: Arc<AtomicBool>,
 }
@@ -255,6 +257,8 @@ pub fn connect(
     let fetches: Arc<Mutex<HashMap<u32, Fetch>>> = Arc::default();
     let sides: Arc<Sides> = Arc::default();
     let link: Arc<media::Link> = Arc::default();
+    let shared_sound: Arc<super::share_audio::ShareAudio> = Arc::default();
+    let ss = shared_sound.clone();
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
     let udp = udp_socket(addr);
     let media = udp.as_ref().ok().and_then(|u| u.try_clone().ok()).map(media::Sender::new);
@@ -308,6 +312,7 @@ pub fn connect(
             id,
             key.to_string(),
             m.clone(),
+            ss,
             lk,
             move |sharer| {
                 let _ = keys.try_send(Out::Frame(wire::json(&json!({ "t": "keyframe", "id": sharer }))));
@@ -352,7 +357,7 @@ pub fn connect(
             let _ = tx.try_send(Out::Close);
         }
     });
-    Conn { tx, mixer, fetches, media, link, sides, alive }
+    Conn { tx, mixer, fetches, media, link, shared_sound, sides, alive }
 }
 
 /// Our member id and key, if the room takes voice and video over UDP. A host
@@ -736,6 +741,28 @@ mod tests {
         uh.send(&nack).unwrap();
         assert!(no_udp(&uh, media::VIDEO));
 
+        // The share's sound goes to its watchers only, tagged with the sharer.
+        ub.send(&media::share_audio(9, &[7; 120])).unwrap();
+        let snd = next_udp(&uc, media::SHARE_AUDIO).expect("the watcher hears the share");
+        assert_eq!((media::u16_at(&snd, 1), media::u32_at(&snd, 3)), (ben_id as u16, 9));
+        assert_eq!(&snd[7..], &[7; 120][..]);
+        assert!(no_udp(&uh, media::SHARE_AUDIO), "the host isn't watching");
+        assert!(no_udp(&ub, media::SHARE_AUDIO), "the sharer doesn't hear it back");
+        // Someone not sharing can't send share sound.
+        uh.send(&media::share_audio(1, &[1; 50])).unwrap();
+        assert!(no_udp(&uc, media::SHARE_AUDIO));
+        // What the screen message says about it reaches everyone.
+        ben.write_all_frame(&json!({ "t": "screen", "on": true, "w": 1280, "h": 720, "fps": 30, "codec": "avc1.640028", "audio": true, "paused": true, "label": "Minecraft" })).unwrap();
+        // (Earlier member lists may still be queued; take the one with it.)
+        let me = loop {
+            let members = next_json(&mut cy, "members");
+            let me = members["members"].as_array().unwrap().iter().find(|m| m["id"] == ben_id).unwrap().clone();
+            if me["screen"]["label"] == "Minecraft" {
+                break me;
+            }
+        };
+        assert_eq!((me["screen"]["audio"].clone(), me["screen"]["paused"].clone(), me["screen"]["label"].clone()), (json!(true), json!(true), json!("Minecraft")));
+
         // Cy's report reaches Ben, tagged with Cy's id.
         uc.send(&asm.report()).unwrap();
         let (from, _) = media::Report::decode(&next_udp(&ub, media::REPORT).expect("report to the sharer")).unwrap();
@@ -854,6 +881,7 @@ mod tests {
                 w["you"].as_u64().unwrap() as u16,
                 w["key"].as_str().unwrap().to_string(),
                 Arc::new(Mixer::default()),
+                Arc::default(),
                 link.clone(),
                 |_| {},
                 move |ev| {

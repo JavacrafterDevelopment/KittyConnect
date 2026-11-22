@@ -34,9 +34,49 @@ percent-encoding = "2"
 [target.'cfg(target_os = "macos")'.dependencies]
 # The menu bar: Quit, and Edit so ⌘C/⌘V reach the page.
 muda = { version = "0.21", default-features = false }
+# Native screen share: macOS's own ScreenCaptureKit captures and VideoToolbox
+# encodes. Their calls are written out in src/capture/macos.rs; these are the
+# Objective-C runtime and blocks bindings Portside already ships (through tao
+# and wry).
+# (Messages are written by hand there, so the debug-build type checks are off.)
+objc2 = { version = "0.6", features = ["disable-encoding-assertions"] }
+block2 = "0.6"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_JobObjects", "Win32_System_Registry", "Win32_System_Threading", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+# Native screen share: Windows' own Graphics Capture, a hardware H.264 encoder
+# through Media Foundation, and WASAPI process loopback for the sound. The same
+# Microsoft bindings Portside already ships (through wry's WebView2), with more
+# of Windows' APIs switched on.
+windows = { version = "0.62", features = [
+    "Foundation",
+    "Graphics",
+    "Graphics_Capture",
+    "Graphics_DirectX",
+    "Graphics_DirectX_Direct3D11",
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Gdi",
+    "Win32_Media_Audio",
+    "Win32_Media_KernelStreaming",
+    "Win32_Media_MediaFoundation",
+    "Win32_Media_Multimedia",
+    "Win32_Security",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Ole",
+    "Win32_System_Threading",
+    "Win32_System_Variant",
+    "Win32_System_WinRT",
+    "Win32_System_WinRT_Direct3D11",
+    "Win32_System_WinRT_Graphics_Capture",
+    "Win32_UI_WindowsAndMessaging",
+] }
+windows-core = "0.62"
 
 [profile.release]
 opt-level = "s"
