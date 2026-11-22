@@ -1113,22 +1113,34 @@ impl Voip {
 
     /// For the end-to-end check: events from two rooms in one process are
     /// told apart by generation.
-    #[cfg(all(test, target_os = "linux"))]
+    #[cfg(any(all(test, target_os = "linux"), feature = "e2e"))]
     pub fn test_gen_base(&mut self, base: u64) {
         self.gen = base;
     }
 
     /// For the end-to-end check: a room message, as the page would send it.
-    #[cfg(all(test, target_os = "linux"))]
+    #[cfg(any(all(test, target_os = "linux"), feature = "e2e"))]
     pub fn test_send(&self, v: Value) {
         if let Some(c) = &self.conn {
             c.send(v);
         }
     }
 
+    /// For the end-to-end check: fill the native picker (as its list arriving would).
+    #[cfg(any(all(test, target_os = "linux"), feature = "e2e"))]
+    pub fn test_sources(&mut self, list: Vec<crate::capture::Source>) {
+        self.sources = list;
+    }
+
+    /// For the end-to-end check: why the last native share didn't start, if it didn't.
+    #[cfg(any(all(test, target_os = "linux"), feature = "e2e"))]
+    pub fn test_share_state(&self) -> (String, bool) {
+        (self.share_error.clone(), self.native.is_some())
+    }
+
     /// For the end-to-end check: one voice packet, exactly as the audio
     /// engine hands it to the media sender (there's no microphone here).
-    #[cfg(all(test, target_os = "linux"))]
+    #[cfg(any(all(test, target_os = "linux"), feature = "e2e"))]
     pub fn test_voice(&self, seq: u32, opus: &[u8]) {
         if let Some(m) = self.conn.as_ref().and_then(|c| c.media.as_ref()) {
             m.urgent(media::voice(seq, opus));

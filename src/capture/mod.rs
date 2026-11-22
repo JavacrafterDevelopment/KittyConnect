@@ -19,6 +19,44 @@
 
 pub mod h264;
 
+#[cfg(any(all(test, target_os = "linux"), feature = "e2e"))]
+pub mod fake {
+    //! For the end-to-end encryption check only (never in a shipped build):
+    //! a stand-in source that hands the room exactly what WGC or
+    //! ScreenCaptureKit plus the encoders do (H.264 access units and 20 ms
+    //! Opus packets, through the same sink), each carrying a marker the test
+    //! looks for in the packet capture. The real capture is tried too, where
+    //! the machine allows it.
+    use super::*;
+    pub const ID: &str = "test:markers";
+    pub static MARKERS: std::sync::Mutex<(String, String)> = std::sync::Mutex::new((String::new(), String::new()));
+    pub fn source() -> Source {
+        Source { id: ID.into(), screen: true, title: "Test markers".into(), app: String::new(), pid: 0, w: 1280, h: 720, minimized: false }
+    }
+    struct Fake;
+    impl Running for Fake {}
+    pub fn start(o: Options, control: Arc<Control>, sink: Sink) -> Result<Box<dyn Running>, String> {
+        let (video, audio) = MARKERS.lock().unwrap().clone();
+        let with_audio = o.audio != Audio::Off;
+        std::thread::spawn(move || {
+            sink(Out::Started { w: 1280, h: 720, fps: 30, codec: "avc1.640028".into(), encoder: "test".into(), hardware: false, audio: with_audio });
+            let frame: Vec<u8> = [0u8, 0, 0, 1, 0x65].iter().copied().chain(video.as_bytes().iter().copied().cycle().take(8000)).collect();
+            let mut i = 0u64;
+            while !control.stopped() && i < 3000 {
+                if i % 3 == 0 {
+                    sink(Out::Video { key: control.take_key() || i == 0, ts: i * 11_000, data: frame.clone() });
+                }
+                if with_audio {
+                    sink(Out::Audio { seq: i as u32, opus: audio.as_bytes().to_vec() });
+                }
+                i += 1;
+                std::thread::sleep(Duration::from_millis(11));
+            }
+        });
+        Ok(Box::new(Fake))
+    }
+}
+
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
@@ -227,6 +265,11 @@ pub fn audio_modes() -> Vec<&'static str> {
 
 pub fn start(opts: Options, sink: Sink) -> Result<Share, String> {
     let control = Arc::new(Control::new(opts.fps.clamp(1, 120), opts.bitrate));
+    #[cfg(any(all(test, target_os = "linux"), feature = "e2e"))]
+    if opts.source.id == fake::ID {
+        let running = fake::start(opts, control.clone(), sink)?;
+        return Ok(Share { control, _running: running });
+    }
     let running = platform::start(opts, control.clone(), sink)?;
     Ok(Share { control, _running: running })
 }

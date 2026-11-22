@@ -22,6 +22,7 @@ use std::sync::Arc;
 use tao::event::Event;
 use tao::event_loop::{ControlFlow, EventLoopBuilder};
 use tao::platform::run_return::EventLoopExtRunReturn;
+#[cfg(target_os = "linux")]
 use tao::platform::unix::EventLoopBuilderExtUnix;
 
 use super::*;
@@ -159,11 +160,21 @@ fn mark(tag: &str) -> String {
     format!("KCMARK{tag}{}", &peers::secret()[..16])
 }
 
+#[cfg(test)]
 #[test]
 #[ignore = "run by tools/encryption-check/run.sh"]
 fn everything_between_two_kittyconnects_goes_through_the_tunnels() {
+    run();
+}
+
+/// The whole check. From `cargo test` on Linux, or from the app's own main()
+/// (`--kc-e2e`, a `--features e2e` build) on Windows and macOS.
+pub fn run() {
     let out = std::env::var("KC_E2E_OUT").expect("run by tools/encryption-check/run.sh");
-    let mut el = EventLoopBuilder::<UserEvent>::with_user_event().with_any_thread(true).build();
+    let mut b = EventLoopBuilder::<UserEvent>::with_user_event();
+    #[cfg(target_os = "linux")]
+    b.with_any_thread(true);
+    let mut el = b.build();
     let proxy = el.create_proxy();
     let (tx, rx) = channel::<Cmd>();
     let mut apps = Apps { host: App::new(proxy.clone()), friend: App::new(proxy.clone()), friend_page: Vec::new() };
@@ -231,6 +242,7 @@ fn script(d: &Drive, work: &std::path::Path) -> Result<Value, String> {
     let (chat_f, chat_h) = (m("ChatFriend"), m("ChatHost"));
     let (voice_f, voice_h) = (m("VoiceFriend"), m("VoiceHost"));
     let video = m("Video");
+    let (native_video, native_audio) = (m("NativeVideo"), m("NativeShareAudio"));
     let attach = m("Attach");
     let (share_name, share_body) = (m("ShareName"), m("ShareBody"));
     let port_data = m("Port");
@@ -353,6 +365,76 @@ fn script(d: &Drive, work: &std::path::Path) -> Result<Value, String> {
     })?;
     let frames = d.on(|a| a.friend_page.len());
     results.insert("video".into(), json!(format!("friend received {frames} frames over UDP")));
+
+    // Native screen share (the Windows/macOS capture path), fed by the test
+    // source: H.264 and share sound (SHARE_AUDIO) straight from the capture
+    // thread onto the room's UDP socket, as WGC/ScreenCaptureKit would.
+    *crate::capture::fake::MARKERS.lock().unwrap() = (native_video.clone(), native_audio.clone());
+    // The real list, asked for off the event loop as the picker does (macOS
+    // answers on the main thread).
+    let real = crate::capture::sources();
+    let mut list = real.clone().unwrap_or_default();
+    list.push(crate::capture::fake::source());
+    d.on(|a| a.host.voip.screen(None));
+    std::thread::sleep(Duration::from_secs(1));
+    let before = d.on(|a| a.friend_page.len());
+    let l = list.clone();
+    d.on(move |a| {
+        a.host.voip.test_sources(l);
+        let p = a.host.proxy.clone();
+        a.host.voip.share(&json!({ "source": crate::capture::fake::ID, "fps": 30, "bitrate": 2_000_000, "audio": "system" }), &p);
+        let host_id = a.host.voip.json()["me"].as_u64().unwrap_or(0) as u16;
+        a.friend.voip.watch(Some(host_id));
+    });
+    let nv = native_video.clone();
+    d.wait("the friend to receive native video", 30, move |a| {
+        use base64::Engine as _;
+        a.friend_page.iter().skip(before).any(|v| {
+            base64::engine::general_purpose::STANDARD
+                .decode(v["data"].as_str().unwrap_or(""))
+                .is_ok_and(|b| String::from_utf8_lossy(&b).contains(&nv))
+        })
+    })?;
+    std::thread::sleep(Duration::from_secs(2));
+    let nframes = d.on(|a| a.friend_page.len()) - before;
+    d.on(|a| a.host.voip.unshare());
+    results.insert("native_share".into(), json!(format!("friend received {nframes} native H.264 frames; share sound sent as SHARE_AUDIO over UDP")));
+
+    // The real capture and encoder of this computer, where it has them (a
+    // virtual display on a CI runner may not). Its frames carry no marker;
+    // the capture checks they too only crossed the network as WireGuard.
+    let real_result = match &real {
+        Err(e) => format!("no native capture here: {e}"),
+        Ok(srcs) => match srcs.iter().find(|s| s.screen).or(srcs.first()) {
+            None => "no screens or windows listed".to_string(),
+            Some(src) => {
+                std::thread::sleep(Duration::from_secs(1));
+                let before = d.on(|a| a.friend_page.len());
+                let (id, title) = (src.id.clone(), src.title.clone());
+                let started = d.on(move |a| {
+                    let p = a.host.proxy.clone();
+                    a.host.voip.share(&json!({ "source": id, "fps": 30, "bitrate": 2_000_000, "audio": "system", "height": 720 }), &p);
+                    let host_id = a.host.voip.json()["me"].as_u64().unwrap_or(0) as u16;
+                    a.friend.voip.watch(Some(host_id));
+                    a.host.voip.test_share_state()
+                });
+                if !started.1 {
+                    format!("{title}: didn't start: {}", started.0)
+                } else {
+                    let got = d.wait("the friend to receive the real screen", 20, move |a| a.friend_page.len() > before + 5);
+                    std::thread::sleep(Duration::from_secs(3));
+                    let n = d.on(|a| a.friend_page.len()) - before;
+                    let state = d.on(|a| a.host.voip.test_share_state());
+                    d.on(|a| a.host.voip.unshare());
+                    match got {
+                        Ok(()) => format!("{title}: friend received {n} real H.264 frames"),
+                        Err(_) => format!("{title}: started, but the friend got {n} frames ({})", state.0),
+                    }
+                }
+            }
+        },
+    };
+    results.insert("native_share_real".into(), json!(real_result));
 
     // An attachment in chat, from the friend.
     let attach_file = work.join(format!("{attach}.txt"));

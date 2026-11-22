@@ -10,6 +10,11 @@ publish = false
 name = "KittyConnect"
 path = "src/main.rs"
 
+[features]
+# The end-to-end encryption check, built into the app for Windows and macOS
+# runs (tools/encryption-check). Never on in a release build.
+e2e = []
+
 [dependencies]
 tao = "0.37"
 wry = "0.57"

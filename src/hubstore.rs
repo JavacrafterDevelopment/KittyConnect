@@ -124,7 +124,7 @@ impl Default for Store {
 
 impl Store {
     /// Somewhere else (the end-to-end check runs two apps on one PC).
-    #[cfg(test)]
+    #[cfg(any(test, feature = "e2e"))]
     pub fn at(root: PathBuf) -> Store {
         Store { root }
     }

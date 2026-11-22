@@ -1,0 +1,122 @@
+# The end-to-end encryption check on real Windows and macOS (and Linux):
+# two Portsides connect through TailCat while every packet on the machine is
+# recorded, and no marker the test sends may appear anywhere but between
+# Portside and its own TailCat on 127.0.0.1. See tools/encryption-check/.
+#
+# Each OS runs four ways: a local relay over plain HTTP (so the capture sees
+# what a relay sees), direct and forced through it; and the shipped programs
+# as they are on Tailscale's real relays over TLS, direct and forced through
+# them. The captures and reports are kept as downloads.
+
+name: Encryption check
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ['claude/**']
+    paths:
+      - '.github/workflows/encryption.yml'
+      - 'tools/encryption-check/**'
+      - 'src/e2e.rs'
+
+concurrency:
+  group: encryption-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  host:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 75
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: voip-helper/go.mod
+          cache-dependency-path: voip-helper/go.sum
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: TailCat programs (the shipped ones, embedded in the app)
+        run: |
+          if [ "$RUNNER_OS" = Windows ]; then
+            pwsh -File tools/fetch-tailcat.ps1
+            pwsh -File tools/build-voip-helper.ps1
+          else
+            tools/build-tailcat-macos.sh arm64
+          fi
+
+      - name: Test kc-voip and the local relay
+        run: |
+          W="$RUNNER_TEMP/kc"; mkdir -p "$W/bin"
+          EXE=; [ "$RUNNER_OS" = Windows ] && EXE=.exe
+          VERSION="$(sed -n 's/^pub const VERSION: &str = "\([^"]*\)";/\1/p' src/tailcat.rs)"
+          src="$(cd voip-helper && go mod download -json "github.com/tailscale/tailcat@v$VERSION" | sed -n 's/^[[:space:]]*"Dir": "\(.*\)",$/\1/p')"
+          TAGS="$(tr -d '\r\n' < "$src/build-tags.txt")"
+          cp -R voip-helper "$W/kcvoip"
+          cp tools/encryption-check/testregion.go.txt "$W/kcvoip/testregion.go"
+          sed -i.bak 's/serve(ctx, logf, port, nil)/serve(ctx, logf, port, testRegion())/' "$W/kcvoip/main.go"
+          grep -q 'testRegion()' "$W/kcvoip/main.go"
+          cmp voip-helper/tunnel.go "$W/kcvoip/tunnel.go"
+          (cd "$W/kcvoip" && CGO_ENABLED=0 go build -trimpath -tags "$TAGS" -o "$W/bin/kc-voip-test$EXE" .)
+          mkdir -p "$W/kcvoip/cmd/localrelay" && cp tools/encryption-check/localrelay/main.go "$W/kcvoip/cmd/localrelay/"
+          (cd "$W/kcvoip" && go build -o "$W/bin/localrelay$EXE" ./cmd/localrelay)
+          ls -l "$W/bin"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build Portside with the test built in
+        run: cargo build --locked --features e2e
+
+      - name: Run the check four ways
+        run: |
+          W="$RUNNER_TEMP/kc"; EXE=; APP=target/debug/KittyConnect
+          [ "$RUNNER_OS" = Windows ] && EXE=.exe && APP=target/debug/KittyConnect.exe
+          PY=python; command -v python3 >/dev/null && [ "$RUNNER_OS" != Windows ] && PY=python3
+          status=0
+          set +e
+          for mode in local-direct local-relay tailscale-direct tailscale-relay; do
+            echo "::group::$mode"
+            $PY tools/encryption-check/run-host.py $mode --app "$APP" --out "results/$mode" \
+                --relay "$W/bin/localrelay$EXE" --kc-voip "$W/bin/kc-voip-test$EXE" > "results-$mode.txt" 2>&1
+            rc=$?
+            [ $rc = 0 ] || status=1
+            cat "results-$mode.txt"
+            echo "::endgroup::"
+            echo "$mode: exit $rc"; tail -n 40 "results-$mode.txt"
+          done
+          mkdir -p results && mv results-*.txt results/
+          exit $status
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: encryption-check-${{ runner.os }}
+          path: results
+
+  linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: voip-helper/go.mod
+          cache-dependency-path: voip-helper/go.sum
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Packages
+        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libxdo-dev libasound2-dev xvfb
+      - name: Run the check (direct and relay)
+        run: sudo -E env "PATH=$PATH" "HOME=$HOME" tools/encryption-check/run.sh

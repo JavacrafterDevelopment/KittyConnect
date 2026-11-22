@@ -159,7 +159,7 @@ fn exe_path(bin: Binary) -> Result<PathBuf, String> {
     // Builds for systems that aren't shipped (Linux, for the end-to-end
     // encryption check) embed nothing; that check names programs built for
     // this system. Windows and macOS builds never look at these.
-    #[cfg(not(any(windows, target_os = "macos")))]
+    #[cfg(any(not(any(windows, target_os = "macos")), feature = "e2e"))]
     {
         let var = match bin {
             Binary::Official => "KC_TEST_TAILCAT",

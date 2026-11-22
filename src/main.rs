@@ -10,7 +10,7 @@ mod beacon;
 mod capture;
 mod code;
 // The end-to-end encryption check (tools/encryption-check/run.sh).
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(any(all(test, target_os = "linux"), feature = "e2e"))]
 mod e2e;
 // Windows Firewall only; on other systems its helpers are used by its tests.
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -537,6 +537,14 @@ fn main() {
     // WebDAV file size limit, then exit. Nothing else.
     if std::env::args().any(|a| a == "--kc-webdav-big-files") {
         std::process::exit(mount::raise_limit_elevated());
+    }
+    // The end-to-end encryption check (tools/encryption-check), only in a
+    // build made with `--features e2e`, which no release is. It runs here on
+    // the main thread because macOS's event loop must.
+    #[cfg(feature = "e2e")]
+    if std::env::args().any(|a| a == "--kc-e2e") {
+        e2e::run();
+        return;
     }
     // A fixed-version WebView2 runtime in a `WebView2` folder beside the exe is
     // used in preference to the system one, for machines without Edge.

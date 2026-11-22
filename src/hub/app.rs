@@ -620,14 +620,14 @@ impl Hub {
 
     /// For the end-to-end check: our copy dies without a word (as if the
     /// app crashed), no hand-over.
-    #[cfg(all(test, target_os = "linux"))]
+    #[cfg(any(all(test, target_os = "linux"), feature = "e2e"))]
     pub fn test_crash(&mut self) {
         self.close(false);
     }
 
     /// For the end-to-end check: how many of hub `id`'s scan's looks still
     /// have their TailCat running.
-    #[cfg(all(test, target_os = "linux"))]
+    #[cfg(any(all(test, target_os = "linux"), feature = "e2e"))]
     pub fn test_looks_running(&self, id: &str) -> usize {
         self.scans.get(id).map_or(0, |sc| sc.stop.running.lock().unwrap().iter().filter(|p| p.lock().unwrap().is_some()).count())
     }
@@ -635,7 +635,7 @@ impl Hub {
     /// For the end-to-end check: the PC this copy runs on restarts (or loses
     /// power): TailCat is gone first, so nothing more reaches anyone, not
     /// even a goodbye, and the app with it.
-    #[cfg(all(test, target_os = "linux"))]
+    #[cfg(any(all(test, target_os = "linux"), feature = "e2e"))]
     pub fn test_power_off(&mut self) {
         if let Some(p) = self.proc.as_mut() {
             p.kill();
@@ -645,7 +645,7 @@ impl Hub {
 
     /// For the end-to-end check: events from two hubs in one process are
     /// told apart by generation.
-    #[cfg(all(test, target_os = "linux"))]
+    #[cfg(any(all(test, target_os = "linux"), feature = "e2e"))]
     pub fn test_gen_base(&mut self, base: u64) {
         self.gen = base;
     }
