@@ -342,14 +342,19 @@ def main():
     own = owners.done()
     if relay:
         relay.kill()
-    if rc != 0 or not os.path.exists(env["KC_E2E_OUT"]):
+    if not os.path.exists(env["KC_E2E_OUT"]):
         print(open(os.path.join(a.out, "app.log"), errors="replace").read()[-6000:])
-        print("The test itself failed.")
+        print("The test itself failed, before it could write its report.")
         sys.exit(1)
     report = json.load(open(env["KC_E2E_OUT"]))
     print(json.dumps(report["results"], indent=2))
+    if report.get("error"):
+        # A step failed (a feature didn't work, not a leak): the capture of
+        # everything up to it is still checked below.
+        print(f"\nA TEST STEP FAILED: {report['error']}")
     ok = check(seen, own, report, derp_port, f"{platform.system()} {a.mode}", a.out)
-    print(f"\n{platform.system()} {a.mode}: " + ("ALL PASS" if ok else "FAILED"))
+    print(f"\n{platform.system()} {a.mode}: encryption " + ("PASS" if ok else "FAILED") + ("; but a test step failed (above)" if report.get("error") else "; every step worked"))
+    ok = ok and not report.get("error") and rc == 0
     sys.exit(0 if ok else 1)
 
 
