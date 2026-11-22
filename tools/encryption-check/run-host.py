@@ -115,6 +115,7 @@ def owners_win():
 class Owners:
     def __init__(self):
         self.map = defaultdict(set)
+        self.times = defaultdict(list)
         self.stop = threading.Event()
         self.t = threading.Thread(target=self.run, daemon=True)
         self.t.start()
@@ -124,6 +125,7 @@ class Owners:
             try:
                 for proto, port, comm, wild in (owners_mac() if MAC else owners_win()):
                     self.map[(proto, port)].add((comm, wild))
+                    self.times[(proto, port)].append((time.time(), comm, wild))
             except Exception as e:  # keep polling
                 print("owners:", e, file=sys.stderr)
             time.sleep(0.2)
@@ -131,12 +133,19 @@ class Owners:
     def done(self):
         self.stop.set()
         self.t.join()
-        return dict(self.map)
+        return dict(self.map), dict(self.times)
+
+
+def owner_at(times, proto, port, ts):
+    """Who had this port around the time of a packet (ports get reused: a
+    port one of TailCat's sockets had a minute ago may be some other
+    program's by now)."""
+    return {(c, w) for t, c, w in times.get((proto, port), ()) if abs(t - ts) <= 1.5}
 
 
 # ------------------------------------------------------------------ capture
 
-def ip_packet(ip, label, out):
+def ip_packet(ip, label, out, ts=0.0):
     """IPv4/IPv6 packet -> capture.py's tuple, plus where it was seen."""
     if not ip:
         return
@@ -153,12 +162,12 @@ def ip_packet(ip, label, out):
     if proto == 6 and len(body) >= 20:
         sp, dp, seq = struct.unpack("!HHI", body[:8])
         off = (body[12] >> 4) * 4
-        out.append((label, ("tcp", src, sp, dst, dp, seq, bytes(body[off:]))))
+        out.append((label, ("tcp", src, sp, dst, dp, seq, bytes(body[off:])), ts))
     elif proto == 17 and len(body) >= 8:
         sp, dp = struct.unpack("!HH", body[:4])
-        out.append((label, ("udp", src, sp, dst, dp, 0, bytes(body[8:]))))
+        out.append((label, ("udp", src, sp, dst, dp, 0, bytes(body[8:])), ts))
     else:
-        out.append((label, (f"ip{proto}", src, 0, dst, 0, 0, bytes(body))))
+        out.append((label, (f"ip{proto}", src, 0, dst, 0, 0, bytes(body)), ts))
 
 
 def read_pcap(path, label, out):
@@ -167,17 +176,19 @@ def read_pcap(path, label, out):
         return
     e = "<" if struct.unpack("<I", data[:4])[0] in (0xA1B2C3D4, 0xA1B23C4D) else ">"
     link = struct.unpack(e + "I", data[20:24])[0]
+    nano = struct.unpack(e + "I", data[:4])[0] == 0xA1B23C4D
     i = 24
     while i + 16 <= len(data):
-        incl = struct.unpack(e + "I", data[i + 8:i + 12])[0]
+        sec, frac, incl = struct.unpack(e + "III", data[i:i + 12])
+        ts = sec + frac / (1e9 if nano else 1e6)
         f = data[i + 16:i + 16 + incl]
         i += 16 + incl
         if link in (0, 108):  # loopback: 4-byte address family
-            ip_packet(f[4:], label, out)
+            ip_packet(f[4:], label, out, ts)
         elif link == 1 and len(f) > 14 and f[12:14] in (b"\x08\x00", b"\x86\xdd"):
-            ip_packet(f[14:], label, out)
+            ip_packet(f[14:], label, out, ts)
         elif link in (12, 101):
-            ip_packet(f, label, out)
+            ip_packet(f, label, out, ts)
 
 
 class MacCapture:
@@ -245,31 +256,57 @@ class WinCapture:
                 f.write(struct.pack("<IHHiIII", 0xA1B2C3D4, 2, 4, 0, 0, 262144, 101))
                 for ts, p in pkts:
                     f.write(struct.pack("<IIII", int(ts), int((ts % 1) * 1e6), len(p), len(p)) + p)
-            for _, p in pkts:
-                ip_packet(p, "loopback" if a == "127.0.0.1" else f"network card ({a})", out)
+            for ts, p in pkts:
+                ip_packet(p, "loopback" if a == "127.0.0.1" else f"network card ({a})", out, ts)
         return out
 
 
 # -------------------------------------------------------------------- check
 
-def check(seen, owners, report, derp_port, label, outdir):
+def check(seen, own, report, derp_port, label, outdir):
+    owners, times = own
+    ours = {"tailcat", "kc-voip", "localrelay", "KittyConnect"}
+
+    def at(proto, port, ts):
+        return owner_at(times, proto, port, ts)
+
+    # Portside's own leg to its TailCat programs is plaintext on loopback by
+    # design. On Windows, a UDP socket kc-voip connects to 127.0.0.1 shows as
+    # bound to 0.0.0.0, which capture.py would take for TailCat's WireGuard
+    # socket: those ports are the local leg, not the tunnel.
+    leg = set()
+    for _, (proto, src, sp, dst, dp, seq, pay), ts in seen:
+        if proto == "udp" and loopback(src) and loopback(dst):
+            for a, b in ((sp, dp), (dp, sp)):
+                if any(c in ("tailcat", "kc-voip") for c, _ in at(proto, a, ts)) and any(c == "KittyConnect" for c, _ in at(proto, b, ts)):
+                    leg.add(a)
+    owners = {k: ({(c, False) for c, _ in v} if k[0] == "udp" and k[1] in leg else v) for k, v in owners.items()}
+    # Other programs' traffic off this PC (the runner's own) isn't ours to
+    # sort; it's still searched for markers below.
+    mine = []
+    for _, p, ts in seen:
+        proto, src, sp, dst, dp = p[:5]
+        if proto in ("tcp", "udp") and (loopback(src) and loopback(dst) or ({c for c, _ in at(proto, sp, ts) | at(proto, dp, ts)} & ours)):
+            mine.append(p)
     # 1. capture.py's own check, on everything: markers never in tunnel or
     #    relay traffic, tunnel UDP only WireGuard/disco/STUN, WireGuard
     #    random, and the markers *are* seen on loopback (the positive control).
     pk = os.path.join(outdir, "capture.pickle")
     import pickle
     with open(pk, "wb") as f:
-        pickle.dump({"packets": [p for _, p in seen if p[0] in ("tcp", "udp")], "owners": owners}, f)
+        pickle.dump({"packets": mine, "owners": owners}, f)
     rp = os.path.join(outdir, "report.json")
     ok = cap.check(pk, rp, str(derp_port), label)
 
     # What capture.py counted as tunnel UDP but couldn't name, and any marker
     # it found in tunnel traffic, spelled out (CI logs are all we may get).
     def tun(proto, port):
-        return proto == "udp" and any(c in cap.TUNNEL_PROGRAMS and w for c, w in owners.get((proto, port), ()))
+        return proto == "udp" and any(c in cap.TUNNEL_PROGRAMS and w for c, w in owners.get((proto, port), ())) and port not in leg
     shown = Counter()
-    for lab, (proto, src, sp, dst, dp, seq, pay) in seen:
+    for lab, (proto, src, sp, dst, dp, seq, pay), ts in seen:
         if proto != "udp" or not pay or not (tun(proto, sp) or tun(proto, dp)):
+            continue
+        if not ({c for c, _ in at(proto, sp, ts) | at(proto, dp, ts)} & {"tailcat", "kc-voip"}):
             continue
         kind = cap.udp_kind(pay)
         hit = [k for k, v in report["markers"].items() if v.encode() in pay]
@@ -278,7 +315,7 @@ def check(seen, owners, report, derp_port, label, outdir):
         key = (src, dst, sp if tun(proto, sp) else dp, hit[0] if hit else None, bytes(pay[:2]))
         shown[key] += 1
         if shown[key] == 1 and len(shown) <= 12:
-            print(f"DETAIL {lab}: {src}:{sp} -> {dst}:{dp} owners {sorted(owners.get(('udp', sp), ()))} / {sorted(owners.get(('udp', dp), ()))} "
+            print(f"DETAIL {lab}: {src}:{sp} -> {dst}:{dp} owners {sorted(at('udp', sp, ts))} / {sorted(at('udp', dp, ts))} "
                   f"len {len(pay)} kind {kind} markers {hit} head {pay[:24].hex()} {pay[:24]!r}")
     for key, n in list(shown.items())[:12]:
         print(f"DETAIL count {n}: {key[0]} -> {key[1]} tunnel port {key[2]} marker {key[3]} head {key[4].hex()}")
@@ -292,12 +329,12 @@ def check(seen, owners, report, derp_port, label, outdir):
     needles["any KCMARK"] = b"KCMARK"
 
     def owner(proto, port):
-        return {c for c, _ in owners.get((proto, port), ())}
+        return {c for c, _ in at(proto, port, ts)}
 
     fail = []
     offbox = Counter()
     where = Counter()
-    for lab, (proto, src, sp, dst, dp, seq, pay) in seen:
+    for lab, (proto, src, sp, dst, dp, seq, pay), ts in seen:
         where[lab] += 1
         both_lo = loopback(src) and loopback(dst)
         if not both_lo:
