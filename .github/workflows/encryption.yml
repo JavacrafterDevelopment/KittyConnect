@@ -100,7 +100,7 @@ jobs:
           echo "================ SUMMARY ($RUNNER_OS)"
           for mode in local-direct local-relay tailscale-direct tailscale-relay; do
             echo "---- $mode"
-            grep -E 'A TEST STEP FAILED|encryption (PASS|FAILED)|^result:|strict check|not between loopback|tunnel UDP packets by kind|relay frames:|WireGuard payload|packets seen|"native_share|"paths"|The test itself failed|panicked' "results/results-$mode.txt" | cut -c1-900
+            grep -E '^DETAIL|^  [A-Za-z:]+ +[0-9]+ packets.* [1-9][0-9]*$|A TEST STEP FAILED|encryption (PASS|FAILED)|^result:|strict check|not between loopback|tunnel UDP packets by kind|relay frames:|WireGuard payload|packets seen|"native_share|"paths"|The test itself failed|panicked' "results/results-$mode.txt" | cut -c1-900
           done
           exit $status
 

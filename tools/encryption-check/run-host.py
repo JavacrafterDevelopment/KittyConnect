@@ -263,6 +263,26 @@ def check(seen, owners, report, derp_port, label, outdir):
     rp = os.path.join(outdir, "report.json")
     ok = cap.check(pk, rp, str(derp_port), label)
 
+    # What capture.py counted as tunnel UDP but couldn't name, and any marker
+    # it found in tunnel traffic, spelled out (CI logs are all we may get).
+    def tun(proto, port):
+        return proto == "udp" and any(c in cap.TUNNEL_PROGRAMS and w for c, w in owners.get((proto, port), ()))
+    shown = Counter()
+    for lab, (proto, src, sp, dst, dp, seq, pay) in seen:
+        if proto != "udp" or not pay or not (tun(proto, sp) or tun(proto, dp)):
+            continue
+        kind = cap.udp_kind(pay)
+        hit = [k for k, v in report["markers"].items() if v.encode() in pay]
+        if kind != "OTHER" and not hit:
+            continue
+        key = (src, dst, sp if tun(proto, sp) else dp, hit and hit[0], pay[:2])
+        shown[key] += 1
+        if shown[key] == 1 and len(shown) <= 12:
+            print(f"DETAIL {lab}: {src}:{sp} -> {dst}:{dp} owners {sorted(owners.get(('udp', sp), ()))} / {sorted(owners.get(('udp', dp), ()))} "
+                  f"len {len(pay)} kind {kind} markers {hit} head {pay[:24].hex()} {pay[:24]!r}")
+    for key, n in list(shown.items())[:12]:
+        print(f"DETAIL count {n}: {key[0]} -> {key[1]} tunnel port {key[2]} marker {key[3]} head {key[4].hex()}")
+
     # 2. Stricter, as on two real PCs: a marker or code may only ever travel
     #    between loopback addresses (Portside and its own TailCat); and
     #    nothing Portside itself owns may talk to another address.
