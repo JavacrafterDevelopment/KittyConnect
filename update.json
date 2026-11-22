@@ -2,21 +2,21 @@
   "schema": 1,
   "channels": {
     "beta": {
-      "version": "0.13.0",
-      "published": "2026-11-17T18:06:11Z",
-      "notes": "**Full Changelog**: https://github.com/JavacrafterDevelopment/KittyConnect/compare/v0.12.4...v0.13.0",
-      "page": "https://github.com/JavacrafterDevelopment/KittyConnect/releases/tag/v0.13.0",
+      "version": "0.14.0",
+      "published": "2026-11-22T10:15:43Z",
+      "notes": "## What's Changed\n* macOS test fix, CI time limits, and smaller hub/main files by @JavacrafterDevelopment in https://github.com/JavacrafterDevelopment/KittyConnect/pull/2\n* Combine hub split, UI jitter fix and native screen share by @JavacrafterDevelopment in https://github.com/JavacrafterDevelopment/KittyConnect/pull/3\n\n\n**Full Changelog**: https://github.com/JavacrafterDevelopment/KittyConnect/compare/v0.13.0...v0.14.0",
+      "page": "https://github.com/JavacrafterDevelopment/KittyConnect/releases/tag/v0.14.0",
       "package": {
-        "url": "https://github.com/JavacrafterDevelopment/KittyConnect/releases/download/v0.13.0/KittyConnect-windows-x64.zip",
-        "size": 15942795,
-        "sha256": "3a07fd2b607f244b8a6e5cdf48f4de1750e153d203f58abd03b997460a102831"
+        "url": "https://github.com/JavacrafterDevelopment/KittyConnect/releases/download/v0.14.0/KittyConnect-windows-x64.zip",
+        "size": 15990117,
+        "sha256": "b8cb4781cad3238b34e832dd4de7903e58bf07c3607c95242cd969a256227a52"
       },
       "exe": "KittyConnect.exe",
       "files": [
         {
           "path": "KittyConnect.exe",
-          "size": 39331328,
-          "sha256": "5344f4592d917e3ba043edef6c240bb0b05a0edc6b7a2e4bf444517dd9c7b4ac"
+          "size": 39436800,
+          "sha256": "ebb06f75128936cc9fe253f7d51effaf0e10d2fa38b593d8c5e72de4dd3d9472"
         },
         {
           "path": "licenses/kc-voip/github.com_anmitsu_go-shlex/LICENSE",
@@ -386,21 +386,21 @@
       ]
     },
     "stable": {
-      "version": "0.13.0",
-      "published": "2026-11-17T18:06:11Z",
-      "notes": "**Full Changelog**: https://github.com/JavacrafterDevelopment/KittyConnect/compare/v0.12.4...v0.13.0",
-      "page": "https://github.com/JavacrafterDevelopment/KittyConnect/releases/tag/v0.13.0",
+      "version": "0.14.0",
+      "published": "2026-11-22T10:15:43Z",
+      "notes": "## What's Changed\n* macOS test fix, CI time limits, and smaller hub/main files by @JavacrafterDevelopment in https://github.com/JavacrafterDevelopment/KittyConnect/pull/2\n* Combine hub split, UI jitter fix and native screen share by @JavacrafterDevelopment in https://github.com/JavacrafterDevelopment/KittyConnect/pull/3\n\n\n**Full Changelog**: https://github.com/JavacrafterDevelopment/KittyConnect/compare/v0.13.0...v0.14.0",
+      "page": "https://github.com/JavacrafterDevelopment/KittyConnect/releases/tag/v0.14.0",
       "package": {
-        "url": "https://github.com/JavacrafterDevelopment/KittyConnect/releases/download/v0.13.0/KittyConnect-windows-x64.zip",
-        "size": 15942795,
-        "sha256": "3a07fd2b607f244b8a6e5cdf48f4de1750e153d203f58abd03b997460a102831"
+        "url": "https://github.com/JavacrafterDevelopment/KittyConnect/releases/download/v0.14.0/KittyConnect-windows-x64.zip",
+        "size": 15990117,
+        "sha256": "b8cb4781cad3238b34e832dd4de7903e58bf07c3607c95242cd969a256227a52"
       },
       "exe": "KittyConnect.exe",
       "files": [
         {
           "path": "KittyConnect.exe",
-          "size": 39331328,
-          "sha256": "5344f4592d917e3ba043edef6c240bb0b05a0edc6b7a2e4bf444517dd9c7b4ac"
+          "size": 39436800,
+          "sha256": "ebb06f75128936cc9fe253f7d51effaf0e10d2fa38b593d8c5e72de4dd3d9472"
         },
         {
           "path": "licenses/kc-voip/github.com_anmitsu_go-shlex/LICENSE",
