@@ -1475,12 +1475,16 @@ $('voip-chat').addEventListener('click', (e) => {
 
 /* -------------------------------------------------------- screen share */
 
-/* Like Discord: capture with the browser, encode with a hardware video encoder
-   where there is one (H.264, else VP8), at a bitrate that fits the size and
-   frame rate, with a key frame every two seconds so late joiners and dropped
-   frames recover quickly. Chunks go to the room through the TailCat tunnel. */
+/* Portside captures and encodes the share itself (Windows Graphics Capture and
+   Media Foundation; ScreenCaptureKit and VideoToolbox on a Mac): a screen or
+   one window, its sound, the GPU's H.264 encoder. The page only picks what to
+   share and shows the result. The frames go from the app straight onto the
+   room's UDP, inside the TailCat tunnel.
 
-const ss = { stream: null, encoder: null, reader: null, running: false, forceKey: false, bytes: 0, frames: 0, info: null, tick: 0, config: null, rate: 0, maxRate: 0 };
+   The older path is kept as "Use the basic picker" (Windows only): capture
+   with the web view, encode with WebCodecs, hand chunks to the app. */
+
+const ss = { stream: null, encoder: null, reader: null, running: false, forceKey: false, bytes: 0, frames: 0, info: null, tick: 0, config: null, rate: 0, maxRate: 0, native: null, fpsNow: 0 };
 
 function nativeRes() {
   const r = window.devicePixelRatio || 1;
@@ -1488,12 +1492,14 @@ function nativeRes() {
 }
 
 function fillResOptions() {
-  const n = nativeRes();
-  const opts = [`<option value="native">Your screen (${n.w}×${n.h})</option>`];
+  const n = srcSize();
+  const keep = $('ss-res').value;
+  const opts = [`<option value="native">Full size (${n.w}×${n.h})</option>`];
   for (const h of [1440, 1080, 720, 480]) {
     if (h < n.h) opts.push(`<option value="${h}">${h}p</option>`);
   }
   $('ss-res').innerHTML = opts.join('');
+  if ([...$('ss-res').options].some((o) => o.value === keep)) $('ss-res').value = keep;
   estimate();
 }
 
@@ -1524,7 +1530,7 @@ function bitrateFor(w, h, fps) {
 }
 
 function estimate() {
-  const n = nativeRes();
+  const n = srcSize();
   const { w, h } = outSize(n.w, n.h, $('ss-res').value || 'native');
   const fps = Number($('ss-fps').value);
   const mbps = (bitrateFor(w, h, fps) / 1e6).toFixed(1);
@@ -1588,6 +1594,7 @@ function shareError(text) {
 
 async function startShare() {
   shareError('');
+  hide($('ss-box'), true);
   if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia || !window.VideoEncoder || !window.MediaStreamTrackProcessor) {
     return shareError('Screen sharing needs a newer Microsoft Edge WebView2 runtime. Update Edge and try again.');
   }
@@ -1699,22 +1706,197 @@ function stopShare(error) {
   if (error) shareError(error);
 }
 
-/* Going live needs screen capture and a frame reader that Apple's web view
-   doesn't give apps; watching works. */
-if (MAC) {
-  $('ss-open').disabled = true;
-  $('ss-open').title = 'Sharing your screen from a Mac isn\'t available yet. You can still watch others.';
-  $('ss-row').insertAdjacentHTML('beforeend', '<span class="meta">Not available on Mac yet. You can watch others.</span>');
+/* ---- the native picker */
+
+const pick = { kind: 'screen', sources: [], audio: [], chosen: null, error: '' };
+
+function chosenSource() {
+  return pick.sources.find((x) => x.id === pick.chosen) || null;
 }
-$('ss-open').addEventListener('click', () => {
-  if (MAC) return;
+
+function srcSize() {
+  const c = chosenSource();
+  return c && c.w && c.h ? { w: c.w, h: c.h } : nativeRes();
+}
+
+function renderSources() {
+  for (const b of document.querySelectorAll('#ss-kind .seg-btn')) b.classList.toggle('on', b.dataset.kind === pick.kind);
+  const list = pick.sources.filter((x) => x.kind === pick.kind);
+  if (pick.error) {
+    setHtml($('ss-sources'), `<div class="empty">${esc(pick.error)}</div>`);
+  } else if (!list.length) {
+    setHtml($('ss-sources'), `<div class="empty">${pick.sources.length ? 'No windows to share.' : 'Looking for screens and windows…'}</div>`);
+  } else {
+    if (!list.some((x) => x.id === pick.chosen)) pick.chosen = list[0].id;
+    setHtml($('ss-sources'), list.map((x) => {
+      const what = x.kind === 'window' && x.app && x.app !== x.title ? `${esc(x.app)} · ` : '';
+      const note = x.minimized ? ' · minimized' : '';
+      return `<button class="ss-source${x.id === pick.chosen ? ' on' : ''}" data-src="${esc(x.id)}">
+        <span class="ss-name">${esc(x.title)}</span><span class="meta">${what}${x.w}×${x.h}${note}</span></button>`;
+    }).join(''));
+  }
+  // Sound: "this app" only for a window; nothing the computer can't do.
+  const can = new Set(pick.audio);
+  const audio = $('ss-audio');
+  for (const o of audio.options) {
+    o.disabled = o.value !== 'off' && (!can.has(o.value) || (o.value === 'app' && pick.kind !== 'window'));
+  }
+  if (audio.selectedOptions[0] && audio.selectedOptions[0].disabled) audio.value = can.has('system') ? 'system' : 'off';
+  audio.parentElement.title = can.size ? '' : 'Sharing sound needs Windows 10 2004+ or macOS 13+.';
+  $('ss-go').disabled = !chosenSource();
   fillResOptions();
+}
+
+function listSources() {
+  pick.error = '';
+  pick.sources = [];
+  renderSources();
+  post({ cmd: 'voip.sources' });
+}
+
+function onSources(msg) {
+  pick.sources = msg.sources || [];
+  pick.audio = msg.audio || [];
+  pick.error = msg.error || '';
+  // The basic picker, where the web view has one, if native capture can't run.
+  hide($('ss-web'), !(pick.error && !MAC && navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia));
+  renderSources();
+}
+
+$('ss-kind').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-kind]');
+  if (!b) return;
+  pick.kind = b.dataset.kind;
+  // Default sound: a window's own app; a screen, everything.
+  $('ss-audio').value = pick.kind === 'window' ? 'app' : 'system';
+  renderSources();
+});
+$('ss-sources').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-src]');
+  if (!b) return;
+  pick.chosen = b.dataset.src;
+  renderSources();
+});
+$('ss-refresh').addEventListener('click', () => listSources());
+
+function startNative() {
+  const c = chosenSource();
+  if (!c) return;
+  shareError('');
+  const n = srcSize();
+  const choice = $('ss-res').value || 'native';
+  const { w, h } = outSize(n.w, n.h, choice);
+  const fps = Number($('ss-fps').value);
+  const audio = $('ss-audio').value;
+  post({
+    cmd: 'voip.share',
+    source: c.id,
+    height: choice === 'native' ? null : Number(choice),
+    fps,
+    bitrate: bitrateFor(w, h, fps),
+    audio,
+    hint: preset().hint,
+    preview: $('ss-preview-on').checked,
+  });
+  hide($('ss-box'), true);
+}
+
+/* ---- our own preview, from the frames we send */
+
+const pv = { decoder: null, codec: null, waitKey: true };
+
+function closePreview() {
+  try { pv.decoder && pv.decoder.state !== 'closed' && pv.decoder.close(); } catch (_) { /* gone */ }
+  pv.decoder = null;
+  pv.codec = null;
+  hide($('ss-preview-canvas'), true);
+}
+
+function onPreview(msg) {
+  if (!window.VideoDecoder || !ss.native || !ss.native.codec) return;
+  if (!pv.decoder || pv.codec !== ss.native.codec) {
+    closePreview();
+    const canvas = $('ss-preview-canvas');
+    const ctx = canvas.getContext('2d');
+    pv.codec = ss.native.codec;
+    pv.waitKey = true;
+    pv.decoder = new VideoDecoder({
+      output: (frame) => {
+        if (canvas.width !== frame.displayWidth || canvas.height !== frame.displayHeight) {
+          canvas.width = frame.displayWidth;
+          canvas.height = frame.displayHeight;
+        }
+        ctx.drawImage(frame, 0, 0);
+        frame.close();
+      },
+      error: () => { pv.waitKey = true; },
+    });
+    pv.decoder.configure({ codec: pv.codec, optimizeForLatency: true });
+    hide($('ss-preview-canvas'), false);
+  }
+  if (pv.waitKey && !msg.key) return;
+  if (pv.decoder.decodeQueueSize > 4) { pv.waitKey = true; return; }
+  pv.waitKey = false;
+  try {
+    pv.decoder.decode(new EncodedVideoChunk({ type: msg.key ? 'key' : 'delta', timestamp: msg.ts, data: unb64(msg.data) }));
+  } catch (_) {
+    pv.waitKey = true;
+  }
+}
+
+$('ss-preview-on').addEventListener('change', (e) => {
+  if (ss.native) {
+    post({ cmd: 'voip.preview', on: e.target.checked });
+    if (!e.target.checked) closePreview();
+  }
+});
+
+/* ---- showing our native share */
+
+function renderNative(v) {
+  const live = v.sharingNative;
+  const info = live ? v.sharing : null;
+  ss.native = live ? { codec: info && info.codec, starting: v.shareStarting } : null;
+  if (!live) closePreview();
+  if (live) {
+    hide($('ss-box'), true);
+    hide($('ss-live'), false);
+    hide($('ss-preview'), true);
+    hide($('ss-preview-canvas'), !$('ss-preview-on').checked || !pv.decoder);
+    if (v.shareStarting || !info) {
+      $('ss-stats').textContent = 'Starting…';
+    } else {
+      const rate = ss.rate || info.bitrate;
+      const fps = ss.fpsNow || info.fps;
+      const fitted = rate < info.bitrate * 0.97 ? ' · lowered to fit a viewer\'s connection' : '';
+      const what = info.label ? `${info.label} · ` : '';
+      const paused = info.paused ? ' · window minimized' : '';
+      const sound = info.audio ? ' · with sound' : '';
+      $('ss-stats').textContent = `${what}${info.w}×${info.h} · ${fps} fps · ${(rate / 1e6).toFixed(1)} Mbit/s · ${info.hardware ? 'hardware' : 'software'} H.264${sound}${paused}${fitted}`;
+    }
+  } else if (!ss.running) {
+    hide($('ss-live'), true);
+    ss.rate = 0;
+    ss.fpsNow = 0;
+  }
+  if (v.shareError) shareError(v.shareError);
+  $('ss-notice').textContent = v.shareNotice || '';
+  show($('ss-notice'), v.shareNotice);
+}
+
+$('ss-open').addEventListener('click', () => {
+  shareError('');
   hide($('ss-box'), false);
   hide($('ss-row'), true);
+  listSources();
 });
 $('ss-cancel').addEventListener('click', () => { hide($('ss-box'), true); hide($('ss-row'), false); });
-$('ss-go').addEventListener('click', () => startShare());
-$('ss-stop').addEventListener('click', () => stopShare());
+$('ss-go').addEventListener('click', () => startNative());
+$('ss-web').addEventListener('click', () => startShare());
+$('ss-stop').addEventListener('click', () => {
+  if (ss.native) post({ cmd: 'voip.unshare' });
+  else stopShare();
+});
 
 /* Watching: decode with the browser's (hardware) decoder onto a canvas. */
 const view = { id: null, decoder: null, codec: null, waitKey: true, frames: 0, bytes: 0, tick: 0 };
@@ -1789,9 +1971,18 @@ function renderScreen(v) {
   const target = v.watching != null ? v.members.find((m) => m.id === v.watching && m.screen) : null;
   if (target && view.id !== target.id) openViewer(target);
   if (!target && view.id != null) closeViewer();
+  if (target) {
+    hide($('stage-vol-wrap'), !target.screen.audio);
+    hide($('stage-paused'), !target.screen.paused);
+    const what = target.screen.label ? ` · ${target.screen.label}` : '';
+    $('stage-title').textContent = `${target.name}'s screen${what}`;
+  }
+  if (document.activeElement !== $('stage-vol')) $('stage-vol').value = Math.round((v.shareVolume ?? 1) * 100);
+  renderNative(v);
   // If the room dropped our share (we left, it ended), stop capturing.
   if (ss.running && !v.sharing && v.st !== 'live') stopShare();
-  hide($('ss-row'), ss.running || !$('ss-box').classList.contains('hide'));
+  hide($('ss-row'), ss.running || v.sharingNative || !$('ss-box').classList.contains('hide'));
+  $('ss-open').disabled = v.st !== 'live';
 }
 
 document.getElementById('page-voip').addEventListener('click', (e) => {
@@ -1801,6 +1992,7 @@ document.getElementById('page-voip').addEventListener('click', (e) => {
   post({ cmd: 'voip.watch', id });
 });
 $('stage-stop').addEventListener('click', () => post({ cmd: 'voip.watch', id: null }));
+$('stage-vol').addEventListener('input', (e) => post({ cmd: 'voip.shareVolume', volume: Number(e.target.value) / 100 }));
 /* Full screen: the stream fills the window and the window goes borderless
    full screen. Double-click the picture or press the button; Esc or
    double-click again comes back. */
@@ -2228,8 +2420,19 @@ window.onHost = (msg) => {
     case 'keyframe':
       ss.forceKey = true;
       break;
+    case 'shareSources':
+      onSources(msg);
+      break;
+    case 'preview':
+      onPreview(msg);
+      break;
     case 'videoRate':
       // Watchers' connections decide the bitrate (see media.rs RateControl).
+      if (msg.native) {
+        ss.rate = msg.bitrate;
+        ss.fpsNow = msg.fps;
+        break;
+      }
       if (ss.encoder && ss.encoder.state === 'configured' && ss.config) {
         ss.config = { ...ss.config, bitrate: msg.bitrate };
         ss.rate = msg.bitrate;

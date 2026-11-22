@@ -24,6 +24,8 @@
 //! NACK       watcher → room  [0x31][sharer u16][frame u32][piece u16]...   (no pieces: all of it)
 //! REPORT     watcher → room  [0x32][sharer u16][loss ‰ u16][delay ms u16][shown u16][dropped u16]
 //!            room → sharer   [0x32][watcher u16][loss ‰ u16][delay ms u16][shown u16][dropped u16]
+//! SHARE AUDIO member → room  [0x40][seq u32][stereo opus]               (from 0.14: the shared sound)
+//!            room → watcher  [0x40][from u16][seq u32][stereo opus]
 //! ```
 //!
 //! The room only accepts datagrams from an address that registered with a
@@ -55,6 +57,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use super::audio::Mixer;
+use super::share_audio::ShareAudio;
 use super::VoipEvent;
 
 /// TailCat's largest UDP payload (`tailcat.MaxUDPPayload`): bigger isn't
@@ -71,6 +74,8 @@ pub const VOICE: u8 = 0x20;
 pub const VIDEO: u8 = 0x30;
 pub const NACK: u8 = 0x31;
 pub const REPORT: u8 = 0x32;
+/// The sound of a screen share, to its watchers only.
+pub const SHARE_AUDIO: u8 = 0x40;
 
 /// Header of a VIDEO datagram from a sharer: type, frame, piece, pieces, flags, ts.
 pub const VIDEO_HEAD: usize = 1 + 4 + 2 + 2 + 1 + 8;
@@ -98,6 +103,15 @@ pub fn register(id: u16, key: &str) -> Vec<u8> {
 pub fn voice(seq: u32, opus: &[u8]) -> Vec<u8> {
     let mut d = Vec::with_capacity(5 + opus.len());
     d.push(VOICE);
+    d.extend_from_slice(&seq.to_be_bytes());
+    d.extend_from_slice(opus);
+    d
+}
+
+/// One stereo Opus packet of a screen share's sound.
+pub fn share_audio(seq: u32, opus: &[u8]) -> Vec<u8> {
+    let mut d = Vec::with_capacity(5 + opus.len());
+    d.push(SHARE_AUDIO);
     d.extend_from_slice(&seq.to_be_bytes());
     d.extend_from_slice(opus);
     d
@@ -1028,6 +1042,7 @@ pub fn run_member(
     id: u16,
     key: String,
     mixer: Arc<Mixer>,
+    shared_sound: Arc<ShareAudio>,
     link: Arc<Link>,
     ask_key: impl Fn(u16) + Send + 'static,
     emit: impl Fn(VoipEvent) + Send + 'static,
@@ -1065,6 +1080,7 @@ pub fn run_member(
             let watching = link.watching();
             if asm.as_ref().map(Assembler::sharer) != watching {
                 asm = watching.map(|s| Assembler::new(s, now));
+                shared_sound.clear();
             }
 
             // An error is just quiet, or on Windows an ICMP "unreachable"
@@ -1075,6 +1091,10 @@ pub fn run_member(
                 match d.first() {
                     Some(&REGISTERED) => answered = Some(now),
                     Some(&VOICE) if d.len() > 7 => mixer.push_packet(u16_at(d, 1), u32_at(d, 3), &d[7..]),
+                    // Only the share being watched; the room sends no other.
+                    Some(&SHARE_AUDIO) if d.len() > 7 && watching == Some(u16_at(d, 1)) => {
+                        shared_sound.push(u16_at(d, 1), u32_at(d, 3), &d[7..])
+                    }
                     Some(&VIDEO) => {
                         if let Some(a) = asm.as_mut() {
                             for f in a.datagram(d, now) {

@@ -26,9 +26,11 @@ the app (Finder shows `KittyConnect.app` as Portside) and choose **Open** (on ma
 **Open Anyway** in System Settings → Privacy & Security). The Launcher does
 this for you. Everything works as on Windows, except:
 
-- **Going live** (sharing your screen) isn't available yet: Apple's web view
-  doesn't let apps capture the screen. You can still **watch** others
-  (macOS 13.3 or newer).
+- **Going live** (sharing your screen or a window) needs macOS 12.3 or newer,
+  and sharing its sound macOS 13 or newer. The first time, macOS asks for
+  **Screen Recording** permission (System Settings → Privacy & Security →
+  Screen Recording); quit and reopen Portside after turning it on. **Watching**
+  others needs macOS 13.3 or newer.
 - **Network permission** is a Windows Firewall fix and isn't shown. The Mac
   firewall is off unless you turned it on; if it is, macOS asks the first time
   Portside connects. macOS 15 may also ask to let Portside find
@@ -177,7 +179,20 @@ TailCat forwards **TCP** ports. Games that only use UDP won't work this way.
 - When the host ends the room, everyone sees it closed.
 - Everyone in a room needs Portside 0.6 or newer: voice and screen share
   moved to UDP in 0.6, so older versions are told to update.
-- **Share screen**: pick a resolution (it starts at your screen's own, e.g.
+- **Share screen**: pick a whole **screen** or one **window** (a game, a
+  browser...). A window keeps streaming when other windows cover it; when it's
+  minimized, Windows and macOS stop drawing it, so viewers keep the last
+  picture (labelled "minimized") until it's back. Portside's own window is left
+  out of a screen share. Pick the **sound** too: none, only that window's app,
+  or everything the computer plays except Portside (so nobody hears the room's
+  voices come back). Viewers get a volume slider for it, and hear it even when
+  they're not in voice. Portside captures and encodes all this itself with
+  what comes with the system: Windows Graphics Capture, a hardware H.264
+  encoder through Media Foundation (NVIDIA, AMD or Intel; Microsoft's software
+  one otherwise) and WASAPI process loopback (Windows 10 2004+ for sound); on a
+  Mac, ScreenCaptureKit and VideoToolbox. **Use the basic picker** (Windows)
+  falls back to the web view's own screen picker.
+  Then pick a resolution (it starts at the screen's or window's own, e.g.
   2560×1440, with 1440p/1080p/720p/480p below it) and a frame rate (15, 30 or
   60; 30 by default) and a quality: **Text and detail** (about three times
   the bitrate, tuned for sharp edges, for code and documents), **Balanced**,
@@ -362,11 +377,21 @@ runtime into a `WebView2\` folder beside the exe.
   - Each member registers their UDP socket with the room using a key from
     their welcome message, and keeps it registered every 5 seconds (which also
     keeps the tunnel's UDP flow open). The room ignores UDP from anywhere else.
+  - A share's sound is stereo 48 kHz Opus at 128 kbit/s, 20 ms a packet
+    (`SHARE AUDIO`, from 0.14), sent by the capture thread on the member's
+    room socket like everything else, and relayed by the room only to the
+    members watching that share (not to anyone deafened). Watchers play it on
+    its own output stream with its own volume.
+  - Adaptive bitrate: watchers' reports set the sharer's bitrate (the native
+    encoder follows at once), and when it has to fall below half of what the
+    quality asks for, the frame rate halves (a quarter below a quarter), so
+    each frame keeps enough bits to stay sharp.
   - Voice (48 kHz Opus, 64 kbit/s per speaker, sent only while you talk) is
     relayed by the room, not mixed; each member mixes what they hear. A short
     jitter buffer puts packets back in order, and a lost one is rebuilt from
     the next packet's FEC copy or concealed.
-  - Screen video (WebCodecs, in the page) is cut into pieces that fit
+  - Screen video (H.264 from the app's own encoder; WebCodecs in the page for
+    the basic picker) is cut into pieces that fit
     TailCat's 1232-byte UDP limit and paced out at about 2.5 times the
     bitrate, so a big key frame never goes in one burst, and voice is always
     sent ahead of video. It goes only to members watching that share. The room

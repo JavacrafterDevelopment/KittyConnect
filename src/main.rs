@@ -4,6 +4,9 @@
 #![recursion_limit = "256"]
 
 mod beacon;
+// Native screen share; only built for Windows and macOS.
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+mod capture;
 mod code;
 // The end-to-end encryption check (tools/encryption-check/run.sh).
 #[cfg(all(test, target_os = "linux"))]
@@ -1283,6 +1286,12 @@ impl App {
                 }
             }
             "voip.watch" => self.voip.watch(msg["id"].as_u64().map(|v| v as u16)),
+            // Native screen share: list what can be shared, start, stop.
+            "voip.sources" => self.voip.list_sources(&self.proxy),
+            "voip.share" => self.voip.share(msg, &self.proxy),
+            "voip.unshare" => self.voip.unshare(),
+            "voip.preview" => self.voip.set_preview(msg["on"].as_bool().unwrap_or(false)),
+            "voip.shareVolume" => self.voip.set_share_volume(msg["volume"].as_f64().unwrap_or(1.0) as f32),
             "voip.keyframe" => self.voip.request_keyframe(msg["id"].as_u64().unwrap_or(0) as u16),
             "voip.attach" => {
                 if let Some(files) = rfd::FileDialog::new().set_title("Send files in chat").set_parent(window).pick_files() {

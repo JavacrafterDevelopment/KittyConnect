@@ -8,11 +8,12 @@ pub mod audio;
 pub mod client;
 pub mod media;
 pub mod server;
+pub mod share_audio;
 pub mod wire;
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
@@ -34,9 +35,103 @@ pub enum VoipEvent {
     Media(&'static str),
     /// A watcher's report on our screen share.
     VideoReport { watcher: u16, report: media::Report },
+    /// What can be shared natively (or why nothing can).
+    Sources(Result<Vec<crate::capture::Source>, String>),
+    /// News from our native screen share (its frames go straight out).
+    Share(ShareNews),
+    /// One of our own frames, for the page's preview.
+    Preview { key: bool, ts: u64, data: Vec<u8> },
     Upload { tid: u32, name: String, sent: u64, size: u64, error: Option<String> },
     Fetching { aid: u32, got: u64, size: u64 },
     Fetched { aid: u32, result: Result<std::path::PathBuf, String>, preview: bool },
+}
+
+/// What a native share tells the app (its frames and sound don't come this way).
+pub enum ShareNews {
+    Started { w: u32, h: u32, fps: u32, codec: String, encoder: String, hardware: bool, audio: bool },
+    Paused(bool),
+    AudioFailed(String),
+    Ended(String),
+}
+
+/// Numbering and layering of our outgoing screen video. Shared by the page's
+/// encoder (on the main thread) and the native one (on its own thread).
+#[derive(Default)]
+struct VideoOut {
+    /// Numbers our screen share's frames; carries on across shares, so a
+    /// watcher never mistakes a new share for an old one.
+    frame_no: u32,
+    /// Which frame each of our frames builds on (frame-rate layers).
+    chain: media::LayerChain,
+    /// Our outgoing video fell behind; when we last asked for a key frame.
+    gap: Option<Instant>,
+}
+
+impl VideoOut {
+    /// One encoded frame, cut into datagrams and paced out to the room. When
+    /// the link is backed up the frame is dropped rather than queued (so the
+    /// stream stays live). Returns true when the encoder should make a key
+    /// frame: a base-layer frame couldn't go out, so what follows can't be
+    /// decoded until one does.
+    fn send(&mut self, m: &media::Sender, key: bool, layer: u8, ts: u64, data: &[u8]) -> bool {
+        if data.len() > media::MAX_PIECES * media::PIECE {
+            return key;
+        }
+        if let Some(asked) = self.gap {
+            if !key {
+                // Ask again if the key frame we asked for didn't make it either.
+                let again = asked.elapsed() > Duration::from_secs(1);
+                if again {
+                    self.gap = Some(Instant::now());
+                }
+                return again;
+            }
+        }
+        // A frame whose base never went out can't be decoded: a higher layer
+        // waits for its next base; the base layer needs a key frame.
+        let Some(back) = self.chain.back(self.frame_no, key, layer) else {
+            return layer == 0 && self.start_gap();
+        };
+        // A frame's number is only used once it's queued, so watchers never
+        // wait for one that was never sent.
+        if m.video(key, media::layered_pieces(self.frame_no, key, layer, back, ts, data)) {
+            self.chain.sent(self.frame_no, key, layer);
+            self.frame_no = self.frame_no.wrapping_add(1);
+            self.gap = None;
+            return false;
+        }
+        // The link is backed up. A higher layer just loses this frame (and
+        // what builds on it); the base layer needs a key frame.
+        self.chain.lost(layer);
+        layer == 0 && self.start_gap()
+    }
+
+    /// Starts waiting for a key frame. True the first time (ask the encoder).
+    fn start_gap(&mut self) -> bool {
+        let first = self.gap.is_none();
+        if first {
+            self.gap = Some(Instant::now());
+        }
+        first
+    }
+
+    /// A new share starts from a key frame; nothing builds on the old one.
+    fn new_share(&mut self) {
+        self.chain = media::LayerChain::default();
+        self.gap = None;
+    }
+}
+
+/// Our native screen share while it runs.
+struct NativeShare {
+    share: crate::capture::Share,
+    /// What the room was told (size, codec...), once the encoder started.
+    info: Option<Value>,
+    label: String,
+    audio: bool,
+    paused: bool,
+    max: u32,
+    preview: Arc<AtomicBool>,
 }
 
 const CHAT_KEEP: usize = 500;
@@ -110,13 +205,18 @@ pub struct Voip {
     /// A message from the host to you ("muted you for everyone").
     room_notice: String,
     sharing: Option<Value>,
-    /// Our outgoing video fell behind; when we last asked the page for a key frame.
-    video_gap: Option<Instant>,
-    /// Numbers our screen share's frames; carries on across shares, so a
-    /// watcher never mistakes a new share for an old one.
-    frame_no: u32,
-    /// Which frame each of our frames builds on (frame-rate layers).
-    chain: media::LayerChain,
+    /// Our outgoing screen video's numbering (both encoders).
+    out: Arc<Mutex<VideoOut>>,
+    /// The native share, while there is one.
+    native: Option<NativeShare>,
+    /// What the native picker last listed, to start one of them.
+    sources: Vec<crate::capture::Source>,
+    sources_error: String,
+    share_error: String,
+    share_notice: String,
+    /// The sound of the share we're watching.
+    player: Option<share_audio::Player>,
+    share_volume: f32,
     /// Our screen share's bitrate, following what watchers report.
     rate: Option<media::RateControl>,
     /// How voice and video are connected (see [`VoipEvent::Media`]).
@@ -163,9 +263,14 @@ impl Default for Voip {
             is_host: false,
             room_notice: String::new(),
             sharing: None,
-            video_gap: None,
-            frame_no: 0,
-            chain: media::LayerChain::default(),
+            out: Arc::default(),
+            native: None,
+            sources: Vec::new(),
+            sources_error: String::new(),
+            share_error: String::new(),
+            share_notice: String::new(),
+            player: None,
+            share_volume: 1.0,
             rate: None,
             media: "off",
             watching: None,
@@ -208,8 +313,11 @@ impl Voip {
         self.is_host = false;
         self.room_notice.clear();
         self.sharing = None;
-        self.video_gap = None;
-        self.chain = media::LayerChain::default();
+        self.native = None;
+        self.player = None;
+        self.share_error.clear();
+        self.share_notice.clear();
+        self.out.lock().unwrap().new_share();
         self.rate = None;
         self.media = "off";
         self.watching = None;
@@ -412,6 +520,7 @@ impl Voip {
         }
         if let Some(c) = &self.conn {
             c.mixer.set_deaf(deaf);
+            c.shared_sound.set_deaf(deaf);
             c.send(json!({ "t": "mute", "muted": self.muted, "deaf": deaf }));
         }
     }
@@ -423,16 +532,18 @@ impl Voip {
         let Some(c) = &self.conn else { return };
         match info {
             Some(i) => {
-                c.send(json!({ "t": "screen", "on": true, "w": i["w"], "h": i["h"], "fps": i["fps"], "codec": i["codec"] }));
+                c.send(json!({
+                    "t": "screen", "on": true, "w": i["w"], "h": i["h"], "fps": i["fps"], "codec": i["codec"],
+                    "audio": i["audio"], "paused": i["paused"], "label": i["label"],
+                }));
                 // The chosen quality's bitrate is the most it will ever use.
                 let max = i["bitrate"].as_u64().unwrap_or(4_500_000).clamp(300_000, 50_000_000) as u32;
                 if let Some(m) = &c.media {
                     m.set_rate(media::Sender::pace_for(max));
                 }
                 self.rate = Some(media::RateControl::new(max));
-                self.video_gap = None;
                 // A new share starts from a key frame; nothing builds on the old one.
-                self.chain = media::LayerChain::default();
+                self.out.lock().unwrap().new_share();
                 self.sharing = Some(i);
             }
             None => {
@@ -443,55 +554,175 @@ impl Voip {
         }
     }
 
-    /// One encoded frame from the page's encoder, cut into datagrams and paced
-    /// out to the room. When the link is backed up the frame is dropped rather
-    /// than queued (so the stream stays live), later frames are skipped until
-    /// a key frame, and true is returned: the page should make one now.
-    /// One encoded frame of our screen share. `layer` is its frame-rate layer
-    /// (0 without layers). Returns true when the encoder should make a key
-    /// frame: a base-layer frame couldn't go out, so what follows can't be
-    /// decoded until one does.
+    /// One encoded frame from the page's encoder. `layer` is its frame-rate
+    /// layer (0 without layers). Returns true when the encoder should make a
+    /// key frame (see [`VideoOut::send`]).
     pub fn video(&mut self, key: bool, layer: u8, ts: u64, data: &[u8]) -> bool {
-        if self.sharing.is_none() || data.len() > media::MAX_PIECES * media::PIECE {
+        if self.sharing.is_none() || self.native.is_some() {
             return false;
         }
         let Some(m) = self.conn.as_ref().and_then(|c| c.media.clone()) else { return false };
-        if let Some(asked) = self.video_gap {
-            if !key {
-                // Ask again if the key frame we asked for didn't make it either.
-                let again = asked.elapsed() > Duration::from_secs(1);
-                if again {
-                    self.video_gap = Some(Instant::now());
-                }
-                return again;
-            }
-        }
-        // A frame whose base never went out can't be decoded: a higher layer
-        // waits for its next base; the base layer needs a key frame.
-        let Some(back) = self.chain.back(self.frame_no, key, layer) else {
-            return layer == 0 && self.gap();
-        };
-        // A frame's number is only used once it's queued, so watchers never
-        // wait for one that was never sent.
-        if m.video(key, media::layered_pieces(self.frame_no, key, layer, back, ts, data)) {
-            self.chain.sent(self.frame_no, key, layer);
-            self.frame_no = self.frame_no.wrapping_add(1);
-            self.video_gap = None;
-            return false;
-        }
-        // The link is backed up. A higher layer just loses this frame (and
-        // what builds on it); the base layer needs a key frame.
-        self.chain.lost(layer);
-        layer == 0 && self.gap()
+        self.out.lock().unwrap().send(&m, key, layer, ts, data)
     }
 
-    /// Starts waiting for a key frame. True the first time (ask the encoder).
-    fn gap(&mut self) -> bool {
-        let first = self.video_gap.is_none();
-        if first {
-            self.video_gap = Some(Instant::now());
+    // ------------------------------------------------- native screen share
+
+    /// Lists what can be shared, off the main thread (macOS may ask for
+    /// permission first). The answer comes back as [`VoipEvent::Sources`].
+    pub fn list_sources(&self, proxy: &EventLoopProxy<UserEvent>) {
+        let (p, gen) = (proxy.clone(), self.gen);
+        std::thread::spawn(move || {
+            let r = crate::capture::sources();
+            let _ = p.send_event(UserEvent::Voip(gen, VoipEvent::Sources(r)));
+        });
+    }
+
+    /// Starts sharing natively, from the picker's choices.
+    pub fn share(&mut self, msg: &Value, proxy: &EventLoopProxy<UserEvent>) {
+        use crate::capture::{self, Audio, Hint, Out};
+        self.share_error.clear();
+        self.share_notice.clear();
+        if self.native.is_some() || self.sharing.is_some() || !self.is_live() {
+            return;
         }
-        first
+        let Some(m) = self.conn.as_ref().and_then(|c| c.media.clone()) else {
+            return self.share_error = "Screen share couldn't open its connection.".into();
+        };
+        let id = msg["source"].as_str().unwrap_or("");
+        let Some(source) = self.sources.iter().find(|s| s.id == id).cloned() else {
+            return self.share_error = "That screen or window isn't there any more. Pick again.".into();
+        };
+        let fps = msg["fps"].as_u64().unwrap_or(30).clamp(5, 120) as u32;
+        let max_h = msg["height"].as_u64().map(|h| h as u32);
+        let bitrate = msg["bitrate"].as_u64().unwrap_or(6_000_000).clamp(300_000, 50_000_000) as u32;
+        let audio = match msg["audio"].as_str() {
+            Some("app") if !source.screen => Audio::App,
+            Some("system") => Audio::System,
+            _ => Audio::Off,
+        };
+        let hint = match msg["hint"].as_str() {
+            Some("text") => Hint::Text,
+            Some("motion") => Hint::Motion,
+            _ => Hint::Detail,
+        };
+        let label = if source.screen { String::new() } else if source.app.is_empty() { source.title.clone() } else { source.app.clone() };
+        let preview = Arc::new(AtomicBool::new(msg["preview"] == true));
+        let opts = capture::Options { source, max_h, fps, bitrate, audio, hint };
+
+        // Frames and sound go straight from the capture thread onto the
+        // room's UDP socket (127.0.0.1, into the TailCat tunnel); only news
+        // comes through the app.
+        let (p, gen, out, pv) = (proxy.clone(), self.gen, self.out.clone(), preview.clone());
+        let control: Arc<Mutex<Option<Arc<capture::Control>>>> = Arc::default();
+        let ctl = control.clone();
+        let news = move |n: ShareNews| {
+            let _ = p.send_event(UserEvent::Voip(gen, VoipEvent::Share(n)));
+        };
+        let p2 = proxy.clone();
+        let sink: capture::Sink = Arc::new(move |o| match o {
+            Out::Video { key, ts, data } => {
+                let again = out.lock().unwrap().send(&m, key, 0, ts, &data);
+                if again {
+                    if let Some(c) = ctl.lock().unwrap().as_ref() {
+                        c.want_key();
+                    }
+                }
+                if pv.load(Ordering::Relaxed) {
+                    let _ = p2.send_event(UserEvent::Voip(gen, VoipEvent::Preview { key, ts, data }));
+                }
+            }
+            Out::Audio { seq, opus } => m.urgent(media::share_audio(seq, &opus)),
+            Out::Started { w, h, fps, codec, encoder, hardware, audio } => news(ShareNews::Started { w, h, fps, codec, encoder, hardware, audio }),
+            Out::Paused(on) => news(ShareNews::Paused(on)),
+            Out::AudioFailed(why) => news(ShareNews::AudioFailed(why)),
+            Out::Ended(why) => news(ShareNews::Ended(why)),
+        });
+        match capture::start(opts, sink) {
+            Ok(share) => {
+                *control.lock().unwrap() = Some(share.control.clone());
+                self.out.lock().unwrap().new_share();
+                self.native = Some(NativeShare { share, info: None, label, audio: false, paused: false, max: bitrate, preview });
+            }
+            Err(e) => self.share_error = e,
+        }
+    }
+
+    /// Stops our screen share, native or the page's.
+    pub fn unshare(&mut self) {
+        let was_native = self.native.take().is_some();
+        if was_native {
+            self.screen(None);
+        }
+    }
+
+    pub fn set_preview(&self, on: bool) {
+        if let Some(n) = &self.native {
+            n.preview.store(on, Ordering::Relaxed);
+            if on {
+                n.share.key_frame();
+            }
+        }
+    }
+
+    pub fn set_share_volume(&mut self, v: f32) {
+        self.share_volume = v.clamp(0.0, 2.0);
+        if let Some(c) = &self.conn {
+            c.shared_sound.set_gain(self.share_volume);
+        }
+    }
+
+    /// Tells the room what we're sharing now.
+    fn announce_native(&mut self) {
+        let Some(n) = &self.native else { return };
+        let Some(mut info) = n.info.clone() else { return };
+        info["audio"] = json!(n.audio);
+        info["paused"] = json!(n.paused);
+        info["label"] = json!(n.label);
+        if let Some(c) = &self.conn {
+            c.send(json!({
+                "t": "screen", "on": true, "w": info["w"], "h": info["h"], "fps": info["fps"], "codec": info["codec"],
+                "audio": info["audio"], "paused": info["paused"], "label": info["label"],
+            }));
+        }
+        self.sharing = Some(info);
+    }
+
+    fn on_share(&mut self, n: ShareNews) {
+        match n {
+            ShareNews::Started { w, h, fps, codec, encoder, hardware, audio } => {
+                let Some(ns) = self.native.as_mut() else { return };
+                let max = ns.max;
+                ns.audio = audio;
+                ns.info = Some(json!({
+                    "w": w, "h": h, "fps": fps, "codec": codec, "bitrate": max, "native": true,
+                    "encoder": encoder, "hardware": hardware,
+                }));
+                if let Some(m) = self.conn.as_ref().and_then(|c| c.media.as_ref()) {
+                    m.set_rate(media::Sender::pace_for(max));
+                }
+                self.rate = Some(media::RateControl::new(max));
+                self.announce_native();
+            }
+            ShareNews::Paused(on) => {
+                if let Some(ns) = self.native.as_mut() {
+                    ns.paused = on;
+                }
+                self.announce_native();
+            }
+            ShareNews::AudioFailed(why) => {
+                if let Some(ns) = self.native.as_mut() {
+                    ns.audio = false;
+                }
+                self.share_notice = format!("Sharing without sound: {why}");
+                self.announce_native();
+            }
+            ShareNews::Ended(why) => {
+                if self.native.is_some() {
+                    self.unshare();
+                    self.share_error = why;
+                }
+            }
+        }
     }
 
     pub fn watch(&mut self, id: Option<u16>) {
@@ -499,10 +730,39 @@ impl Voip {
         if let Some(c) = &self.conn {
             c.link.watch(id);
             c.send(json!({ "t": "watch", "id": id }));
+            c.shared_sound.clear();
+            c.shared_sound.set_gain(self.share_volume);
+            c.shared_sound.set_deaf(self.deaf);
+        }
+        self.follow_share_sound();
+    }
+
+    /// Plays the watched share's sound while it has some.
+    fn follow_share_sound(&mut self) {
+        let has_sound = self.watching.is_some_and(|w| self.members.iter().any(|m| m["id"] == w && m["screen"]["audio"] == true));
+        if !has_sound {
+            self.player = None;
+            return;
+        }
+        if self.player.is_some() {
+            return;
+        }
+        if let Some(c) = &self.conn {
+            match share_audio::Player::start(c.shared_sound.clone()) {
+                Ok(p) => self.player = Some(p),
+                Err(e) => self.share_notice = format!("Couldn't play the stream's sound: {e}"),
+            }
         }
     }
 
     pub fn request_keyframe(&self, id: u16) {
+        if id == self.me {
+            // Our own preview: a key frame to start from.
+            if let Some(n) = &self.native {
+                n.share.key_frame();
+            }
+            return;
+        }
         if let Some(c) = &self.conn {
             c.send(json!({ "t": "keyframe", "id": id }));
         }
@@ -639,6 +899,7 @@ impl Voip {
                                 }
                             }
                         }
+                        self.follow_share_sound();
                     }
                     "chat" => {
                         self.maybe_preview(&m);
@@ -648,7 +909,13 @@ impl Voip {
                         self.chat.push_back(m);
                     }
                     "notice" => self.room_notice = m["text"].as_str().unwrap_or("").to_string(),
-                    "keyframe" => return Some(json!({ "type": "keyframe" })),
+                    "keyframe" => {
+                        if let Some(n) = &self.native {
+                            n.share.key_frame();
+                            return Some(Value::Null);
+                        }
+                        return Some(json!({ "type": "keyframe" }));
+                    }
                     "attach.ok" | "attach.err" => {
                         let tid = m["tid"].as_u64().unwrap_or(0) as u32;
                         if let Some(u) = self.uploads.iter_mut().find(|u| u.tid == tid) {
@@ -688,6 +955,38 @@ impl Voip {
                     "data": base64::engine::general_purpose::STANDARD.encode(&data),
                 }))
             }
+            VoipEvent::Sources(r) => {
+                match r {
+                    Ok(list) => {
+                        self.sources = list;
+                        self.sources_error.clear();
+                    }
+                    Err(e) => {
+                        self.sources.clear();
+                        self.sources_error = e;
+                    }
+                }
+                Some(json!({
+                    "type": "shareSources",
+                    "sources": self.sources.iter().map(|s| s.json()).collect::<Vec<_>>(),
+                    "audio": crate::capture::audio_modes(),
+                    "error": self.sources_error,
+                }))
+            }
+            VoipEvent::Share(n) => {
+                self.on_share(n);
+                None
+            }
+            VoipEvent::Preview { key, ts, data } => {
+                if self.native.as_ref().is_none_or(|n| !n.preview.load(Ordering::Relaxed)) {
+                    return Some(Value::Null);
+                }
+                use base64::Engine as _;
+                Some(json!({
+                    "type": "preview", "key": key, "ts": ts,
+                    "data": base64::engine::general_purpose::STANDARD.encode(&data),
+                }))
+            }
             VoipEvent::Media(state) => {
                 self.media = state;
                 None
@@ -698,6 +997,11 @@ impl Voip {
                     Some(bitrate) => {
                         if let Some(m) = self.conn.as_ref().and_then(|c| c.media.as_ref()) {
                             m.set_rate(media::Sender::pace_for(bitrate));
+                        }
+                        if let Some(n) = &self.native {
+                            n.share.set_bitrate(bitrate);
+                            let fps = n.share.control.fps_now();
+                            return Some(json!({ "type": "videoRate", "bitrate": bitrate, "fps": fps, "native": true }));
                         }
                         Some(json!({ "type": "videoRate", "bitrate": bitrate }))
                     }
@@ -856,6 +1160,11 @@ impl Voip {
             "isHost": self.is_host,
             "roomNotice": self.room_notice,
             "sharing": self.sharing,
+            "sharingNative": self.native.is_some(),
+            "shareStarting": self.native.as_ref().is_some_and(|n| n.info.is_none()),
+            "shareError": self.share_error,
+            "shareNotice": self.share_notice,
+            "shareVolume": self.share_volume,
             "watching": self.watching,
             "uploads": self.uploads.iter().map(|u| json!({
                 "tid": u.tid, "name": u.name, "sent": u.sent, "size": u.size, "error": u.error,
