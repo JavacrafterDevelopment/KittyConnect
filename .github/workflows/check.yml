@@ -1,18 +1,28 @@
-# Builds and tests both versions on every push to a work branch (and on pull
-# requests), so a broken build shows up before a release tag. The macOS app is
-# kept as a download (KittyConnect-macos-test) for trying it out.
+# Builds and tests both versions on every push to main or a work branch (and
+# on pull requests), so a broken build shows up before a release tag. Both apps
+# are kept as downloads (KittyConnect-windows-test, KittyConnect-macos-test)
+# for trying them out.
 
 name: Check
 
 on:
   push:
-    branches: ['claude/**']
+    branches: [main, 'claude/**']
   pull_request:
   workflow_dispatch:
+
+# A newer push to the same branch replaces a run still going, so old runs
+# don't hold up the (scarce) macOS machines.
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   windows:
     runs-on: windows-latest
+    # A pull request from a claude/** branch is already checked by its push run.
+    if: github.event_name != 'pull_request' || !startsWith(github.head_ref, 'claude/')
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -38,8 +48,30 @@ jobs:
       - name: Test
         run: cargo test --locked --target x86_64-pc-windows-msvc
 
+      - name: Build
+        run: cargo build --release --locked --target x86_64-pc-windows-msvc
+
+      - name: Assemble the folder
+        shell: pwsh
+        run: |
+          $dir = 'dist/KittyConnect'
+          New-Item -ItemType Directory -Force "$dir/licenses" | Out-Null
+          Copy-Item target/x86_64-pc-windows-msvc/release/KittyConnect.exe $dir
+          Copy-Item 'Start KittyConnect.bat' $dir
+          Copy-Item LICENSE-MIT, LICENSE-APACHE "$dir/licenses/"
+          Copy-Item vendor/TAILCAT-LICENSE "$dir/licenses/TailCat-LICENSE.txt"
+          Copy-Item -Recurse vendor/kc-voip-licenses "$dir/licenses/kc-voip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: KittyConnect-windows-test
+          path: dist/KittyConnect
+
   macos:
     runs-on: macos-latest
+    # A pull request from a claude/** branch is already checked by its push run.
+    if: github.event_name != 'pull_request' || !startsWith(github.head_ref, 'claude/')
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
 

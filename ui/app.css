@@ -199,7 +199,9 @@ code {
 
 #body { position: relative; flex: 1 1 auto; min-height: 0; }
 
-.page { position: absolute; inset: 0; overflow-y: auto; display: none; }
+/* Always keep the scrollbar's lane, so the page doesn't shift sideways when
+   content grows past the window and the scrollbar appears. */
+.page { position: absolute; inset: 0; overflow-y: scroll; display: none; }
 .page.on { display: block; animation: page-in .22s ease backwards; }
 
 @keyframes page-in {
@@ -806,7 +808,10 @@ code {
 .linkpill.direct .dot { background: var(--blue); }
 .linkpill.relay { background: var(--warn-wash); color: var(--warn); border-color: #EFDFAE; }
 .linkpill.relay .dot { background: #C99A2E; }
-.linkpill .ago { color: var(--ink-ghost); font-size: 10.5px; }
+.linkpill .ago { color: var(--ink-ghost); font-size: 10.5px; display: inline-block; min-width: 13.5ch; }
+/* Fixed widths for the parts that change every check, so the pill and the
+   buttons next to it don't shuffle as the numbers do. */
+.linkpill .rtt { display: inline-block; min-width: 6ch; text-align: right; }
 
 /* --------------------------------------------------------------------- voip */
 
@@ -830,7 +835,8 @@ code {
 .chatcard { gap: 10px; padding-bottom: 14px; }
 .chatlist {
   height: 380px;
-  overflow-y: auto;
+  /* Keep the scrollbar's lane so messages don't rewrap when it appears. */
+  overflow-y: scroll;
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -927,6 +933,28 @@ select.input { padding: 7px 9px; }
 .live-tag, .tag-sm.live { background: #D93A2B; color: #fff; font-weight: 700; letter-spacing: .06em; }
 .live-tag { font-size: 10px; padding: 2px 7px; border-radius: 5px; }
 .livebox .btn { align-self: flex-start; }
+.livebox canvas { width: 100%; max-height: 150px; border-radius: 8px; background: #111; object-fit: contain; }
+
+/* The native picker: screens or windows, then sound. */
+.ss-pick { display: flex; flex-direction: column; gap: 10px; }
+.ss-pick-head { display: flex; align-items: center; gap: 8px; }
+.ss-pick-head .seg { margin-top: 0; }
+.ss-sources { display: flex; flex-direction: column; gap: 4px; max-height: 210px; overflow-y: auto; }
+.ss-source {
+  display: flex; align-items: center; gap: 10px; min-width: 0;
+  padding: 8px 10px; border: 1px solid var(--rule); border-radius: 9px;
+  background: var(--card); cursor: pointer; text-align: left; font: inherit; color: var(--ink);
+}
+.ss-source:hover { border-color: #C9D9F2; background: var(--blue-wash); }
+.ss-source.on { border-color: var(--blue); background: var(--blue-wash); }
+.ss-source .ss-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.ss-source .meta { flex: none; font-size: 11.5px; }
+.stage-vol { display: inline-flex; align-items: center; gap: 6px; color: var(--ink-soft); }
+.stage-vol input { width: 90px; accent-color: var(--blue); }
+.stage-paused {
+  position: absolute; left: 50%; top: 12px; transform: translateX(-50%);
+  background: rgba(20, 22, 28, .78); color: #E8ECF2; font-size: 12px; padding: 6px 12px; border-radius: 8px;
+}
 
 .stage { padding: 12px 16px 16px; gap: 10px; margin-bottom: 16px; }
 .stage-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }

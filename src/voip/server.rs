@@ -355,6 +355,21 @@ fn datagram(r: &mut Room, sock: &UdpSocket, src: SocketAddr, d: &[u8]) {
             }
         }
         media::VIDEO => relay_video(r, sock, me, d),
+        // A share's sound: to the members watching it who aren't deafened.
+        media::SHARE_AUDIO if d.len() > 5 => {
+            if r.members[me].screen.is_none() {
+                return;
+            }
+            let mut out = Vec::with_capacity(d.len() + 2);
+            out.push(media::SHARE_AUDIO);
+            out.extend_from_slice(&id.to_be_bytes());
+            out.extend_from_slice(&d[1..]);
+            for o in r.members.iter().filter(|o| o.watching == Some(id) && !o.deaf) {
+                if let Some(a) = o.udp {
+                    let _ = sock.send_to(&out, a);
+                }
+            }
+        }
         media::NACK if d.len() >= 7 => {
             let sharer = media::u16_at(d, 1);
             let frame = media::u32_at(d, 3);
@@ -687,7 +702,12 @@ fn serve_member(stream: TcpStream, room: &Arc<Mutex<Room>>, host_token: &str) {
                     let h = msg["h"].as_u64().unwrap_or(0).min(4320);
                     let fps = msg["fps"].as_u64().unwrap_or(30).clamp(1, 120);
                     let codec = clean(msg["codec"].as_str().unwrap_or(""), 40);
-                    r.members[me].screen = Some(json!({ "w": w, "h": h, "fps": fps, "codec": codec }));
+                    // From 0.14: whether it has sound, whether the shared
+                    // window is minimized, and what's being shared.
+                    let audio = msg["audio"] == true;
+                    let paused = msg["paused"] == true;
+                    let label = clean(msg["label"].as_str().unwrap_or(""), 60);
+                    r.members[me].screen = Some(json!({ "w": w, "h": h, "fps": fps, "codec": codec, "audio": audio, "paused": paused, "label": label }));
                     if !was {
                         let name = r.members[me].name.clone();
                         system(&mut r, format!("{name} started sharing their screen"));

@@ -24,6 +24,8 @@
 //! NACK       watcher → room  [0x31][sharer u16][frame u32][piece u16]...   (no pieces: all of it)
 //! REPORT     watcher → room  [0x32][sharer u16][loss ‰ u16][delay ms u16][shown u16][dropped u16]
 //!            room → sharer   [0x32][watcher u16][loss ‰ u16][delay ms u16][shown u16][dropped u16]
+//! SHARE AUDIO member → room  [0x40][seq u32][stereo opus]               (from 0.14: the shared sound)
+//!            room → watcher  [0x40][from u16][seq u32][stereo opus]
 //! ```
 //!
 //! The room only accepts datagrams from an address that registered with a
@@ -55,6 +57,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use super::audio::Mixer;
+use super::share_audio::ShareAudio;
 use super::VoipEvent;
 
 /// TailCat's largest UDP payload (`tailcat.MaxUDPPayload`): bigger isn't
@@ -71,6 +74,8 @@ pub const VOICE: u8 = 0x20;
 pub const VIDEO: u8 = 0x30;
 pub const NACK: u8 = 0x31;
 pub const REPORT: u8 = 0x32;
+/// The sound of a screen share, to its watchers only.
+pub const SHARE_AUDIO: u8 = 0x40;
 
 /// Header of a VIDEO datagram from a sharer: type, frame, piece, pieces, flags, ts.
 pub const VIDEO_HEAD: usize = 1 + 4 + 2 + 2 + 1 + 8;
@@ -98,6 +103,15 @@ pub fn register(id: u16, key: &str) -> Vec<u8> {
 pub fn voice(seq: u32, opus: &[u8]) -> Vec<u8> {
     let mut d = Vec::with_capacity(5 + opus.len());
     d.push(VOICE);
+    d.extend_from_slice(&seq.to_be_bytes());
+    d.extend_from_slice(opus);
+    d
+}
+
+/// One stereo Opus packet of a screen share's sound.
+pub fn share_audio(seq: u32, opus: &[u8]) -> Vec<u8> {
+    let mut d = Vec::with_capacity(5 + opus.len());
+    d.push(SHARE_AUDIO);
     d.extend_from_slice(&seq.to_be_bytes());
     d.extend_from_slice(opus);
     d
@@ -1028,6 +1042,7 @@ pub fn run_member(
     id: u16,
     key: String,
     mixer: Arc<Mixer>,
+    shared_sound: Arc<ShareAudio>,
     link: Arc<Link>,
     ask_key: impl Fn(u16) + Send + 'static,
     emit: impl Fn(VoipEvent) + Send + 'static,
@@ -1065,6 +1080,7 @@ pub fn run_member(
             let watching = link.watching();
             if asm.as_ref().map(Assembler::sharer) != watching {
                 asm = watching.map(|s| Assembler::new(s, now));
+                shared_sound.clear();
             }
 
             // An error is just quiet, or on Windows an ICMP "unreachable"
@@ -1075,6 +1091,10 @@ pub fn run_member(
                 match d.first() {
                     Some(&REGISTERED) => answered = Some(now),
                     Some(&VOICE) if d.len() > 7 => mixer.push_packet(u16_at(d, 1), u32_at(d, 3), &d[7..]),
+                    // Only the share being watched; the room sends no other.
+                    Some(&SHARE_AUDIO) if d.len() > 7 && watching == Some(u16_at(d, 1)) => {
+                        shared_sound.push(u16_at(d, 1), u32_at(d, 3), &d[7..])
+                    }
                     Some(&VIDEO) => {
                         if let Some(a) = asm.as_mut() {
                             for f in a.datagram(d, now) {
@@ -1452,24 +1472,35 @@ mod tests {
         s.set_rate(2_000_000); // 250 KB/s
         assert!(s.video(true, video_pieces(0, true, 0, &frame_bytes(120_000, 0))));
         std::thread::sleep(Duration::from_millis(20));
-        // Timed from when the voice is queued: a busy test machine can be
-        // slow to run the threads at all, which says nothing about the order.
+        // Only what goes after the voice is queued counts: a busy test
+        // machine can oversleep and let the pacer send many pieces first,
+        // which says nothing about the order.
+        let mut buf = [0u8; 2048];
+        rx.set_nonblocking(true).unwrap();
+        let mut sent_already = 0;
+        while rx.recv(&mut buf).is_ok() {
+            sent_already += 1;
+        }
+        rx.set_nonblocking(false).unwrap();
+        if sent_already >= 100 {
+            // The whole frame went before the voice was queued: nothing to check.
+            return;
+        }
         let t0 = Instant::now();
         s.urgent(voice(1, &[9; 160]));
         rx.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
-        let mut buf = [0u8; 2048];
-        let mut video_before = 0;
+        let mut video_after = 0;
         loop {
             let n = rx.recv(&mut buf).unwrap();
             if buf[0] == VOICE {
                 assert_eq!(n, 165);
                 break;
             }
-            video_before += 1;
+            video_after += 1;
         }
-        // The real check: voice went out after only a few of the frame's
-        // pieces, not behind all of them (100, paced over ~0.5 s).
-        assert!(video_before < 40, "{video_before} pieces went first; the frame is 100 and paced over ~0.5 s");
+        // The real check: voice goes next (the pacer looks for it after every
+        // piece), not behind the rest of the frame (100 pieces over ~0.5 s).
+        assert!(video_after < 10, "{video_after} pieces went ahead of the voice ({sent_already} had gone before it was queued)");
         let at = t0.elapsed();
         assert!(at < Duration::from_millis(400), "voice took {at:?}");
     }
