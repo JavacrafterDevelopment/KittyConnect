@@ -1,6 +1,7 @@
 # Builds and tests both versions on every push to a work branch (and on pull
-# requests), so a broken build shows up before a release tag. The macOS app is
-# kept as a download (KittyConnect-macos-test) for trying it out.
+# requests), so a broken build shows up before a release tag. Both apps are
+# kept as downloads (KittyConnect-windows-test, KittyConnect-macos-test) for
+# trying them out.
 
 name: Check
 
@@ -37,6 +38,25 @@ jobs:
 
       - name: Test
         run: cargo test --locked --target x86_64-pc-windows-msvc
+
+      - name: Build
+        run: cargo build --release --locked --target x86_64-pc-windows-msvc
+
+      - name: Assemble the folder
+        shell: pwsh
+        run: |
+          $dir = 'dist/KittyConnect'
+          New-Item -ItemType Directory -Force "$dir/licenses" | Out-Null
+          Copy-Item target/x86_64-pc-windows-msvc/release/KittyConnect.exe $dir
+          Copy-Item 'Start KittyConnect.bat' $dir
+          Copy-Item LICENSE-MIT, LICENSE-APACHE "$dir/licenses/"
+          Copy-Item vendor/TAILCAT-LICENSE "$dir/licenses/TailCat-LICENSE.txt"
+          Copy-Item -Recurse vendor/kc-voip-licenses "$dir/licenses/kc-voip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: KittyConnect-windows-test
+          path: dist/KittyConnect
 
   macos:
     runs-on: macos-latest
