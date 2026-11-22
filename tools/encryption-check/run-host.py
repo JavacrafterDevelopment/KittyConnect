@@ -275,7 +275,7 @@ def check(seen, owners, report, derp_port, label, outdir):
         hit = [k for k, v in report["markers"].items() if v.encode() in pay]
         if kind != "OTHER" and not hit:
             continue
-        key = (src, dst, sp if tun(proto, sp) else dp, hit and hit[0], pay[:2])
+        key = (src, dst, sp if tun(proto, sp) else dp, hit[0] if hit else None, bytes(pay[:2]))
         shown[key] += 1
         if shown[key] == 1 and len(shown) <= 12:
             print(f"DETAIL {lab}: {src}:{sp} -> {dst}:{dp} owners {sorted(owners.get(('udp', sp), ()))} / {sorted(owners.get(('udp', dp), ()))} "
