@@ -42,11 +42,26 @@ function nameHtml(name) {
 }
 
 /* Only touch the DOM when the content actually changed, so hover and scroll
-   positions survive the frequent progress snapshots. */
+   positions survive the frequent progress snapshots.
+   The "checked 12s ago" times move by a second between snapshots, so they
+   are left out of the comparison and patched in place instead; otherwise
+   every peer row was rebuilt several times a second, losing hover and the
+   odd click, and the row jumped as the text changed. */
 const lastHtml = new Map();
+const AGO_RE = / data-at="(-?\d+)">[^<]*</g;
 function setHtml(el, html) {
-  if (lastHtml.get(el) === html) return;
-  lastHtml.set(el, html);
+  const key = html.replace(AGO_RE, '><');
+  if (lastHtml.get(el) === key) {
+    const ats = [...html.matchAll(AGO_RE)].map((m) => m[1]);
+    el.querySelectorAll('[data-at]').forEach((n, i) => {
+      if (ats[i] == null || n.dataset.at === ats[i]) return;
+      n.dataset.at = ats[i];
+      const t = ago(Number(ats[i]));
+      if (n.textContent !== t) n.textContent = t;
+    });
+    return;
+  }
+  lastHtml.set(el, key);
   el.innerHTML = html;
 }
 
@@ -66,7 +81,7 @@ function ago(at) {
 function linkPill(link, who = 'your friend') {
   if (!link || link.path === 'unknown') return '';
   const direct = link.path === 'direct';
-  const rtt = link.rtt != null ? ` · ${link.rtt} ms` : '';
+  const rtt = link.rtt != null ? ` · <span class="rtt">${link.rtt} ms</span>` : '';
   const at = link.checkedAgo != null ? Math.round(Date.now() / 1000 - link.checkedAgo) : null;
   const how = direct
     ? `Direct peer-to-peer connection to ${who}${link.endpoint ? ` (${link.endpoint})` : ''}`
@@ -1315,7 +1330,6 @@ function renderVoip(v) {
 
   // Chat: stay pinned to the bottom unless the user has scrolled up to read.
   const list = $('voip-chat');
-  const atBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 30;
   setHtml(list, v.chat.length ? v.chat.map((m) => m.system
     ? `<div class="msg system"><span>${esc(m.text)}</span><span class="msg-time">${time(m.ts)}</span></div>`
     : `<div class="msg${m.from === v.me ? ' mine' : ''}">
@@ -1323,7 +1337,8 @@ function renderVoip(v) {
          ${m.text ? `<div class="msg-text">${esc(m.text)}</div>` : ''}
          ${m.file ? attachmentHtml(m.file, v) : ''}
        </div>`).join('') : '<div class="empty">No messages yet. Say hi.</div>');
-  if (atBottom) list.scrollTop = list.scrollHeight;
+  fillChatImages(list, v.gen);
+  if (chatPinned) list.scrollTop = list.scrollHeight;
   $('voip-text').disabled = v.st !== 'live';
   $('voip-attach').disabled = v.st !== 'live';
   setHtml($('voip-uploads'), v.uploads.map((u) => u.error
@@ -1435,10 +1450,44 @@ post({ cmd: 'voip.audio', settings: vs });
 
 /* -------------------------------------------------------- attachments */
 
+/* Image previews are kept as loaded <img> nodes and moved into each new
+   render of the chat. Rebuilding them from markup made every one reload
+   (the app serves them uncached), so the chat shrank and grew again on each
+   new message or download tick, and the list jumped. */
+const chatImages = new Map();
+let chatImagesGen = null;
+function fillChatImages(list, gen) {
+  if (gen !== chatImagesGen) { chatImages.clear(); chatImagesGen = gen; chatPinned = true; }
+  list.querySelectorAll('.att-img-slot').forEach((slot) => {
+    const src = slot.dataset.src;
+    let img = chatImages.get(src);
+    if (!img) {
+      img = new Image();
+      img.className = 'att-img';
+      img.alt = slot.dataset.alt;
+      img.draggable = false;
+      // Loading makes the list taller; stay at the bottom if we were there.
+      img.addEventListener('load', () => { if (chatPinned) list.scrollTop = list.scrollHeight; });
+      img.src = src;
+      chatImages.set(src, img);
+    }
+    slot.replaceWith(img);
+  });
+}
+
+/* Stay pinned to the bottom unless the user has scrolled up to read. Tracked
+   from scrolling rather than measured at render time, because an image that
+   finished loading in between would make it look like they had scrolled. */
+let chatPinned = true;
+$('voip-chat').addEventListener('scroll', () => {
+  const list = $('voip-chat');
+  chatPinned = list.scrollHeight - list.scrollTop - list.clientHeight < 30;
+});
+
 function attachmentHtml(f, v) {
   const d = v.downloads[String(f.aid)];
   const img = v.previews.includes(f.aid)
-    ? `<img class="att-img" src="/att/${v.gen}/${f.aid}" alt="${esc(f.name)}" draggable="false">`
+    ? `<span class="att-img-slot" data-src="/att/${v.gen}/${f.aid}" data-alt="${esc(f.name)}"></span>`
     : '';
   let action = `<button class="btn small" data-dl="${f.aid}">${ICON_DL} Download</button>`;
   let meta = size(f.size);
