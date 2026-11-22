@@ -199,7 +199,9 @@ code {
 
 #body { position: relative; flex: 1 1 auto; min-height: 0; }
 
-.page { position: absolute; inset: 0; overflow-y: auto; display: none; }
+/* Always keep the scrollbar's lane, so the page doesn't shift sideways when
+   content grows past the window and the scrollbar appears. */
+.page { position: absolute; inset: 0; overflow-y: scroll; display: none; }
 .page.on { display: block; animation: page-in .22s ease backwards; }
 
 @keyframes page-in {
@@ -806,7 +808,10 @@ code {
 .linkpill.direct .dot { background: var(--blue); }
 .linkpill.relay { background: var(--warn-wash); color: var(--warn); border-color: #EFDFAE; }
 .linkpill.relay .dot { background: #C99A2E; }
-.linkpill .ago { color: var(--ink-ghost); font-size: 10.5px; }
+.linkpill .ago { color: var(--ink-ghost); font-size: 10.5px; display: inline-block; min-width: 13.5ch; }
+/* Fixed widths for the parts that change every check, so the pill and the
+   buttons next to it don't shuffle as the numbers do. */
+.linkpill .rtt { display: inline-block; min-width: 6ch; text-align: right; }
 
 /* --------------------------------------------------------------------- voip */
 
@@ -830,7 +835,8 @@ code {
 .chatcard { gap: 10px; padding-bottom: 14px; }
 .chatlist {
   height: 380px;
-  overflow-y: auto;
+  /* Keep the scrollbar's lane so messages don't rewrap when it appears. */
+  overflow-y: scroll;
   display: flex;
   flex-direction: column;
   gap: 2px;
