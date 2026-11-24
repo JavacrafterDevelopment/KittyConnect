@@ -2,21 +2,21 @@
   "schema": 1,
   "channels": {
     "beta": {
-      "version": "0.15.0",
-      "published": "2026-11-24T02:47:33Z",
-      "notes": "## What's Changed\n* Portside 0.15.0: new voice room, game overlay, Settings tab, release on merge by @JavacrafterDevelopment in https://github.com/JavacrafterDevelopment/KittyConnect/pull/4\n\n\n**Full Changelog**: https://github.com/JavacrafterDevelopment/KittyConnect/compare/v0.14.0...v0.15.0",
-      "page": "https://github.com/JavacrafterDevelopment/KittyConnect/releases/tag/v0.15.0",
+      "version": "0.16.0",
+      "published": "2026-11-24T07:46:18Z",
+      "notes": "## What's Changed\n* Game API: let your own games use Portside, with P2P multiplayer over UDP/TCP (0.16.0) by @JavacrafterDevelopment in https://github.com/JavacrafterDevelopment/KittyConnect/pull/5\n\n\n**Full Changelog**: https://github.com/JavacrafterDevelopment/KittyConnect/compare/v0.15.0...v0.16.0",
+      "page": "https://github.com/JavacrafterDevelopment/KittyConnect/releases/tag/v0.16.0",
       "package": {
-        "url": "https://github.com/JavacrafterDevelopment/KittyConnect/releases/download/v0.15.0/KittyConnect-windows-x64.zip",
-        "size": 16061446,
-        "sha256": "7ed079f82939b8cf56ef6de43c82e809faf995d09359c555eb12362e311ac22f"
+        "url": "https://github.com/JavacrafterDevelopment/KittyConnect/releases/download/v0.16.0/KittyConnect-windows-x64.zip",
+        "size": 16113086,
+        "sha256": "e9facc235ee047feb4f0609c59a39aa2cc29e7563c977f70e3defdf578dcf2c9"
       },
       "exe": "KittyConnect.exe",
       "files": [
         {
           "path": "KittyConnect.exe",
-          "size": 39613952,
-          "sha256": "f929b966b28e7d3aa0231c010c523f415bf0463590a845c9c6cfa3d2dbddc6b7"
+          "size": 39739392,
+          "sha256": "3df0c1ab2b1adc7fd9bdb93ef0c11f3ec0e9ea1f86d23a9a1fda85e73f0330c7"
         },
         {
           "path": "licenses/kc-voip/github.com_anmitsu_go-shlex/LICENSE",
@@ -386,21 +386,21 @@
       ]
     },
     "stable": {
-      "version": "0.15.0",
-      "published": "2026-11-24T02:47:33Z",
-      "notes": "## What's Changed\n* Portside 0.15.0: new voice room, game overlay, Settings tab, release on merge by @JavacrafterDevelopment in https://github.com/JavacrafterDevelopment/KittyConnect/pull/4\n\n\n**Full Changelog**: https://github.com/JavacrafterDevelopment/KittyConnect/compare/v0.14.0...v0.15.0",
-      "page": "https://github.com/JavacrafterDevelopment/KittyConnect/releases/tag/v0.15.0",
+      "version": "0.16.0",
+      "published": "2026-11-24T07:46:18Z",
+      "notes": "## What's Changed\n* Game API: let your own games use Portside, with P2P multiplayer over UDP/TCP (0.16.0) by @JavacrafterDevelopment in https://github.com/JavacrafterDevelopment/KittyConnect/pull/5\n\n\n**Full Changelog**: https://github.com/JavacrafterDevelopment/KittyConnect/compare/v0.15.0...v0.16.0",
+      "page": "https://github.com/JavacrafterDevelopment/KittyConnect/releases/tag/v0.16.0",
       "package": {
-        "url": "https://github.com/JavacrafterDevelopment/KittyConnect/releases/download/v0.15.0/KittyConnect-windows-x64.zip",
-        "size": 16061446,
-        "sha256": "7ed079f82939b8cf56ef6de43c82e809faf995d09359c555eb12362e311ac22f"
+        "url": "https://github.com/JavacrafterDevelopment/KittyConnect/releases/download/v0.16.0/KittyConnect-windows-x64.zip",
+        "size": 16113086,
+        "sha256": "e9facc235ee047feb4f0609c59a39aa2cc29e7563c977f70e3defdf578dcf2c9"
       },
       "exe": "KittyConnect.exe",
       "files": [
         {
           "path": "KittyConnect.exe",
-          "size": 39613952,
-          "sha256": "f929b966b28e7d3aa0231c010c523f415bf0463590a845c9c6cfa3d2dbddc6b7"
+          "size": 39739392,
+          "sha256": "3df0c1ab2b1adc7fd9bdb93ef0c11f3ec0e9ea1f86d23a9a1fda85e73f0330c7"
         },
         {
           "path": "licenses/kc-voip/github.com_anmitsu_go-shlex/LICENSE",
