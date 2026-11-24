@@ -45,11 +45,31 @@ use windows::Win32::System::Variant::{VARIANT, VT_BOOL, VT_UI4};
 use windows::Win32::System::WinRT::Direct3D11::{CreateDirect3D11DeviceFromDXGIDevice, IDirect3DDxgiInterfaceAccess};
 use windows::Win32::System::WinRT::Graphics::Capture::IGraphicsCaptureItemInterop;
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetWindow, GetWindowLongPtrW, GetWindowPlacement, WINDOWPLACEMENT, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible,
-    SetWindowDisplayAffinity, GWL_EXSTYLE, GW_OWNER, MONITORINFOF_PRIMARY, WDA_EXCLUDEFROMCAPTURE, WDA_NONE, WS_EX_TOOLWINDOW,
+    DrawIconEx, EnumWindows, GetAncestor, GetClassLongPtrW, GetClassNameW, GetLastActivePopup, GetLayeredWindowAttributes, GetWindow,
+    GetWindowLongPtrW, GetWindowPlacement, GetWindowTextW, GetWindowThreadProcessId, IsHungAppWindow, IsIconic, IsWindow, IsWindowVisible,
+    SendMessageTimeoutW, SetWindowDisplayAffinity, DI_NORMAL, GA_ROOTOWNER, GCLP_HICON, GCLP_HICONSM, GWL_EXSTYLE, GW_OWNER, HICON,
+    ICON_BIG, ICON_SMALL2, LAYERED_WINDOW_ATTRIBUTES_FLAGS, LWA_ALPHA, MONITORINFOF_PRIMARY, PW_RENDERFULLCONTENT, SMTO_ABORTIFHUNG,
+    WDA_EXCLUDEFROMCAPTURE, WDA_NONE, WINDOWPLACEMENT, WM_GETICON, WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    WS_EX_TRANSPARENT,
 };
 
-use super::{fit, h264::ParamSets, out_size, Audio, AudioEncoder, Cadence, Control, Hint, Options, Out, Running, Sink, Source};
+use windows::Win32::Foundation::{HGLOBAL, WPARAM};
+use windows::Win32::Graphics::Gdi::{
+    CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GdiFlush, GetDC, ReleaseDC, SelectObject, SetBrushOrgEx, SetStretchBltMode,
+    StretchBlt, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, CAPTUREBLT, DIB_RGB_COLORS, HALFTONE, HBITMAP, HGDIOBJ, ROP_CODE, SRCCOPY,
+};
+use windows::Win32::Graphics::Imaging::{
+    IWICImagingFactory, CLSID_WICImagingFactory, GUID_ContainerFormatJpeg, GUID_ContainerFormatPng, GUID_WICPixelFormat24bppBGR,
+    GUID_WICPixelFormat32bppBGRA, WICBitmapEncoderNoCache,
+};
+use windows::Win32::Storage::Xps::{PrintWindow, PRINT_WINDOW_FLAGS, PW_CLIENTONLY};
+use windows::Win32::System::Com::StructuredStorage::CreateStreamOnHGlobal;
+use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER, STATFLAG_NONAME, STATSTG, STREAM_SEEK_SET};
+
+use super::{
+    bgra_to_bgr, fit, h264::ParamSets, out_size, thumb_size, unpremultiply, Audio, AudioEncoder, Cadence, Control, Hint, Options, Out, Running,
+    Sink, Source, Thumb, ICON_SIZE, THUMB_H, THUMB_W,
+};
 
 fn err(what: &str, e: windows::core::Error) -> String {
     format!("{what} ({:#010x}: {})", e.code().0 as u32, e.message().trim())
@@ -83,7 +103,8 @@ unsafe fn window_source(hwnd: HWND, me: u32) -> Option<Source> {
     if GetWindow(hwnd, GW_OWNER).is_ok_and(|o| !o.is_invalid()) {
         return None;
     }
-    if GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_TOOLWINDOW.0 != 0 {
+    let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
+    if ex & WS_EX_TOOLWINDOW.0 != 0 {
         return None;
     }
     // Hidden by the shell (other virtual desktops' UWP shells, suspended apps).
@@ -102,22 +123,78 @@ unsafe fn window_source(hwnd: HWND, me: u32) -> Option<Source> {
     if pid == me {
         return None; // Portside itself
     }
-    let app = process_name(pid);
-    if matches!(app.to_ascii_lowercase().as_str(), "textinputhost" | "applicationframehost" | "shellexperiencehost") && title == "Windows Input Experience" {
+    let n = GetClassNameW(hwnd, &mut buf);
+    let class = String::from_utf16_lossy(&buf[..n.max(0) as usize]);
+    if SHELL_CLASSES.contains(&class.as_str()) {
         return None;
     }
     let mut r = RECT::default();
     let _ = windows::Win32::UI::WindowsAndMessaging::GetClientRect(hwnd, &mut r);
-    Some(Source {
-        id: format!("window:{}", hwnd.0 as isize),
-        screen: false,
-        title,
-        app,
-        pid,
-        w: (r.right - r.left).max(0) as u32,
-        h: (r.bottom - r.top).max(0) as u32,
-        minimized: IsIconic(hwnd).as_bool(),
-    })
+    let (w, h) = ((r.right - r.left).max(0) as u32, (r.bottom - r.top).max(0) as u32);
+    let minimized = IsIconic(hwnd).as_bool();
+    // A minimized window's client area is 0×0: use its size when restored.
+    let (w, h) = if minimized { restored_size(hwnd).unwrap_or((w, h)) } else { (w, h) };
+    let app = process_name(pid);
+    let main = super::is_main_window(&super::WindowFacts { title: &title, app: &app, w, h, app_window: alt_tab(hwnd, ex), overlay: overlay(hwnd, ex) });
+    Some(Source { id: format!("window:{}", hwnd.0 as isize), screen: false, title, app, pid, w, h, minimized, main })
+}
+
+/// The shell's own top-level windows: the desktop, the taskbar, Start, the
+/// task switcher.
+const SHELL_CLASSES: &[&str] = &[
+    "Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd", "Windows.UI.Core.CoreWindow",
+    "ApplicationManager_ImmersiveShellWindow", "EdgeUiInputTopWndClass", "NotifyIconOverflowWindow",
+    "TopLevelWindowForOverflowXamlIsland", "XamlExplorerHostIslandWindow", "ForegroundStaging",
+    "MultitaskingViewFrame", "TaskListThumbnailWnd", "Xaml_WindowedPopupClass", "IME", "MSCTFIME UI",
+];
+
+/// Would Alt+Tab show it? The shell's rule: the last active popup of its root
+/// owner is the window itself, and it isn't a never-activate window unless it
+/// asks to be on the taskbar.
+unsafe fn alt_tab(hwnd: HWND, ex: u32) -> bool {
+    if ex & WS_EX_APPWINDOW.0 != 0 {
+        return true;
+    }
+    if ex & WS_EX_NOACTIVATE.0 != 0 {
+        return false;
+    }
+    let mut next = GetAncestor(hwnd, GA_ROOTOWNER);
+    if next.is_invalid() {
+        next = hwnd;
+    }
+    let mut walk = HWND::default();
+    for _ in 0..64 {
+        if next == walk {
+            break;
+        }
+        walk = next;
+        next = GetLastActivePopup(walk);
+        if IsWindowVisible(next).as_bool() {
+            break;
+        }
+    }
+    walk == hwnd
+}
+
+/// Click-through or fully see-through: overlays (game, GPU, recording).
+unsafe fn overlay(hwnd: HWND, ex: u32) -> bool {
+    if ex & WS_EX_TRANSPARENT.0 != 0 && ex & WS_EX_LAYERED.0 != 0 {
+        return true;
+    }
+    if ex & WS_EX_LAYERED.0 != 0 {
+        let (mut alpha, mut flags) = (255u8, LAYERED_WINDOW_ATTRIBUTES_FLAGS(0));
+        if GetLayeredWindowAttributes(hwnd, None, Some(&mut alpha), Some(&mut flags)).is_ok() && flags.0 & LWA_ALPHA.0 != 0 && alpha == 0 {
+            return true;
+        }
+    }
+    false
+}
+
+unsafe fn restored_size(hwnd: HWND) -> Option<(u32, u32)> {
+    let mut p = WINDOWPLACEMENT { length: std::mem::size_of::<WINDOWPLACEMENT>() as u32, ..Default::default() };
+    GetWindowPlacement(hwnd, &mut p).ok()?;
+    let r = p.rcNormalPosition;
+    Some(((r.right - r.left).max(0) as u32, (r.bottom - r.top).max(0) as u32))
 }
 
 fn process_name(pid: u32) -> String {
@@ -162,7 +239,7 @@ pub fn sources() -> Result<Vec<Source>, String> {
                 (true, true) => format!("Screen {} (main)", i + 1),
                 (true, false) => format!("Screen {}", i + 1),
             };
-            out.push(Source { id: format!("screen:{}", m.0 as isize), screen: true, title, app: String::new(), pid: 0, w, h, minimized: false });
+            out.push(Source { id: format!("screen:{}", m.0 as isize), screen: true, title, app: String::new(), pid: 0, w, h, minimized: false, main: true });
         }
         let mut f = Found { me: GetCurrentProcessId(), windows: Vec::new() };
         let _ = EnumWindows(Some(each_window), LPARAM(&mut f as *mut _ as isize));
@@ -177,7 +254,228 @@ enum Target {
 }
 
 fn target(s: &Source) -> Result<Target, String> {
-    let (kind, n) = s.id.split_once(':').ok_or("bad source")?;
+    target_of(&s.id)
+}
+
+// ----------------------------------------------------------------- previews
+
+/// The picker's previews: GDI's halftone shrink of the screen, or of what the
+/// window draws for `PrintWindow` (so a covered window still shows itself),
+/// made into JPEG by the Windows Imaging Component. The app's icon is the one
+/// its window shows in the title bar.
+pub fn thumbnails(ids: &[String], icons: bool, each: &mut dyn FnMut(&str, Thumb)) {
+    unsafe {
+        let com = CoInitializeEx(None, COINIT_MULTITHREADED).is_ok();
+        let wic: Option<IWICImagingFactory> = CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER).ok();
+        if let Some(wic) = wic {
+            for id in ids {
+                let Ok(t) = target_of(id) else { continue };
+                let mut th = Thumb::default();
+                match t {
+                    Target::Screen(m) => th.image = screen_pixels(m).and_then(|p| p.jpeg(&wic)),
+                    Target::Window(h) => {
+                        if !IsWindow(Some(h)).as_bool() {
+                            continue;
+                        }
+                        // A hung app would hold the rest up; a minimized one draws nothing.
+                        if !IsHungAppWindow(h).as_bool() {
+                            if !IsIconic(h).as_bool() {
+                                th.image = window_pixels(h).and_then(|p| p.jpeg(&wic));
+                            }
+                            if icons {
+                                th.icon = window_icon(h).and_then(|p| p.png(&wic));
+                            }
+                        }
+                    }
+                }
+                each(id, th);
+            }
+        }
+        if com {
+            CoUninitialize();
+        }
+    }
+}
+
+/// Top-down BGRA.
+struct Pixels {
+    px: Vec<u8>,
+    w: u32,
+    h: u32,
+}
+
+impl Pixels {
+    unsafe fn jpeg(&self, wic: &IWICImagingFactory) -> Option<Vec<u8>> {
+        let bgr = bgra_to_bgr(&self.px, self.w as usize, self.h as usize, self.w as usize * 4);
+        encode(wic, &GUID_ContainerFormatJpeg, &GUID_WICPixelFormat24bppBGR, self.w, self.h, self.w * 3, &bgr)
+    }
+    unsafe fn png(&self, wic: &IWICImagingFactory) -> Option<Vec<u8>> {
+        encode(wic, &GUID_ContainerFormatPng, &GUID_WICPixelFormat32bppBGRA, self.w, self.h, self.w * 4, &self.px)
+    }
+}
+
+/// A 32-bit top-down DIB selected into a fresh memory DC; cleans up on drop.
+struct Dib {
+    dc: HDC,
+    bmp: HBITMAP,
+    old: HGDIOBJ,
+    bits: *mut u8,
+    w: u32,
+    h: u32,
+}
+
+impl Dib {
+    unsafe fn new(w: u32, h: u32) -> Option<Dib> {
+        let info = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: w as i32,
+                biHeight: -(h as i32),
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut bits: *mut std::ffi::c_void = std::ptr::null_mut();
+        let bmp = CreateDIBSection(None, &info, DIB_RGB_COLORS, &mut bits, None, 0).ok()?;
+        if bits.is_null() {
+            let _ = DeleteObject(bmp.into());
+            return None;
+        }
+        let dc = CreateCompatibleDC(None);
+        let old = SelectObject(dc, bmp.into());
+        Some(Dib { dc, bmp, old, bits: bits as *mut u8, w, h })
+    }
+
+    /// Halftone (smooth) shrink of part of `src` into the whole DIB.
+    unsafe fn shrink_from(&self, src: HDC, x: i32, y: i32, w: i32, h: i32, rop: ROP_CODE) -> bool {
+        SetStretchBltMode(self.dc, HALFTONE);
+        let _ = SetBrushOrgEx(self.dc, 0, 0, None);
+        StretchBlt(self.dc, 0, 0, self.w as i32, self.h as i32, Some(src), x, y, w, h, rop).as_bool()
+    }
+
+    unsafe fn pixels(&self) -> Pixels {
+        let _ = GdiFlush();
+        let n = (self.w * self.h * 4) as usize;
+        let mut px = std::slice::from_raw_parts(self.bits, n).to_vec();
+        // GDI leaves alpha at 0; JPEG ignores it, but keep it opaque.
+        for p in px.chunks_exact_mut(4) {
+            p[3] = 255;
+        }
+        Pixels { px, w: self.w, h: self.h }
+    }
+}
+
+impl Drop for Dib {
+    fn drop(&mut self) {
+        unsafe {
+            SelectObject(self.dc, self.old);
+            let _ = DeleteObject(self.bmp.into());
+            let _ = DeleteDC(self.dc);
+        }
+    }
+}
+
+unsafe fn screen_pixels(m: HMONITOR) -> Option<Pixels> {
+    let mut info = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+    if !GetMonitorInfoW(m, &mut info).as_bool() {
+        return None;
+    }
+    let r = info.rcMonitor;
+    let (w, h) = (r.right - r.left, r.bottom - r.top);
+    if w <= 0 || h <= 0 {
+        return None;
+    }
+    let (tw, th) = thumb_size(w as u32, h as u32, THUMB_W, THUMB_H);
+    let dib = Dib::new(tw, th)?;
+    let screen = GetDC(None);
+    // CAPTUREBLT: include layered windows (most of today's apps).
+    let ok = dib.shrink_from(screen, r.left, r.top, w, h, ROP_CODE(SRCCOPY.0 | CAPTUREBLT.0));
+    ReleaseDC(None, screen);
+    ok.then(|| dib.pixels())
+}
+
+unsafe fn window_pixels(hwnd: HWND) -> Option<Pixels> {
+    let mut r = RECT::default();
+    windows::Win32::UI::WindowsAndMessaging::GetClientRect(hwnd, &mut r).ok()?;
+    let (w, h) = (r.right - r.left, r.bottom - r.top);
+    if w <= 0 || h <= 0 {
+        return None;
+    }
+    // The window draws itself at full size first (into memory, so covered or
+    // off-screen parts come out too), then that's shrunk.
+    let full = Dib::new(w as u32, h as u32)?;
+    if !PrintWindow(hwnd, full.dc, PRINT_WINDOW_FLAGS(PW_CLIENTONLY.0 | PW_RENDERFULLCONTENT)).as_bool() {
+        return None;
+    }
+    let (tw, th) = thumb_size(w as u32, h as u32, THUMB_W, THUMB_H);
+    let small = Dib::new(tw, th)?;
+    small.shrink_from(full.dc, 0, 0, w, h, SRCCOPY).then(|| small.pixels())
+}
+
+unsafe fn window_icon(hwnd: HWND) -> Option<Pixels> {
+    let mut r = 0usize;
+    for kind in [ICON_BIG, ICON_SMALL2] {
+        SendMessageTimeoutW(hwnd, WM_GETICON, WPARAM(kind as usize), LPARAM(0), SMTO_ABORTIFHUNG, 100, Some(&mut r));
+        if r != 0 {
+            break;
+        }
+    }
+    if r == 0 {
+        r = GetClassLongPtrW(hwnd, GCLP_HICON);
+    }
+    if r == 0 {
+        r = GetClassLongPtrW(hwnd, GCLP_HICONSM);
+    }
+    if r == 0 {
+        return None;
+    }
+    let dib = Dib::new(ICON_SIZE, ICON_SIZE)?;
+    DrawIconEx(dib.dc, 0, 0, HICON(r as *mut _), ICON_SIZE as i32, ICON_SIZE as i32, 0, None, DI_NORMAL).ok()?;
+    let _ = GdiFlush();
+    let n = (ICON_SIZE * ICON_SIZE * 4) as usize;
+    let mut px = std::slice::from_raw_parts(dib.bits, n).to_vec();
+    if !unpremultiply(&mut px) {
+        // An old icon without alpha: its mask already blanked the outside.
+        for p in px.chunks_exact_mut(4) {
+            p[3] = if p[..3] == [0, 0, 0] { 0 } else { 255 };
+        }
+    }
+    Some(Pixels { px, w: ICON_SIZE, h: ICON_SIZE })
+}
+
+/// Pixels to a JPEG or PNG file in memory, with Windows' own encoders.
+unsafe fn encode(wic: &IWICImagingFactory, container: &GUID, format: &GUID, w: u32, h: u32, stride: u32, data: &[u8]) -> Option<Vec<u8>> {
+    let stream = CreateStreamOnHGlobal(HGLOBAL::default(), true).ok()?;
+    let enc = wic.CreateEncoder(container, std::ptr::null()).ok()?;
+    enc.Initialize(&stream, WICBitmapEncoderNoCache).ok()?;
+    let (mut frame, mut props) = (None, None);
+    enc.CreateNewFrame(&mut frame, &mut props).ok()?;
+    let frame = frame?;
+    frame.Initialize(props.as_ref()).ok()?;
+    frame.SetSize(w, h).ok()?;
+    let mut f = *format;
+    frame.SetPixelFormat(&mut f).ok()?;
+    if f != *format {
+        return None;
+    }
+    frame.WritePixels(h, stride, data).ok()?;
+    frame.Commit().ok()?;
+    enc.Commit().ok()?;
+    let mut st = STATSTG::default();
+    stream.Stat(&mut st, STATFLAG_NONAME).ok()?;
+    let mut out = vec![0u8; st.cbSize as usize];
+    stream.Seek(0, STREAM_SEEK_SET, None).ok()?;
+    let mut got = 0u32;
+    stream.Read(out.as_mut_ptr() as *mut _, out.len() as u32, Some(&mut got)).ok().ok()?;
+    out.truncate(got as usize);
+    Some(out)
+}
+
+fn target_of(id: &str) -> Result<Target, String> {
+    let (kind, n) = id.split_once(':').ok_or("bad source")?;
     let n: isize = n.parse().map_err(|_| "bad source")?;
     Ok(match kind {
         "screen" => Target::Screen(HMONITOR(n as *mut _)),

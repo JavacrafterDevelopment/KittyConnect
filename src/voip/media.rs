@@ -1006,22 +1006,22 @@ impl RateControl {
 /// What the room connection and the media thread share.
 #[derive(Default)]
 pub struct Link {
-    /// The sharer this member is watching.
-    watching: Mutex<Option<u16>>,
+    /// The sharers this member is watching.
+    watching: Mutex<Vec<u16>>,
     stopped: AtomicBool,
 }
 
 impl Link {
-    pub fn watch(&self, id: Option<u16>) {
-        *self.watching.lock().unwrap() = id;
+    pub fn watch(&self, ids: &[u16]) {
+        *self.watching.lock().unwrap() = ids.to_vec();
     }
 
     pub fn stop(&self) {
         self.stopped.store(true, Ordering::Relaxed);
     }
 
-    fn watching(&self) -> Option<u16> {
-        *self.watching.lock().unwrap()
+    fn watching(&self) -> Vec<u16> {
+        self.watching.lock().unwrap().clone()
     }
 }
 
@@ -1035,8 +1035,8 @@ const LINK_LOST: Duration = Duration::from_secs(15);
 const LINK_FAILED: Duration = Duration::from_secs(20);
 
 /// A member's UDP to and from the room, after the welcome: registers and keeps
-/// registering (the keepalive), feeds voice to the mixer, reassembles the share
-/// being watched, and reports on it. Ends when `link` is stopped.
+/// registering (the keepalive), feeds voice to the mixer, reassembles each share
+/// being watched, and reports on them. Ends when `link` is stopped.
 pub fn run_member(
     sock: UdpSocket,
     id: u16,
@@ -1054,7 +1054,7 @@ pub fn run_member(
         let mut answered: Option<Instant> = None;
         let mut state = "connecting";
         let mut registered_at: Option<Instant> = None;
-        let mut asm: Option<Assembler> = None;
+        let mut asms: Vec<Assembler> = Vec::new();
         let mut reported = Instant::now();
         let mut buf = vec![0u8; 65536];
         while !link.stopped.load(Ordering::Relaxed) {
@@ -1078,9 +1078,14 @@ pub fn run_member(
 
             // Follow what's being watched.
             let watching = link.watching();
-            if asm.as_ref().map(Assembler::sharer) != watching {
-                asm = watching.map(|s| Assembler::new(s, now));
-                shared_sound.clear();
+            for gone in asms.iter().map(Assembler::sharer).filter(|s| !watching.contains(s)).collect::<Vec<_>>() {
+                shared_sound.clear(gone);
+            }
+            asms.retain(|a| watching.contains(&a.sharer()));
+            for w in &watching {
+                if !asms.iter().any(|a| a.sharer() == *w) {
+                    asms.push(Assembler::new(*w, now));
+                }
             }
 
             // An error is just quiet, or on Windows an ICMP "unreachable"
@@ -1091,14 +1096,15 @@ pub fn run_member(
                 match d.first() {
                     Some(&REGISTERED) => answered = Some(now),
                     Some(&VOICE) if d.len() > 7 => mixer.push_packet(u16_at(d, 1), u32_at(d, 3), &d[7..]),
-                    // Only the share being watched; the room sends no other.
-                    Some(&SHARE_AUDIO) if d.len() > 7 && watching == Some(u16_at(d, 1)) => {
+                    // Only the shares being watched; the room sends no other.
+                    Some(&SHARE_AUDIO) if d.len() > 7 && watching.contains(&u16_at(d, 1)) => {
                         shared_sound.push(u16_at(d, 1), u32_at(d, 3), &d[7..])
                     }
-                    Some(&VIDEO) => {
-                        if let Some(a) = asm.as_mut() {
+                    Some(&VIDEO) if d.len() > 3 => {
+                        let from = u16_at(d, 1);
+                        if let Some(a) = asms.iter_mut().find(|a| a.sharer() == from) {
                             for f in a.datagram(d, now) {
-                                emit(VoipEvent::Video { from: a.sharer(), key: f.key, ts: f.ts, data: f.data });
+                                emit(VoipEvent::Video { from, key: f.key, ts: f.ts, data: f.data });
                             }
                         }
                     }
@@ -1111,8 +1117,12 @@ pub fn run_member(
                 }
             }
 
-            if let Some(a) = asm.as_mut() {
-                let now = Instant::now();
+            let now = Instant::now();
+            let report = now.duration_since(reported) >= Duration::from_secs(1);
+            if report {
+                reported = now;
+            }
+            for a in asms.iter_mut() {
                 let t = a.tick(now);
                 for d in &t.nacks {
                     let _ = sock.send(d);
@@ -1123,8 +1133,7 @@ pub fn run_member(
                 if t.want_key {
                     ask_key(a.sharer());
                 }
-                if now.duration_since(reported) >= Duration::from_secs(1) {
-                    reported = now;
+                if report {
                     let _ = sock.send(&a.report());
                 }
             }

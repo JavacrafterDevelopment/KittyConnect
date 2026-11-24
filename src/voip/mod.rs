@@ -4,6 +4,7 @@
 //! host). Rooms run on `kc-voip`, the TailCat-library helper that carries UDP
 //! as well as TCP: chat and attachments use TCP, voice and screen video UDP.
 
+pub mod aec;
 pub mod audio;
 pub mod client;
 pub mod media;
@@ -41,6 +42,8 @@ pub enum VoipEvent {
     Share(ShareNews),
     /// One of our own frames, for the page's preview.
     Preview { key: bool, ts: u64, data: Vec<u8> },
+    /// A picture of a screen or window (and its app's icon), for the picker.
+    Thumb { id: String, thumb: crate::capture::Thumb },
     Upload { tid: u32, name: String, sent: u64, size: u64, error: Option<String> },
     Fetching { aid: u32, got: u64, size: u64 },
     Fetched { aid: u32, result: Result<std::path::PathBuf, String>, preview: bool },
@@ -135,6 +138,26 @@ struct NativeShare {
 }
 
 const CHAT_KEEP: usize = 500;
+/// How often a sharer sends the room a new preview of their share.
+const SHARE_THUMB_EVERY: Duration = Duration::from_secs(4);
+
+/// While a native share runs: its picture, small, to the room now and then.
+fn share_thumbs(id: &str, control: &crate::capture::Control, tx: &std::sync::mpsc::SyncSender<wire::Out>) {
+    use base64::Engine as _;
+    let ids = [id.to_string()];
+    while !control.stopped() {
+        crate::capture::thumbnails(&ids, false, &mut |_, t| {
+            if let Some(img) = t.image {
+                let img = base64::engine::general_purpose::STANDARD.encode(img);
+                let _ = tx.try_send(wire::Out::Frame(wire::json(&json!({ "t": "thumb", "img": img }))));
+            }
+        });
+        let until = Instant::now() + SHARE_THUMB_EVERY;
+        while Instant::now() < until && !control.stopped() {
+            std::thread::sleep(Duration::from_millis(200));
+        }
+    }
+}
 /// Images up to this size are fetched as soon as they're posted, to show inline.
 const PREVIEW_MAX: u64 = 8 * 1024 * 1024;
 
@@ -212,16 +235,25 @@ pub struct Voip {
     /// What the native picker last listed, to start one of them.
     sources: Vec<crate::capture::Source>,
     sources_error: String,
+    /// The picker's previews are being made (one batch at a time).
+    thumbs_busy: Arc<AtomicBool>,
     share_error: String,
     share_notice: String,
-    /// The sound of the share we're watching.
+    /// The sound of the shares we're watching.
     player: Option<share_audio::Player>,
-    share_volume: f32,
+    /// Each share's volume (1 when not set) and whether we muted it; ours only.
+    share_volume: HashMap<u16, f32>,
+    share_muted: std::collections::HashSet<u16>,
     /// Our screen share's bitrate, following what watchers report.
     rate: Option<media::RateControl>,
     /// How voice and video are connected (see [`VoipEvent::Media`]).
     media: &'static str,
-    watching: Option<u16>,
+    /// The shares we're watching (up to `server::MAX_WATCH`).
+    watching: Vec<u16>,
+    /// The voice channel we're in, or join next.
+    channel: u16,
+    /// The room's voice channels, as it last listed them.
+    channels: Vec<Value>,
     next_tid: u32,
     uploads: Vec<UploadState>,
     downloads: HashMap<u32, DownloadState>,
@@ -267,13 +299,17 @@ impl Default for Voip {
             native: None,
             sources: Vec::new(),
             sources_error: String::new(),
+            thumbs_busy: Arc::default(),
             share_error: String::new(),
             share_notice: String::new(),
             player: None,
-            share_volume: 1.0,
+            share_volume: HashMap::new(),
+            share_muted: Default::default(),
             rate: None,
             media: "off",
-            watching: None,
+            watching: Vec::new(),
+            channel: server::GENERAL,
+            channels: Vec::new(),
             next_tid: 1,
             uploads: Vec::new(),
             downloads: HashMap::new(),
@@ -320,7 +356,9 @@ impl Voip {
         self.out.lock().unwrap().new_share();
         self.rate = None;
         self.media = "off";
-        self.watching = None;
+        self.watching.clear();
+        self.channel = server::GENERAL;
+        self.channels.clear();
         self.uploads.clear();
         self.downloads.clear();
         self.previews.clear();
@@ -453,10 +491,20 @@ impl Voip {
         }
     }
 
-    pub fn voice(&mut self, on: bool, proxy: &EventLoopProxy<UserEvent>) {
+    /// Joins voice (in `channel`, if given), moves to another channel, or leaves.
+    pub fn voice(&mut self, on: bool, channel: Option<u16>, proxy: &EventLoopProxy<UserEvent>) {
         let Some(conn) = &self.conn else { return };
         if !self.is_live() {
             return;
+        }
+        if let Some(ch) = channel {
+            self.channel = ch;
+            // Already talking: just change channel.
+            if on && self.engine.is_some() {
+                conn.mixer.clear();
+                conn.send(json!({ "t": "voice", "on": true, "channel": ch }));
+                return;
+            }
         }
         if !on {
             self.stop_voice();
@@ -491,7 +539,7 @@ impl Voip {
                 self.meter_stop = Some(stop);
                 self.engine = Some(engine);
                 self.in_voice = true;
-                conn.send(json!({ "t": "voice", "on": true }));
+                conn.send(json!({ "t": "voice", "on": true, "channel": self.channel }));
                 conn.send(json!({ "t": "mute", "muted": self.muted || self.deaf, "deaf": self.deaf }));
             }
             Err(e) => self.voice_error = e,
@@ -577,6 +625,24 @@ impl Voip {
         });
     }
 
+    /// Pictures of what the picker lists, made off the main thread; each comes
+    /// back as [`VoipEvent::Thumb`]. Asked again every few seconds while the
+    /// picker is open (so the pictures are live); a batch still running makes
+    /// the next ask wait for the one after. They only go to the page.
+    pub fn thumbnails(&self, ids: &[String], icons: bool, proxy: &EventLoopProxy<UserEvent>) {
+        let ids: Vec<String> = ids.iter().filter(|id| self.sources.iter().any(|s| &s.id == *id)).take(64).cloned().collect();
+        if ids.is_empty() || self.thumbs_busy.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let (p, gen, busy) = (proxy.clone(), self.gen, self.thumbs_busy.clone());
+        std::thread::spawn(move || {
+            crate::capture::thumbnails(&ids, icons, &mut |id, thumb| {
+                let _ = p.send_event(UserEvent::Voip(gen, VoipEvent::Thumb { id: id.to_string(), thumb }));
+            });
+            busy.store(false, Ordering::Release);
+        });
+    }
+
     /// Starts sharing natively, from the picker's choices.
     pub fn share(&mut self, msg: &Value, proxy: &EventLoopProxy<UserEvent>) {
         use crate::capture::{self, Audio, Hint, Out};
@@ -607,6 +673,7 @@ impl Voip {
         };
         let label = if source.screen { String::new() } else if source.app.is_empty() { source.title.clone() } else { source.app.clone() };
         let preview = Arc::new(AtomicBool::new(msg["preview"] == true));
+        let source_id = source.id.clone();
         let opts = capture::Options { source, max_h, fps, bitrate, audio, hint };
 
         // Frames and sound go straight from the capture thread onto the
@@ -640,6 +707,12 @@ impl Voip {
         match capture::start(opts, sink) {
             Ok(share) => {
                 *control.lock().unwrap() = Some(share.control.clone());
+                // A small picture of it every few seconds, for the others' tiles
+                // (over the room's connection, inside the tunnel).
+                if let Some(c) = &self.conn {
+                    let (tx, ctl, id) = (c.tx.clone(), share.control.clone(), source_id.clone());
+                    std::thread::spawn(move || share_thumbs(&id, &ctl, &tx));
+                }
                 self.out.lock().unwrap().new_share();
                 self.native = Some(NativeShare { share, info: None, label, audio: false, paused: false, max: bitrate, preview });
             }
@@ -664,10 +737,46 @@ impl Voip {
         }
     }
 
-    pub fn set_share_volume(&mut self, v: f32) {
-        self.share_volume = v.clamp(0.0, 2.0);
+    /// One stream's sound, for us only: its volume (0..2) and/or muted.
+    pub fn set_share_volume(&mut self, id: u16, volume: Option<f32>, muted: Option<bool>) {
+        if let Some(v) = volume {
+            self.share_volume.insert(id, v.clamp(0.0, 2.0));
+        }
+        match muted {
+            Some(true) => {
+                self.share_muted.insert(id);
+            }
+            Some(false) => {
+                self.share_muted.remove(&id);
+            }
+            None => {}
+        }
+        self.apply_share_gain(id);
+    }
+
+    fn apply_share_gain(&self, id: u16) {
         if let Some(c) = &self.conn {
-            c.shared_sound.set_gain(self.share_volume);
+            let g = if self.share_muted.contains(&id) { 0.0 } else { self.share_volume.get(&id).copied().unwrap_or(1.0) };
+            c.shared_sound.set_gain(id, g);
+        }
+    }
+
+    /// Asks someone in the room to come into voice (they hear a ring).
+    pub fn ring(&self, id: u16) {
+        if let Some(c) = &self.conn {
+            c.send(json!({ "t": "ring", "id": id }));
+        }
+    }
+
+    /// The host's voice channel changes: "add" (name), "rename" (channel,
+    /// name), "remove" (channel), or "move" someone (id, channel).
+    pub fn channels(&self, msg: &Value) {
+        let Some(c) = self.conn.as_ref().filter(|_| self.is_host) else { return };
+        let action = msg["action"].as_str().unwrap_or("");
+        match action {
+            "add" | "rename" | "remove" => c.send(json!({ "t": "channels", "action": action, "name": msg["name"], "channel": msg["channel"] })),
+            "move" => c.send(json!({ "t": "mod", "action": "move", "id": msg["id"], "channel": msg["channel"] })),
+            _ => {}
         }
     }
 
@@ -725,21 +834,44 @@ impl Voip {
         }
     }
 
-    pub fn watch(&mut self, id: Option<u16>) {
-        self.watching = id;
+    /// Starts or stops watching one share; the others carry on.
+    pub fn watch(&mut self, id: u16, on: bool) {
+        let mut ids = self.watching.clone();
+        ids.retain(|w| *w != id);
+        if on {
+            ids.push(id);
+            // The oldest makes room.
+            while ids.len() > server::MAX_WATCH {
+                ids.remove(0);
+            }
+        }
+        self.set_watching(ids);
+    }
+
+    /// Watches exactly these shares.
+    pub fn set_watching(&mut self, ids: Vec<u16>) {
+        let ids: Vec<u16> = ids.into_iter().filter(|i| *i != self.me).take(server::MAX_WATCH).collect();
+        for gone in self.watching.iter().filter(|w| !ids.contains(w)) {
+            if let Some(c) = &self.conn {
+                c.shared_sound.clear(*gone);
+            }
+        }
+        self.watching = ids;
         if let Some(c) = &self.conn {
-            c.link.watch(id);
-            c.send(json!({ "t": "watch", "id": id }));
-            c.shared_sound.clear();
-            c.shared_sound.set_gain(self.share_volume);
+            c.link.watch(&self.watching);
+            // "id" for rooms from before 0.15, which watch one at a time.
+            c.send(json!({ "t": "watch", "ids": self.watching, "id": self.watching.last() }));
             c.shared_sound.set_deaf(self.deaf);
+        }
+        for id in self.watching.clone() {
+            self.apply_share_gain(id);
         }
         self.follow_share_sound();
     }
 
-    /// Plays the watched share's sound while it has some.
+    /// Plays the watched shares' sound while any has some.
     fn follow_share_sound(&mut self) {
-        let has_sound = self.watching.is_some_and(|w| self.members.iter().any(|m| m["id"] == w && m["screen"]["audio"] == true));
+        let has_sound = self.watching.iter().any(|w| self.members.iter().any(|m| m["id"] == *w && m["screen"]["audio"] == true));
         if !has_sound {
             self.player = None;
             return;
@@ -808,7 +940,7 @@ impl Voip {
     }
 
     /// From the gear menu: input volume, automatic or manual sensitivity,
-    /// noise suppression, output volume. Applies at once, in or out of voice.
+    /// noise suppression, echo cancelling, output volume. Applies at once, in or out of voice.
     pub fn set_audio(&self, v: &Value) {
         let f = |k: &str, d: f64| v[k].as_f64().unwrap_or(d) as f32;
         self.audio.set(
@@ -818,6 +950,7 @@ impl Voip {
             v["noiseSuppression"].as_bool().unwrap_or(true),
             f("outputGain", 1.0),
         );
+        self.audio.set_echo_cancellation(v["echoCancellation"].as_bool().unwrap_or(true));
     }
 
     // ------------------------------------------------- volume and the host
@@ -890,12 +1023,27 @@ impl Voip {
                 match m["t"].as_str().unwrap_or("") {
                     "members" => {
                         self.members = m["members"].as_array().cloned().unwrap_or_default();
-                        // Stop watching a share that has ended.
-                        if let Some(w) = self.watching {
-                            if !self.members.iter().any(|x| x["id"] == w && !x["screen"].is_null()) {
-                                self.watching = None;
+                        // Rooms from before 0.15 have one voice channel and don't list it.
+                        self.channels = m["channels"].as_array().cloned().unwrap_or_default();
+                        // Stop watching shares that have ended.
+                        let live: Vec<u16> = self.watching.iter().copied().filter(|w| self.members.iter().any(|x| x["id"] == *w && !x["screen"].is_null())).collect();
+                        if live.len() != self.watching.len() {
+                            for gone in self.watching.iter().filter(|w| !live.contains(w)) {
                                 if let Some(c) = &self.conn {
-                                    c.link.watch(None);
+                                    c.shared_sound.clear(*gone);
+                                }
+                            }
+                            self.watching = live;
+                            if let Some(c) = &self.conn {
+                                c.link.watch(&self.watching);
+                            }
+                        }
+                        // Our channel, as the room has it (the host may have moved us).
+                        if let Some(ch) = self.members.iter().find(|x| x["id"] == self.me).and_then(|x| x["channel"].as_u64()) {
+                            if ch as u16 != self.channel {
+                                self.channel = ch as u16;
+                                if let Some(c) = &self.conn {
+                                    c.mixer.clear();
                                 }
                             }
                         }
@@ -909,6 +1057,14 @@ impl Voip {
                         self.chat.push_back(m);
                     }
                     "notice" => self.room_notice = m["text"].as_str().unwrap_or("").to_string(),
+                    // Someone wants us in voice: the page rings and offers to join.
+                    "ring" => {
+                        return Some(json!({ "type": "voipRing", "from": m["from"], "name": m["name"], "channel": m["channel"] }));
+                    }
+                    // A sharer's latest preview, for their tile.
+                    "thumb" => {
+                        return Some(json!({ "type": "voipThumb", "id": m["id"], "img": m["img"] }));
+                    }
                     "keyframe" => {
                         if let Some(n) = &self.native {
                             n.share.key_frame();
@@ -946,7 +1102,7 @@ impl Voip {
             }
             VoipEvent::Level { level, talking } => Some(self.live_json(Some((level, talking)))),
             VoipEvent::Video { from, key, ts, data } => {
-                if self.watching != Some(from) {
+                if !self.watching.contains(&from) {
                     return Some(Value::Null);
                 }
                 use base64::Engine as _;
@@ -986,6 +1142,11 @@ impl Voip {
                     "type": "preview", "key": key, "ts": ts,
                     "data": base64::engine::general_purpose::STANDARD.encode(&data),
                 }))
+            }
+            VoipEvent::Thumb { id, thumb } => {
+                use base64::Engine as _;
+                let b = |v: &Option<Vec<u8>>| v.as_ref().map(|d| base64::engine::general_purpose::STANDARD.encode(d));
+                Some(json!({ "type": "shareThumb", "id": id, "img": b(&thumb.image), "icon": b(&thumb.icon) }))
             }
             VoipEvent::Media(state) => {
                 self.media = state;
@@ -1164,8 +1325,11 @@ impl Voip {
             "shareStarting": self.native.as_ref().is_some_and(|n| n.info.is_none()),
             "shareError": self.share_error,
             "shareNotice": self.share_notice,
-            "shareVolume": self.share_volume,
+            "shareVolume": self.share_volume.iter().map(|(id, v)| (id.to_string(), json!(v))).collect::<serde_json::Map<_, _>>(),
+            "shareMuted": self.share_muted.iter().collect::<Vec<_>>(),
             "watching": self.watching,
+            "channel": self.channel,
+            "channels": self.channels,
             "uploads": self.uploads.iter().map(|u| json!({
                 "tid": u.tid, "name": u.name, "sent": u.sent, "size": u.size, "error": u.error,
             })).collect::<Vec<_>>(),

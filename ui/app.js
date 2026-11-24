@@ -1252,7 +1252,7 @@ $('voip-chatform').addEventListener('submit', (e) => {
   post({ cmd: 'voip.chat', text });
   $('voip-text').value = '';
 });
-$('voip-voice-join').addEventListener('click', () => post({ cmd: 'voip.voice', on: true }));
+$('voip-voice-join').addEventListener('click', () => post({ cmd: 'voip.voice', on: true, channel: (voipState && voipState.channel) || 1 }));
 $('voip-voice-leave').addEventListener('click', () => post({ cmd: 'voip.voice', on: false }));
 let voipState = null;
 $('voip-mute').addEventListener('click', () => {
@@ -1288,16 +1288,63 @@ function person(m, v, speaking) {
   const icons = m.deaf ? `<span class="ico" title="Deafened">${ICON_DEAF}</span>` : m.muted ? `<span class="ico" title="Muted">${ICON_MUTED}</span>` : '';
   const g = v.gains[m.id];
   const mine = !you && g != null && g !== 1 ? `<span class="ico soft" title="Your volume for ${esc(m.name)}">${g === 0 ? ICON_MUTED : `${Math.round(g * 100)}%`}</span>` : '';
+  const watching = (v.watching || []).includes(m.id);
   const watch = m.screen && !you
-    ? `<button class="btn small ${v.watching === m.id ? '' : 'primary'}" data-watch="${v.watching === m.id ? '' : m.id}">${v.watching === m.id ? 'Watching' : 'Watch'}</button>`
+    ? `<button class="btn small ${watching ? '' : 'primary'}" data-watch="${m.id}" title="${watching ? 'Stop watching' : 'Watch (you can watch several at once)'}">${watching ? 'Watching' : 'Watch'}</button>`
     : '';
+  // Ask someone who isn't in voice to come in: they hear a ring.
+  const ring = !you && !m.voice && v.inVoice ? `<button class="btn small ghost" data-ring="${m.id}" title="Ring ${esc(m.name)} into voice">Ring</button>` : '';
+  const chan = m.voice && (v.channels || []).length > 1 ? `<span class="meta">${esc(channelName(v, m.channel))}</span>` : '';
   return `
     <div class="person" data-member="${m.id}" title="Right-click for options">
       <span class="avatar${speaking.includes(m.id) ? ' speaking' : ''}" style="--h:${hue(m.name)}">${esc(initials(m.name))}</span>
       <span class="person-name">${esc(m.name)}</span>
-      ${tags.join('')}${icons}${mine}
+      ${tags.join('')}${icons}${mine}${chan}
       <span class="grow"></span>
-      ${watch}${link}
+      ${ring}${watch}${link}
+    </div>`;
+}
+
+const ICON_EYE = '<svg width="13" height="13" viewBox="0 0 16 16" fill="none"><path d="M1.5 8s2.4-4.5 6.5-4.5S14.5 8 14.5 8 12.1 12.5 8 12.5 1.5 8 1.5 8z" stroke="currentColor" stroke-width="1.4"/><circle cx="8" cy="8" r="2" fill="currentColor"/></svg>';
+
+/* Sharers' latest previews (blob URLs), sent by the room every few seconds. */
+const memberThumbs = new Map();
+function onMemberThumb(msg) {
+  const old = memberThumbs.get(msg.id);
+  if (old) URL.revokeObjectURL(old);
+  if (msg.img) memberThumbs.set(msg.id, URL.createObjectURL(new Blob([unb64(msg.img)], { type: 'image/jpeg' })));
+  else memberThumbs.delete(msg.id);
+  if (voipState) renderVoip(voipState);
+}
+
+function channelName(v, id) {
+  const c = (v.channels || []).find((x) => x.id === id);
+  return c ? c.name : 'General';
+}
+
+/* Someone in voice, as a tile: their initials big, name and mic state at the
+   bottom, LIVE and Watch at the top when they're sharing. */
+function tile(m, v, speaking) {
+  const you = m.id === v.me;
+  const icons = m.deaf ? `<span class="ico" title="Deafened">${ICON_DEAF}</span>` : m.muted || m.smuted ? `<span class="ico" title="${m.smuted ? 'Muted by the host' : 'Muted'}">${ICON_MUTED}</span>` : '';
+  const top = [];
+  if (m.screen) top.push('<span class="tag-sm live">LIVE</span>');
+  if (m.host) top.push('<span class="tag-sm">Host</span>');
+  top.push('<span class="grow"></span>');
+  const watching = (v.watching || []).includes(m.id);
+  if (m.screen && !you) {
+    top.push(`<button class="btn small ${watching ? '' : 'primary'}" data-watch="${m.id}">${watching ? 'Watching' : 'Watch'}</button>`);
+  }
+  // A sharer's tile shows their stream's latest picture and how many watch it.
+  const thumb = m.screen && memberThumbs.get(m.id);
+  const seen = m.screen ? `<span class="tile-viewers" title="${m.watchers || 0} watching">${ICON_EYE}${m.watchers || 0}</span>` : '';
+  return `
+    <div class="tile${thumb ? ' has-thumb' : ''}" data-member="${m.id}" style="--h:${hue(m.name)}" title="Right-click for options">
+      ${thumb ? `<img class="tile-thumb" src="${thumb}" alt="">` : ''}
+      <div class="tile-top">${top.join('')}</div>
+      ${seen}
+      <span class="avatar${speaking.includes(m.id) ? ' speaking' : ''}" style="--h:${hue(m.name)}">${esc(initials(m.name))}</span>
+      <span class="tile-name"><span>${esc(m.name)}${you ? ' (you)' : ''}</span>${icons}</span>
     </div>`;
 }
 
@@ -1350,9 +1397,20 @@ function renderVoip(v) {
   renderScreen(v);
   applySavedVolumes(v);
 
-  // Voice.
-  const voiceMembers = v.members.filter((m) => m.voice);
-  $('voip-voice-count').textContent = voiceMembers.length ? `${voiceMembers.length} in voice` : '';
+  // Voice: the people in our channel (rooms from before 0.15 have only one).
+  const myChannel = v.channel || 1;
+  const inChannel = (m) => (m.channel || 1) === myChannel;
+  const voiceMembers = v.members.filter((m) => m.voice && inChannel(m));
+  const allVoice = v.members.filter((m) => m.voice).length;
+  $('voip-voice-count').textContent = allVoice ? `${allVoice} in voice` : '';
+  renderChannels(v);
+  voiceSounds(v, voiceMembers);
+  for (const id of [...memberThumbs.keys()]) {
+    if (!v.members.some((m) => m.id === id && m.screen)) {
+      URL.revokeObjectURL(memberThumbs.get(id));
+      memberThumbs.delete(id);
+    }
+  }
   hide($('voip-voice-join'), v.inVoice || v.st !== 'live');
   hide($('voip-voice-leave'), !v.inVoice);
   hide($('voip-mute'), !v.inVoice);
@@ -1374,11 +1432,144 @@ function renderVoip(v) {
   show($('voip-media-state'), mediaText);
   const speaking = liveSpeaking(v);
   setHtml($('voip-invoice'), voiceMembers.length
-    ? voiceMembers.map((m) => person(m, v, speaking)).join('')
-    : '<div class="empty small">Nobody is in voice yet.</div>');
+    ? voiceMembers.map((m) => tile(m, v, speaking)).join('')
+    : `<div class="empty small">${v.inVoice ? 'Connecting to voice…' : 'Nobody is in voice yet. Join to start talking.'}</div>`);
   setHtml($('voip-members'), v.members.map((m) => person(m, v, speaking)).join(''));
   renderLog('voip', v.log);
 }
+
+/* Voice channels: a chip each, with who's in it. Click one to join it (or
+   move to it). The host can add channels, and remove all but General. */
+let addingChannel = false;
+function renderChannels(v) {
+  const chans = v.channels && v.channels.length ? v.channels : [{ id: 1, name: 'General' }];
+  const el = $('voip-channels');
+  const show = chans.length > 1 || v.isHost;
+  hide(el, !show || v.st !== 'live');
+  if (!show) return;
+  const mine = v.channel || 1;
+  const chips = chans.map((c) => {
+    const people = v.members.filter((m) => m.voice && (m.channel || 1) === c.id);
+    const here = v.inVoice && c.id === mine;
+    const faces = people.slice(0, 5).map((m) => `<span class="avatar xs" style="--h:${hue(m.name)}" title="${esc(m.name)}">${esc(initials(m.name))}</span>`).join('');
+    const more = people.length > 5 ? `<span class="meta">+${people.length - 5}</span>` : '';
+    const del = v.isHost && c.id !== 1 ? `<span class="vch-del" data-ch-del="${c.id}" title="Remove this channel (its people go to General)">${ICON_CLOSE}</span>` : '';
+    return `<button class="vch${here ? ' on' : ''}" data-ch="${c.id}" title="${here ? 'You\'re here' : `Join ${esc(c.name)}`}">
+      <svg width="13" height="13" viewBox="0 0 16 16" fill="none"><path d="M2.5 6h2.5l3.5-3v10l-3.5-3H2.5z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/><path d="M11 5.5a3.5 3.5 0 0 1 0 5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+      <span class="vch-name">${esc(c.name)}</span>${faces}${more}${del}</button>`;
+  });
+  if (v.isHost && chans.length < 8) {
+    chips.push(addingChannel
+      ? '<form class="vch-add" id="vch-form"><input class="input" id="vch-name" maxlength="32" placeholder="Channel name" autocomplete="off"><button class="btn small primary">Add</button></form>'
+      : '<button class="vch ghost" data-ch-add="1" title="Add a voice channel">+ Channel</button>');
+  }
+  setHtml(el, chips.join(''));
+  if (addingChannel && document.activeElement !== $('vch-name')) $('vch-name').focus();
+}
+
+$('voip-channels').addEventListener('click', (e) => {
+  const del = e.target.closest('[data-ch-del]');
+  if (del) {
+    e.stopPropagation();
+    post({ cmd: 'voip.channels', action: 'remove', channel: Number(del.dataset.chDel) });
+    return;
+  }
+  if (e.target.closest('[data-ch-add]')) {
+    addingChannel = true;
+    if (voipState) renderChannels(voipState);
+    return;
+  }
+  const b = e.target.closest('[data-ch]');
+  if (!b || !voipState) return;
+  post({ cmd: 'voip.voice', on: true, channel: Number(b.dataset.ch) });
+});
+$('voip-channels').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const name = $('vch-name').value.trim();
+  if (name) post({ cmd: 'voip.channels', action: 'add', name });
+  addingChannel = false;
+  if (voipState) renderChannels(voipState);
+});
+$('voip-channels').addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && addingChannel) {
+    addingChannel = false;
+    if (voipState) renderChannels(voipState);
+  }
+});
+
+/* Sounds, made here (no sound files): a rising chime when someone joins your
+   voice channel, falling when they leave, and a ring when someone calls you. */
+let sfx = null;
+function tones(notes) {
+  if (vs.sounds === false) return;
+  try {
+    sfx = sfx || new (window.AudioContext || window.webkitAudioContext)();
+    if (sfx.state === 'suspended') sfx.resume();
+    let t = sfx.currentTime + 0.02;
+    for (const [freq, dur] of notes) {
+      const o = sfx.createOscillator();
+      const g = sfx.createGain();
+      o.type = 'sine';
+      o.frequency.value = freq;
+      g.gain.setValueAtTime(0, t);
+      g.gain.linearRampToValueAtTime(0.16 * (vs.outputGain || 1), t + 0.015);
+      g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+      o.connect(g).connect(sfx.destination);
+      o.start(t);
+      o.stop(t + dur + 0.02);
+      t += dur * 0.8;
+    }
+  } catch (_) { /* no audio here */ }
+}
+const SOUND_JOIN = [[587, 0.12], [880, 0.18]];
+const SOUND_LEAVE = [[740, 0.12], [494, 0.2]];
+const SOUND_RING = [[659, 0.16], [880, 0.16], [659, 0.16], [880, 0.3]];
+
+let lastVoice = null; // ids in our channel last time, while we're in voice
+function voiceSounds(v, voiceMembers) {
+  const ids = new Set(voiceMembers.map((m) => m.id));
+  if (!v.inVoice) {
+    if (lastVoice) tones(SOUND_LEAVE); // we left
+    lastVoice = null;
+    return;
+  }
+  if (!lastVoice) {
+    tones(SOUND_JOIN); // we joined
+  } else {
+    const joined = [...ids].some((id) => !lastVoice.has(id) && id !== v.me);
+    const left = [...lastVoice].some((id) => !ids.has(id) && id !== v.me);
+    if (joined) tones(SOUND_JOIN);
+    else if (left) tones(SOUND_LEAVE);
+  }
+  lastVoice = ids;
+}
+
+/* Someone rang us: ring, and offer to join their channel. */
+let ringFrom = null;
+let ringTimer = 0;
+function onRing(msg) {
+  ringFrom = msg;
+  $('ring-avatar').style.setProperty('--h', hue(msg.name || '?'));
+  $('ring-avatar').textContent = initials(msg.name || '?');
+  $('ring-text').innerHTML = `<b>${esc(msg.name)}</b> is calling you into voice`;
+  hide($('ring-toast'), false);
+  tones(SOUND_RING);
+  clearTimeout(ringTimer);
+  ringTimer = setTimeout(() => hide($('ring-toast'), true), 30000);
+}
+$('ring-join').addEventListener('click', () => {
+  hide($('ring-toast'), true);
+  if (ringFrom) post({ cmd: 'voip.voice', on: true, channel: ringFrom.channel || 1 });
+  page('voip');
+});
+$('ring-dismiss').addEventListener('click', () => hide($('ring-toast'), true));
+document.getElementById('page-voip').addEventListener('click', (e) => {
+  const r = e.target.closest('[data-ring]');
+  if (!r) return;
+  post({ cmd: 'voip.ring', id: Number(r.dataset.ring) });
+  r.disabled = true;
+  r.textContent = 'Ringing…';
+});
 
 /* The quick updates: who's talking (from the audio) and your mic level. */
 let lastSpeaking = [];
@@ -1400,7 +1591,7 @@ function voipLive(msg) {
 /* ------------------------------------------------------- voice settings */
 
 /* Yours only, remembered on this PC, and applied at once (in a call or not). */
-const VS_DEFAULT = { inputGain: 1, autoSensitivity: true, thresholdDb: -50, noiseSuppression: true, outputGain: 1 };
+const VS_DEFAULT = { inputGain: 1, autoSensitivity: true, thresholdDb: -50, noiseSuppression: true, echoCancellation: true, outputGain: 1, sounds: true };
 let vs = { ...VS_DEFAULT };
 try { vs = { ...VS_DEFAULT, ...JSON.parse(localStorage.getItem('kc-audio') || '{}') }; } catch (_) { /* defaults */ }
 
@@ -1411,6 +1602,8 @@ function vsRender() {
   $('vs-out-val').textContent = `${Math.round(vs.outputGain * 100)}%`;
   $('vs-auto').checked = vs.autoSensitivity;
   $('vs-ns').checked = vs.noiseSuppression;
+  $('vs-ec').checked = vs.echoCancellation !== false;
+  $('vs-sounds').checked = vs.sounds !== false;
   $('vs-thresh').value = vs.thresholdDb;
   $('vs-thresh').disabled = vs.autoSensitivity;
   $('vs-mark').style.left = `${vs.thresholdDb + 100}%`;
@@ -1430,6 +1623,8 @@ $('vs-in').addEventListener('input', () => { vs.inputGain = Number($('vs-in').va
 $('vs-out').addEventListener('input', () => { vs.outputGain = Number($('vs-out').value) / 100; vsSave(); });
 $('vs-auto').addEventListener('change', () => { vs.autoSensitivity = $('vs-auto').checked; vsSave(); });
 $('vs-ns').addEventListener('change', () => { vs.noiseSuppression = $('vs-ns').checked; vsSave(); });
+$('vs-ec').addEventListener('change', () => { vs.echoCancellation = $('vs-ec').checked; vsSave(); });
+$('vs-sounds').addEventListener('change', () => { vs.sounds = $('vs-sounds').checked; vsSave(); if (vs.sounds) tones(SOUND_JOIN); });
 $('vs-thresh').addEventListener('input', () => { vs.thresholdDb = Number($('vs-thresh').value); vsSave(); });
 $('vs-open').addEventListener('click', () => { vsRender(); hide($('vs-modal'), false); });
 $('vs-close').addEventListener('click', () => hide($('vs-modal'), true));
@@ -1643,7 +1838,7 @@ function shareError(text) {
 
 async function startShare() {
   shareError('');
-  hide($('ss-box'), true);
+  closePicker();
   if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia || !window.VideoEncoder || !window.MediaStreamTrackProcessor) {
     return shareError('Screen sharing needs a newer Microsoft Edge WebView2 runtime. Update Edge and try again.');
   }
@@ -1692,7 +1887,6 @@ async function startShare() {
   post({ cmd: 'voip.screen', info: ss.info });
   $('ss-preview').srcObject = stream;
   track.addEventListener('ended', () => stopShare());
-  hide($('ss-box'), true);
   hide($('ss-live'), false);
   hide($('ss-row'), true);
 
@@ -1755,9 +1949,14 @@ function stopShare(error) {
   if (error) shareError(error);
 }
 
-/* ---- the native picker */
+/* ---- the native picker: a popup with a live picture of each screen and app
+   window. Only the windows people share (apps, browsers, games) are listed
+   unless "Show all windows" is ticked. The pictures are made by the app
+   (src/capture) every few seconds while the popup is open, and never leave
+   this computer. */
 
-const pick = { kind: 'screen', sources: [], audio: [], chosen: null, error: '' };
+const pick = { kind: 'window', sources: [], audio: [], chosen: null, error: '', all: false, thumbs: new Map(), asked: new Set(), timer: 0 };
+const THUMB_EVERY = 2500;
 
 function chosenSource() {
   return pick.sources.find((x) => x.id === pick.chosen) || null;
@@ -1768,21 +1967,43 @@ function srcSize() {
   return c && c.w && c.h ? { w: c.w, h: c.h } : nativeRes();
 }
 
+function shownSources() {
+  return pick.sources.filter((x) => x.kind === pick.kind && (pick.all || x.main));
+}
+
+function thumbHtml(x) {
+  const t = pick.thumbs.get(x.id) || {};
+  if (t.img) return `<img class="pic" src="${t.img}" alt="">`;
+  const why = x.minimized ? 'Minimized. Shares when it\'s restored.' : '';
+  return `${t.icon ? `<img class="big-icon" src="${t.icon}" alt="">` : ''}${why ? `<span class="ss-none">${why}</span>` : ''}`;
+}
+
+function sourceHtml(x) {
+  const t = pick.thumbs.get(x.id) || {};
+  const icon = x.kind === 'window' && t.icon ? `<img class="icon" src="${t.icon}" alt="">` : '';
+  const app = x.kind === 'window' && x.app && x.app !== x.title ? `${esc(x.app)} · ` : '';
+  return `<button class="ss-source${x.id === pick.chosen ? ' on' : ''}" data-src="${esc(x.id)}" title="${esc(x.title)}">
+      <span class="ss-thumb" data-thumb="${esc(x.id)}">${thumbHtml(x)}</span>
+      <span class="ss-label">${icon}<span class="ss-name">${esc(x.title)}</span></span>
+      <span class="meta">${app}${x.w}×${x.h}${x.minimized ? ' · minimized' : ''}</span>
+    </button>`;
+}
+
 function renderSources() {
   for (const b of document.querySelectorAll('#ss-kind .seg-btn')) b.classList.toggle('on', b.dataset.kind === pick.kind);
-  const list = pick.sources.filter((x) => x.kind === pick.kind);
+  hide($('ss-all-wrap'), pick.kind !== 'window');
+  $('ss-all').checked = pick.all;
+  const list = shownSources();
   if (pick.error) {
     setHtml($('ss-sources'), `<div class="empty">${esc(pick.error)}</div>`);
   } else if (!list.length) {
-    setHtml($('ss-sources'), `<div class="empty">${pick.sources.length ? 'No windows to share.' : 'Looking for screens and windows…'}</div>`);
+    const hidden = pick.sources.some((x) => x.kind === 'window' && !x.main);
+    const none = !pick.sources.length ? 'Looking for screens and windows…'
+      : pick.kind === 'window' ? `No app windows are open.${hidden ? ' Tick "Show all windows" to see the rest.' : ''}` : 'No screens found.';
+    setHtml($('ss-sources'), `<div class="empty">${none}</div>`);
   } else {
     if (!list.some((x) => x.id === pick.chosen)) pick.chosen = list[0].id;
-    setHtml($('ss-sources'), list.map((x) => {
-      const what = x.kind === 'window' && x.app && x.app !== x.title ? `${esc(x.app)} · ` : '';
-      const note = x.minimized ? ' · minimized' : '';
-      return `<button class="ss-source${x.id === pick.chosen ? ' on' : ''}" data-src="${esc(x.id)}">
-        <span class="ss-name">${esc(x.title)}</span><span class="meta">${what}${x.w}×${x.h}${note}</span></button>`;
-    }).join(''));
+    setHtml($('ss-sources'), list.map(sourceHtml).join(''));
   }
   // Sound: "this app" only for a window; nothing the computer can't do.
   const can = new Set(pick.audio);
@@ -1796,6 +2017,58 @@ function renderSources() {
   fillResOptions();
 }
 
+function setKind(kind) {
+  pick.kind = kind;
+  // Default sound: a window's own app; a screen, everything.
+  $('ss-audio').value = kind === 'window' ? 'app' : 'system';
+  renderSources();
+  askThumbs();
+}
+
+/* Pictures for what's on show; icons the first time each window is shown. */
+function askThumbs() {
+  if ($('ss-box').classList.contains('hide') || pick.error) return;
+  const ids = shownSources().map((x) => x.id);
+  if (!ids.length) return;
+  const icons = ids.some((id) => !pick.asked.has(id) && id.startsWith('window:'));
+  ids.forEach((id) => pick.asked.add(id));
+  post({ cmd: 'voip.thumbs', ids, icons });
+}
+
+function b64Url(data, type) {
+  return URL.createObjectURL(new Blob([unb64(data)], { type }));
+}
+
+function onThumb(msg) {
+  if ($('ss-box').classList.contains('hide')) return;
+  const t = pick.thumbs.get(msg.id) || {};
+  if (msg.img) {
+    if (t.img) URL.revokeObjectURL(t.img);
+    t.img = b64Url(msg.img, 'image/jpeg');
+  }
+  if (msg.icon) {
+    if (t.icon) URL.revokeObjectURL(t.icon);
+    t.icon = b64Url(msg.icon, 'image/png');
+  }
+  pick.thumbs.set(msg.id, t);
+  const x = pick.sources.find((s) => s.id === msg.id);
+  const el = document.querySelector(`#ss-sources [data-src="${CSS.escape(msg.id)}"]`);
+  // Swap in just this one, so the rest don't flicker.
+  if (x && el) {
+    el.outerHTML = sourceHtml(x);
+    lastHtml.delete($('ss-sources'));
+  }
+}
+
+function dropThumbs() {
+  for (const t of pick.thumbs.values()) {
+    if (t.img) URL.revokeObjectURL(t.img);
+    if (t.icon) URL.revokeObjectURL(t.icon);
+  }
+  pick.thumbs.clear();
+  pick.asked.clear();
+}
+
 function listSources() {
   pick.error = '';
   pick.sources = [];
@@ -1807,18 +2080,43 @@ function onSources(msg) {
   pick.sources = msg.sources || [];
   pick.audio = msg.audio || [];
   pick.error = msg.error || '';
+  // Nothing to show on the apps side: start on the screens.
+  if (pick.kind === 'window' && !pick.sources.some((x) => x.kind === 'window' && x.main)) pick.kind = 'screen';
+  $('ss-audio').value = pick.kind === 'window' ? 'app' : 'system';
   // The basic picker, where the web view has one, if native capture can't run.
   hide($('ss-web'), !(pick.error && !MAC && navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia));
   renderSources();
+  askThumbs();
+}
+
+function openPicker() {
+  shareError('');
+  pick.kind = 'window';
+  pick.chosen = null;
+  dropThumbs();
+  hide($('ss-box'), false);
+  hide($('ss-row'), true);
+  listSources();
+  clearInterval(pick.timer);
+  pick.timer = setInterval(askThumbs, THUMB_EVERY);
+}
+
+function closePicker() {
+  clearInterval(pick.timer);
+  pick.timer = 0;
+  hide($('ss-box'), true);
+  hide($('ss-row'), false);
+  dropThumbs();
 }
 
 $('ss-kind').addEventListener('click', (e) => {
   const b = e.target.closest('[data-kind]');
-  if (!b) return;
-  pick.kind = b.dataset.kind;
-  // Default sound: a window's own app; a screen, everything.
-  $('ss-audio').value = pick.kind === 'window' ? 'app' : 'system';
+  if (b) setKind(b.dataset.kind);
+});
+$('ss-all').addEventListener('change', (e) => {
+  pick.all = e.target.checked;
   renderSources();
+  askThumbs();
 });
 $('ss-sources').addEventListener('click', (e) => {
   const b = e.target.closest('[data-src]');
@@ -1826,7 +2124,16 @@ $('ss-sources').addEventListener('click', (e) => {
   pick.chosen = b.dataset.src;
   renderSources();
 });
-$('ss-refresh').addEventListener('click', () => listSources());
+$('ss-sources').addEventListener('dblclick', (e) => {
+  const b = e.target.closest('[data-src]');
+  if (!b) return;
+  pick.chosen = b.dataset.src;
+  startNative();
+});
+$('ss-refresh').addEventListener('click', () => { dropThumbs(); listSources(); });
+$('ss-close').addEventListener('click', () => closePicker());
+$('ss-box').addEventListener('mousedown', (e) => { if (e.target === $('ss-box')) closePicker(); });
+window.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('ss-box').classList.contains('hide')) closePicker(); });
 
 function startNative() {
   const c = chosenSource();
@@ -1847,7 +2154,8 @@ function startNative() {
     hint: preset().hint,
     preview: $('ss-preview-on').checked,
   });
-  hide($('ss-box'), true);
+  closePicker();
+  hide($('ss-row'), true);
 }
 
 /* ---- our own preview, from the frames we send */
@@ -1908,7 +2216,7 @@ function renderNative(v) {
   ss.native = live ? { codec: info && info.codec, starting: v.shareStarting } : null;
   if (!live) closePreview();
   if (live) {
-    hide($('ss-box'), true);
+    if (!$('ss-box').classList.contains('hide')) closePicker();
     hide($('ss-live'), false);
     hide($('ss-preview'), true);
     hide($('ss-preview-canvas'), !$('ss-preview-on').checked || !pv.decoder);
@@ -1921,7 +2229,10 @@ function renderNative(v) {
       const what = info.label ? `${info.label} · ` : '';
       const paused = info.paused ? ' · window minimized' : '';
       const sound = info.audio ? ' · with sound' : '';
-      $('ss-stats').textContent = `${what}${info.w}×${info.h} · ${fps} fps · ${(rate / 1e6).toFixed(1)} Mbit/s · ${info.hardware ? 'hardware' : 'software'} H.264${sound}${paused}${fitted}`;
+      const me = v.members.find((m) => m.id === v.me);
+      const n = me && me.watchers ? me.watchers : 0;
+      const seen = ` · ${n === 1 ? '1 person watching' : `${n} people watching`}`;
+      $('ss-stats').textContent = `${what}${info.w}×${info.h} · ${fps} fps · ${(rate / 1e6).toFixed(1)} Mbit/s · ${info.hardware ? 'hardware' : 'software'} H.264${sound}${paused}${fitted}${seen}`;
     }
   } else if (!ss.running) {
     hide($('ss-live'), true);
@@ -1933,13 +2244,8 @@ function renderNative(v) {
   show($('ss-notice'), v.shareNotice);
 }
 
-$('ss-open').addEventListener('click', () => {
-  shareError('');
-  hide($('ss-box'), false);
-  hide($('ss-row'), true);
-  listSources();
-});
-$('ss-cancel').addEventListener('click', () => { hide($('ss-box'), true); hide($('ss-row'), false); });
+$('ss-open').addEventListener('click', () => openPicker());
+$('ss-cancel').addEventListener('click', () => closePicker());
 $('ss-go').addEventListener('click', () => startNative());
 $('ss-web').addEventListener('click', () => startShare());
 $('ss-stop').addEventListener('click', () => {
@@ -1947,28 +2253,57 @@ $('ss-stop').addEventListener('click', () => {
   else stopShare();
 });
 
-/* Watching: decode with the browser's (hardware) decoder onto a canvas. */
-const view = { id: null, decoder: null, codec: null, waitKey: true, frames: 0, bytes: 0, tick: 0 };
+/* Watching: up to four streams at once, each decoded with the browser's
+   (hardware) decoder onto its own canvas. Each has its own sound control in
+   the bottom right (yours only), full screen, pop-out and close. */
 
-function closeViewer() {
-  if (document.documentElement.classList.contains('theater')) setTheater(false);
-  try { view.decoder && view.decoder.state !== 'closed' && view.decoder.close(); } catch (_) { /* gone */ }
-  view.decoder = null;
-  view.id = null;
-  clearInterval(view.tick);
-  hide($('voip-stage'), true);
+const views = new Map(); // sharer id -> { decoder, codec, waitKey, frames, bytes, el, canvas, ctx, m }
+let viewTick = 0;
+
+const ICON_SPEAKER = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M2.5 6h2.5l3.5-3v10l-3.5-3H2.5z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/><path d="M11 5.5a3.5 3.5 0 0 1 0 5M12.8 3.8a6 6 0 0 1 0 8.4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>';
+const ICON_SPEAKER_OFF = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M2.5 6h2.5l3.5-3v10l-3.5-3H2.5z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/><path d="M11 6l4 4M15 6l-4 4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>';
+const ICON_PIN = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M6 1.8h4l-.6 4 2.6 2.4v1.3H4V8.2l2.6-2.4z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/><path d="M8 9.5v4.7" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>';
+const ICON_POPOUT = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><rect x="1.5" y="2.5" width="13" height="11" rx="1.5" stroke="currentColor" stroke-width="1.4"/><rect x="8" y="8" width="5" height="4" rx=".8" fill="currentColor"/></svg>';
+const ICON_FULL = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M2 6V2h4M10 2h4v4M14 10v4h-4M6 14H2v-4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+const ICON_CLOSE = '<svg width="14" height="14" viewBox="0 0 10 10"><path d="M2 2l6 6M8 2L2 8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>';
+
+function streamTitle(m) {
+  return `${m.name}'s screen${m.screen && m.screen.label ? ` · ${m.screen.label}` : ''}`;
+}
+
+function streamPane(m) {
+  const el = document.createElement('div');
+  el.className = 'stream';
+  el.dataset.stream = m.id;
+  el.innerHTML = `
+    <canvas></canvas>
+    <video class="pip-src" muted playsinline></video>
+    <div class="stream-wait">Waiting for the picture…</div>
+    <div class="stream-paused hide">The shared window is minimized. The picture comes back when it's restored.</div>
+    <div class="stream-popped hide">Playing in its own window. <button class="btn small" data-act="popin">Bring it back</button></div>
+    <div class="stream-top"><span class="live-tag">LIVE</span><span class="stream-title"></span><span class="grow"></span><span class="stream-stats"></span></div>
+    <div class="stream-bar">
+      <button class="sbtn" data-act="close" title="Stop watching">${ICON_CLOSE}</button>
+      <button class="sbtn" data-act="popout" title="Pop out into its own window">${ICON_POPOUT}</button>
+      <button class="sbtn hide" data-act="pin" title="Pin over your game (overlay)">${ICON_PIN}</button>
+      <button class="sbtn" data-act="full" title="Full screen (double-click)">${ICON_FULL}</button>
+      <span class="grow"></span>
+      <span class="stream-vol" title="The stream's sound, for you only">
+        <button class="sbtn" data-act="mute" title="Mute the stream"></button>
+        <input type="range" data-act="vol" min="0" max="200" step="5" value="100">
+        <span class="stream-vol-val">100%</span>
+      </span>
+    </div>`;
+  return el;
 }
 
 function openViewer(m) {
-  closeViewer();
-  view.id = m.id;
-  view.codec = m.screen.codec;
-  view.waitKey = true;
-  view.frames = 0;
-  view.bytes = 0;
-  const canvas = $('stage-canvas');
+  const el = streamPane(m);
+  $('voip-stage').appendChild(el);
+  const canvas = el.querySelector('canvas');
   const ctx = canvas.getContext('2d');
-  view.decoder = new VideoDecoder({
+  const vw = { decoder: null, codec: m.screen.codec, waitKey: true, frames: 0, bytes: 0, el, canvas, ctx, m };
+  vw.decoder = new VideoDecoder({
     output: (frame) => {
       if (canvas.width !== frame.displayWidth || canvas.height !== frame.displayHeight) {
         canvas.width = frame.displayWidth;
@@ -1976,57 +2311,104 @@ function openViewer(m) {
       }
       ctx.drawImage(frame, 0, 0);
       frame.close();
-      view.frames++;
-      hide($('stage-wait'), true);
+      vw.frames++;
+      hide(el.querySelector('.stream-wait'), true);
     },
-    error: () => resetDecoder(),
+    error: () => resetDecoder(m.id),
   });
-  view.decoder.configure({ codec: view.codec, optimizeForLatency: true, hardwareAcceleration: 'no-preference' });
-  $('stage-title').textContent = `${m.name}'s screen`;
-  hide($('stage-wait'), false);
-  hide($('voip-stage'), false);
-  view.tick = setInterval(() => {
-    $('stage-stats').textContent = `${m.screen.w}×${m.screen.h} · ${Math.round(view.frames / 2)} fps · ${((view.bytes * 8) / 2 / 1e6).toFixed(1)} Mbit/s`;
-    view.frames = 0;
-    view.bytes = 0;
-  }, 2000);
+  vw.decoder.configure({ codec: vw.codec, optimizeForLatency: true, hardwareAcceleration: 'no-preference' });
+  views.set(m.id, vw);
+  if (!viewTick) {
+    viewTick = setInterval(() => {
+      for (const v of views.values()) {
+        const s = v.m.screen || {};
+        v.el.querySelector('.stream-stats').textContent = `${s.w}×${s.h} · ${Math.round(v.frames / 2)} fps · ${((v.bytes * 8) / 2 / 1e6).toFixed(1)} Mbit/s`;
+        v.frames = 0;
+        v.bytes = 0;
+      }
+    }, 2000);
+  }
+}
+
+function closeViewer(id) {
+  const vw = views.get(id);
+  if (!vw) return;
+  if (vw.el.classList.contains('full')) setTheater(null);
+  popIn(vw);
+  try { vw.decoder && vw.decoder.state !== 'closed' && vw.decoder.close(); } catch (_) { /* gone */ }
+  vw.el.remove();
+  views.delete(id);
+  if (!views.size) {
+    clearInterval(viewTick);
+    viewTick = 0;
+  }
 }
 
 // After a decode error or a backlog: start again from the next key frame.
-function resetDecoder() {
-  if (view.id == null) return;
-  try { view.decoder && view.decoder.state !== 'closed' && view.decoder.reset(); } catch (_) { /* gone */ }
-  try { view.decoder.configure({ codec: view.codec, optimizeForLatency: true }); } catch (_) { /* gone */ }
-  view.waitKey = true;
-  post({ cmd: 'voip.keyframe', id: view.id });
+function resetDecoder(id) {
+  const vw = views.get(id);
+  if (!vw) return;
+  try { vw.decoder && vw.decoder.state !== 'closed' && vw.decoder.reset(); } catch (_) { /* gone */ }
+  try { vw.decoder.configure({ codec: vw.codec, optimizeForLatency: true }); } catch (_) { /* gone */ }
+  vw.waitKey = true;
+  post({ cmd: 'voip.keyframe', id });
 }
 
 function onVideo(msg) {
-  if (msg.from !== view.id || !view.decoder || view.decoder.state === 'closed') return;
-  if (view.waitKey && !msg.key) return;
-  if (view.decoder.decodeQueueSize > 8) return resetDecoder();
-  view.waitKey = false;
+  const vw = views.get(msg.from);
+  if (!vw || !vw.decoder || vw.decoder.state === 'closed') return;
+  if (vw.waitKey && !msg.key) return;
+  if (vw.decoder.decodeQueueSize > 8) return resetDecoder(msg.from);
+  vw.waitKey = false;
   const data = unb64(msg.data);
-  view.bytes += data.length;
+  vw.bytes += data.length;
   try {
-    view.decoder.decode(new EncodedVideoChunk({ type: msg.key ? 'key' : 'delta', timestamp: msg.ts, data }));
+    vw.decoder.decode(new EncodedVideoChunk({ type: msg.key ? 'key' : 'delta', timestamp: msg.ts, data }));
   } catch (_) {
-    resetDecoder();
+    resetDecoder(msg.from);
   }
 }
 
-function renderScreen(v) {
-  // Follow what the room says: stop viewing a share that ended.
-  const target = v.watching != null ? v.members.find((m) => m.id === v.watching && m.screen) : null;
-  if (target && view.id !== target.id) openViewer(target);
-  if (!target && view.id != null) closeViewer();
-  if (target) {
-    hide($('stage-vol-wrap'), !target.screen.audio);
-    hide($('stage-paused'), !target.screen.paused);
-    const what = target.screen.label ? ` · ${target.screen.label}` : '';
-    $('stage-title').textContent = `${target.name}'s screen${what}`;
+function shareVol(v, id) {
+  const vol = v.shareVolume && v.shareVolume[id] != null ? v.shareVolume[id] : 1;
+  return { vol, muted: (v.shareMuted || []).includes(id) };
+}
+
+function renderStreams(v) {
+  const watching = (Array.isArray(v.watching) ? v.watching : v.watching != null ? [v.watching] : [])
+    .map((id) => v.members.find((m) => m.id === id && m.screen)).filter(Boolean);
+  for (const id of [...views.keys()]) {
+    if (!watching.some((m) => m.id === id)) closeViewer(id);
   }
-  if (document.activeElement !== $('stage-vol')) $('stage-vol').value = Math.round((v.shareVolume ?? 1) * 100);
+  for (const m of watching) {
+    if (!views.has(m.id)) openViewer(m);
+    const vw = views.get(m.id);
+    vw.m = m;
+    const el = vw.el;
+    el.querySelector('.stream-title').textContent = streamTitle(m);
+    hide(el.querySelector('.stream-paused'), !m.screen.paused);
+    // Sound controls: only for a stream with sound.
+    const { vol, muted } = shareVol(v, m.id);
+    const sv = el.querySelector('.stream-vol');
+    sv.classList.toggle('off', !m.screen.audio);
+    sv.title = m.screen.audio ? 'The stream\'s sound, for you only' : 'This stream has no sound';
+    const mb = el.querySelector('[data-act="mute"]');
+    mb.innerHTML = muted || !m.screen.audio ? ICON_SPEAKER_OFF : ICON_SPEAKER;
+    mb.title = muted ? 'Unmute the stream' : 'Mute the stream';
+    mb.classList.toggle('active', muted);
+    mb.disabled = !m.screen.audio;
+    const range = el.querySelector('[data-act="vol"]');
+    range.disabled = !m.screen.audio;
+    if (document.activeElement !== range) range.value = Math.round((muted ? 0 : vol) * 100);
+    el.querySelector('.stream-vol-val').textContent = `${muted ? 0 : Math.round(vol * 100)}%`;
+  }
+  renderPins();
+  $('voip-stage').dataset.count = String(watching.length);
+  hide($('voip-stage'), !watching.length);
+}
+
+function renderScreen(v) {
+  renderStreams(v);
   renderNative(v);
   // If the room dropped our share (we left, it ended), stop capturing.
   if (ss.running && !v.sharing && v.st !== 'live') stopShare();
@@ -2037,25 +2419,91 @@ function renderScreen(v) {
 document.getElementById('page-voip').addEventListener('click', (e) => {
   const w = e.target.closest('[data-watch]');
   if (!w) return;
-  const id = w.dataset.watch === '' ? null : Number(w.dataset.watch);
-  post({ cmd: 'voip.watch', id });
+  const id = Number(w.dataset.watch);
+  const on = !(voipState && (voipState.watching || []).includes(id));
+  post({ cmd: 'voip.watch', id, on });
 });
-$('stage-stop').addEventListener('click', () => post({ cmd: 'voip.watch', id: null }));
-$('stage-vol').addEventListener('input', (e) => post({ cmd: 'voip.shareVolume', volume: Number(e.target.value) / 100 }));
-/* Full screen: the stream fills the window and the window goes borderless
-   full screen. Double-click the picture or press the button; Esc or
-   double-click again comes back. */
-function setTheater(on) {
+
+$('voip-stage').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-act]');
+  const pane = e.target.closest('[data-stream]');
+  if (!b || !pane) return;
+  const id = Number(pane.dataset.stream);
+  const vw = views.get(id);
+  switch (b.dataset.act) {
+    case 'close': post({ cmd: 'voip.watch', id, on: false }); break;
+    case 'full': setTheater(pane.classList.contains('full') ? null : id); break;
+    case 'popout': popOut(vw); break;
+    case 'popin': popIn(vw); break;
+    case 'pin': post({ cmd: 'overlay.pin', id }); break;
+    case 'mute': {
+      const { muted } = shareVol(voipState, id);
+      post({ cmd: 'voip.shareVolume', id, muted: !muted });
+      break;
+    }
+    default:
+  }
+});
+$('voip-stage').addEventListener('input', (e) => {
+  if (e.target.dataset.act !== 'vol') return;
+  const id = Number(e.target.closest('[data-stream]').dataset.stream);
+  const vol = Number(e.target.value) / 100;
+  e.target.closest('.stream-vol').querySelector('.stream-vol-val').textContent = `${Math.round(vol * 100)}%`;
+  // Dragging the slider up unmutes, like everywhere else.
+  post({ cmd: 'voip.shareVolume', id, volume: vol, muted: vol === 0 });
+});
+$('voip-stage').addEventListener('dblclick', (e) => {
+  const pane = e.target.closest('[data-stream]');
+  if (pane && !e.target.closest('.stream-bar')) setTheater(pane.classList.contains('full') ? null : Number(pane.dataset.stream));
+});
+
+/* Full screen: one stream fills the window and the window goes borderless
+   full screen. Esc or double-click again comes back. */
+function setTheater(id) {
+  for (const vw of views.values()) vw.el.classList.toggle('full', vw.m.id === id);
+  const on = id != null && views.has(id);
   document.documentElement.classList.toggle('theater', on);
-  $('stage-bar-title').textContent = $('stage-title').textContent;
   post({ cmd: 'window.fullscreen', on });
 }
-$('stage-full').addEventListener('click', () => setTheater(true));
-$('stage-exit').addEventListener('click', () => setTheater(false));
-$('stage-view').addEventListener('dblclick', () => setTheater(!document.documentElement.classList.contains('theater')));
 window.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && document.documentElement.classList.contains('theater')) setTheater(false);
+  if (e.key === 'Escape' && document.documentElement.classList.contains('theater')) setTheater(null);
 });
+
+/* Pop-out: the stream plays in the system's own floating picture-in-picture
+   window, which stays on top of other apps. The canvas feeds it. */
+async function popOut(vw) {
+  if (!vw) return;
+  const video = vw.el.querySelector('.pip-src');
+  try {
+    if (!video.srcObject) video.srcObject = vw.canvas.captureStream();
+    await video.play();
+    if (video.requestPictureInPicture) {
+      await video.requestPictureInPicture();
+    } else if (video.webkitSetPresentationMode) {
+      video.webkitSetPresentationMode('picture-in-picture');
+    } else {
+      throw new Error('no picture-in-picture');
+    }
+    vw.el.classList.add('popped');
+    hide(vw.el.querySelector('.stream-popped'), false);
+    const back = () => popIn(vw);
+    video.addEventListener('leavepictureinpicture', back, { once: true });
+    video.addEventListener('webkitpresentationmodechanged', () => { if (video.webkitPresentationMode !== 'picture-in-picture') back(); });
+  } catch (_) {
+    shareError('This computer can\'t pop the stream out into its own window. Try full screen instead.');
+  }
+}
+
+function popIn(vw) {
+  if (!vw) return;
+  const video = vw.el.querySelector('.pip-src');
+  try {
+    if (document.pictureInPictureElement === video) document.exitPictureInPicture();
+    else if (video.webkitPresentationMode === 'picture-in-picture') video.webkitSetPresentationMode('inline');
+  } catch (_) { /* already back */ }
+  vw.el.classList.remove('popped');
+  hide(vw.el.querySelector('.stream-popped'), true);
+}
 
 /* ---------------------------------------------------- right-click menu */
 
@@ -2099,6 +2547,11 @@ function openMenu(m, x, y) {
   } else {
     parts.push('<div class="ctx-note">That\'s you. Use Mute and Deafen in the voice panel.</div>');
   }
+  const chans = v.channels || [];
+  if (v.isHost && chans.length > 1) {
+    const others = chans.filter((c) => c.id !== (m.channel || 1));
+    parts.push(`<div class="ctx-sep"></div><div class="ctx-head">Move to</div>${others.map((c) => `<button class="ctx-item" data-move="${c.id}">${esc(c.name)}</button>`).join('')}`);
+  }
   if (v.isHost && !m.host) {
     parts.push(`
       <div class="ctx-sep"></div>
@@ -2128,6 +2581,12 @@ function openMenu(m, x, y) {
 }
 
 menu.addEventListener('click', (e) => {
+  const mv = e.target.closest('[data-move]');
+  if (mv) {
+    post({ cmd: 'voip.channels', action: 'move', id: Number(menu.dataset.member), channel: Number(mv.dataset.move) });
+    closeMenu();
+    return;
+  }
   const b = e.target.closest('[data-mod]');
   if (!b) return;
   const id = Number(menu.dataset.member);
@@ -2463,6 +2922,9 @@ window.onHost = (msg) => {
     case 'voipLive':
       voipLive(msg);
       break;
+    case 'overlayConfig':
+      onOverlayConfig(msg);
+      break;
     case 'video':
       onVideo(msg);
       break;
@@ -2471,6 +2933,15 @@ window.onHost = (msg) => {
       break;
     case 'shareSources':
       onSources(msg);
+      break;
+    case 'shareThumb':
+      onThumb(msg);
+      break;
+    case 'voipThumb':
+      onMemberThumb(msg);
+      break;
+    case 'voipRing':
+      onRing(msg);
       break;
     case 'preview':
       onPreview(msg);
@@ -2526,7 +2997,87 @@ document.addEventListener('contextmenu', (e) => { if (!e.target.closest('input, 
 
 /* Opened as a plain page (no host), show a sample state so the layout can be
    checked in a browser. Never runs inside the app. */
-function demo() {}
+/* --------------------------------------------------------------- settings */
+
+document.querySelectorAll('.set-tab').forEach((t) => t.addEventListener('click', () => {
+  document.querySelectorAll('.set-tab').forEach((x) => x.classList.toggle('on', x === t));
+  document.querySelectorAll('.set-pane').forEach((p) => p.classList.toggle('on', p.id === `set-${t.dataset.set}`));
+}));
+$('about-version').textContent = BOOT.version ? `v${BOOT.version}` : '';
+$('about-tailcat').textContent = BOOT.tailcat || '';
+$('about-data').textContent = BOOT.dataDir || '';
+
+/* The overlay's settings live in the app (it owns the overlay window and the
+   hotkey); this page shows them and sends changes. */
+let ov = {
+  config: { enabled: false, hotkey: 'shift+grave', showVoice: true, names: 'always', streamOpacity: 1, hideFromCapture: true },
+  supported: true,
+  hotkeys: [{ id: 'shift+grave', label: 'Shift + `' }, { id: 'ctrl+grave', label: 'Ctrl + `' }, { id: 'alt+grave', label: 'Alt + `' }, { id: 'ctrl+shift+o', label: 'Ctrl + Shift + O' }],
+  hotkeyError: '',
+  pinned: null,
+};
+
+function ovSet(change) {
+  post({ cmd: 'overlay.config', config: change });
+}
+
+function onOverlayConfig(msg) {
+  ov = { ...ov, ...msg };
+  const c = ov.config;
+  $('ov-on').checked = !!c.enabled;
+  $('ov-on').disabled = !ov.supported;
+  hide($('ov-unsupported'), ov.supported);
+  $('ov-rows').classList.toggle('off', !c.enabled || !ov.supported);
+  const sel = $('ov-hotkey');
+  const opts = ov.hotkeys.map((h) => `<option value="${esc(h.id)}">${esc(h.label)}</option>`).join('');
+  if (sel.dataset.opts !== opts) {
+    sel.innerHTML = opts;
+    sel.dataset.opts = opts;
+  }
+  sel.value = c.hotkey;
+  $('ov-hk-err').textContent = ov.hotkeyError || '';
+  $('ov-voice').checked = !!c.showVoice;
+  $('ov-names').value = c.names;
+  if (document.activeElement !== $('ov-opacity')) $('ov-opacity').value = Math.round(c.streamOpacity * 100);
+  $('ov-opacity-val').textContent = `${Math.round(c.streamOpacity * 100)}%`;
+  $('ov-capture').checked = !!c.hideFromCapture;
+  renderPins();
+}
+
+function renderPins() {
+  document.querySelectorAll('#voip-stage .stream').forEach((el) => {
+    const b = el.querySelector('[data-act="pin"]');
+    if (!b) return;
+    const on = ov.pinned === Number(el.dataset.stream);
+    hide(b, !(ov.config.enabled && ov.supported));
+    b.classList.toggle('pinned', on);
+    b.title = on ? 'Unpin from over your game' : 'Pin over your game (overlay)';
+  });
+}
+
+$('ov-on').addEventListener('change', () => ovSet({ enabled: $('ov-on').checked }));
+$('ov-hotkey').addEventListener('change', () => ovSet({ hotkey: $('ov-hotkey').value }));
+$('ov-voice').addEventListener('change', () => ovSet({ showVoice: $('ov-voice').checked }));
+$('ov-names').addEventListener('change', () => ovSet({ names: $('ov-names').value }));
+$('ov-capture').addEventListener('change', () => ovSet({ hideFromCapture: $('ov-capture').checked }));
+$('ov-opacity').addEventListener('input', () => {
+  $('ov-opacity-val').textContent = `${$('ov-opacity').value}%`;
+  ovSet({ streamOpacity: Number($('ov-opacity').value) / 100 });
+});
+$('ov-open').addEventListener('click', () => post({ cmd: 'overlay.open' }));
+$('ov-reset').addEventListener('click', () => post({ cmd: 'overlay.reset' }));
+onOverlayConfig(ov);
+
+function demo(msg) {
+  // Settings work in the browser preview too.
+  if (msg && msg.cmd === 'overlay.config') {
+    ov = { ...ov, config: { ...ov.config, ...msg.config } };
+    onOverlayConfig(ov);
+  } else if (msg && msg.cmd === 'overlay.pin') {
+    ov = { ...ov, pinned: ov.pinned === msg.id ? null : msg.id };
+    onOverlayConfig(ov);
+  }
+}
 
 if (window.ipc) {
   post({ cmd: 'ready', origin: `${location.origin} secure=${window.isSecureContext} encoder=${!!window.VideoEncoder} capture=${!!(navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia)}` });
@@ -2570,10 +3121,13 @@ if (window.ipc) {
       downloads: { 7: { st: 'downloading', got: 5242880, size: 12582912, error: '' } },
       previews: [], gains: { 3: 0.6 },
       members: [
-        { id: 1, name: 'Sam', host: true, voice: true, muted: false, deaf: false, smuted: false, path: 'host', rtt: null, screen: null },
-        { id: 2, name: 'Alex Rivera', host: false, voice: true, muted: false, deaf: false, smuted: false, path: 'direct', rtt: 24, screen: { w: 1920, h: 1080, fps: 30, codec: 'avc1.640028' } },
-        { id: 3, name: 'Jo', host: false, voice: true, muted: false, deaf: false, smuted: true, path: 'relay', rtt: 88, screen: null },
+        { id: 1, name: 'Sam', host: true, voice: true, muted: false, deaf: false, smuted: false, path: 'host', rtt: null, screen: null, channel: 1 },
+        { id: 2, name: 'Alex Rivera', host: false, voice: true, muted: false, deaf: false, smuted: false, path: 'direct', rtt: 24, screen: { w: 1920, h: 1080, fps: 30, codec: 'avc1.640028', audio: true, label: 'Minecraft' }, watchers: 2, channel: 1 },
+        { id: 3, name: 'Jo', host: false, voice: true, muted: false, deaf: false, smuted: true, path: 'relay', rtt: 88, screen: null, channel: 1 },
+        { id: 4, name: 'Priya', host: false, voice: true, muted: false, deaf: false, smuted: false, path: 'direct', rtt: 31, screen: null, channel: 5 },
+        { id: 5, name: 'Kit', host: false, voice: false, muted: false, deaf: false, smuted: false, path: 'relay', rtt: 64, screen: null, channel: 1 },
       ],
+      channels: [{ id: 1, name: 'General' }, { id: 5, name: 'Raid team' }], channel: 1, shareVolume: {}, shareMuted: [],
       chat: [
         { system: true, text: 'Alex Rivera joined the room', ts: 1794443000 },
         { from: 2, name: 'Alex Rivera', text: 'yo, server is up?', ts: 1794443030 },

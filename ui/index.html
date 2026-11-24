@@ -63,6 +63,13 @@
             Mounts
             <span class="badge" id="mounts-badge"></span>
           </button>
+          <button class="chip" data-page="settings" title="Settings for all of Portside">
+            <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <circle cx="8" cy="8" r="2.3" stroke="currentColor" stroke-width="1.5"/>
+              <path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.4 3.4l1.4 1.4M11.2 11.2l1.4 1.4M3.4 12.6l1.4-1.4M11.2 4.8l1.4-1.4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+            </svg>
+            Settings
+          </button>
         </nav>
       </div>
 
@@ -552,34 +559,70 @@
               </div>
             </div>
 
-            <!-- Someone's screen, while you watch it. -->
-            <div class="card stage hide" id="voip-stage">
-              <div class="stage-head">
-                <span class="live-dot"></span>
-                <span class="stage-title" id="stage-title"></span>
-                <span class="meta" id="stage-stats"></span>
-                <span class="grow"></span>
-                <label class="stage-vol hide" id="stage-vol-wrap" title="The stream's sound, for you only">
-                  <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M2.5 6h2.5l3.5-3v10l-3.5-3H2.5z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/><path d="M11 5.5a3.5 3.5 0 0 1 0 5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
-                  <input type="range" id="stage-vol" min="0" max="200" value="100">
-                </label>
-                <button class="btn small" id="stage-full">Full screen</button>
-                <button class="btn small danger" id="stage-stop">Stop watching</button>
-              </div>
-              <div class="stage-view" id="stage-view" title="Double-click for full screen">
-                <canvas id="stage-canvas"></canvas>
-                <div class="stage-wait" id="stage-wait">Waiting for the picture…</div>
-                <div class="stage-paused hide" id="stage-paused">The shared window is minimized. The picture comes back when it's restored.</div>
-                <div class="stage-bar">
-                  <span id="stage-bar-title"></span>
-                  <span class="grow"></span>
-                  <button class="btn small" id="stage-exit">Exit full screen (Esc)</button>
+            <div class="roomgrid">
+              <!-- Voice on the left (who's in it, the stream you watch), chat on the right. -->
+              <div class="voicecol">
+                <!-- The streams you're watching (up to four), side by side. -->
+                <div class="stages hide" id="voip-stage"></div>
+
+                <div class="card voicecard">
+                  <div class="card-head">
+                    <h3>Voice</h3>
+                    <span class="row">
+                      <span class="meta" id="voip-voice-count"></span>
+                      <button class="iconbtn" id="vs-open" title="Voice settings">
+                        <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                          <path d="M13.2 8H15.0M2.8 8H1.0M10.6 12.5l.9 1.56M5.4 3.5l-.9-1.56M10.6 3.5l.9-1.56M5.4 12.5l-.9 1.56" stroke="currentColor" stroke-width="2.1" stroke-linecap="butt"/>
+                          <circle cx="8" cy="8" r="4.2" stroke="currentColor" stroke-width="2.4"/>
+                        </svg>
+                      </button>
+                    </span>
+                  </div>
+
+                  <!-- The room's voice channels: join one, or (the host) add more. -->
+                  <div class="vchannels" id="voip-channels"></div>
+
+                  <!-- Everyone in your voice channel, a tile each; the ring lights up while they talk. -->
+                  <div class="tiles" id="voip-invoice"></div>
+
+                  <div class="callbar">
+                    <button class="btn primary" id="voip-voice-join">Join voice</button>
+                    <button class="btn toggle" id="voip-mute" title="Mute your microphone">Mute</button>
+                    <button class="btn toggle" id="voip-deaf" title="Mute everyone else, and your mic">Deafen</button>
+                    <span class="sharerow" id="ss-row">
+                      <button class="btn" id="ss-open" title="Pick a screen or window to share">
+                        <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><rect x="1.5" y="2.5" width="13" height="9" rx="1.5" stroke="currentColor" stroke-width="1.4"/><path d="M5.5 14h5M8 11.5V14" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+                        Share screen
+                      </button>
+                    </span>
+                    <button class="btn danger" id="voip-voice-leave">Leave voice</button>
+                  </div>
+                  <div class="meterrow" id="voip-meterrow">
+                    <span class="meter"><span class="meter-bar" id="voip-meter"></span></span>
+                    <span class="meta" id="voip-devices"></span>
+                  </div>
+                  <p class="warn" id="voip-voice-error"></p>
+                  <p class="warn" id="voip-media-state"></p>
+                  <p class="warn" id="voip-room-notice"></p>
+
+                  <div class="livebox hide" id="ss-live">
+                    <video id="ss-preview" muted autoplay playsinline></video>
+                    <canvas id="ss-preview-canvas" class="hide"></canvas>
+                    <div class="live-info">
+                      <span class="live-tag">LIVE</span>
+                      <span class="meta" id="ss-stats"></span>
+                    </div>
+                    <button class="btn small danger" id="ss-stop">Stop sharing</button>
+                  </div>
+                  <p class="warn" id="ss-error"></p>
+                  <p class="warn" id="ss-notice"></p>
+
+                  <span class="field-label">In the room</span>
+                  <div class="people" id="voip-members"></div>
                 </div>
               </div>
-            </div>
 
-            <div class="roomgrid">
-              <div class="card chatcard">
+              <div class="card chatcard" id="voip-chatcard">
                 <div class="card-head">
                   <h3># chat</h3>
                   <span class="meta">Only people in this room see it</span>
@@ -595,109 +638,6 @@
                 </form>
               </div>
 
-              <div class="card voicecard">
-                <div class="card-head">
-                  <h3>Voice</h3>
-                  <span class="row">
-                    <span class="meta" id="voip-voice-count"></span>
-                    <button class="iconbtn" id="vs-open" title="Voice settings">
-                      <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                        <path d="M13.2 8H15.0M2.8 8H1.0M10.6 12.5l.9 1.56M5.4 3.5l-.9-1.56M10.6 3.5l.9-1.56M5.4 12.5l-.9 1.56" stroke="currentColor" stroke-width="2.1" stroke-linecap="butt"/>
-                        <circle cx="8" cy="8" r="4.2" stroke="currentColor" stroke-width="2.4"/>
-                      </svg>
-                    </button>
-                  </span>
-                </div>
-                <div class="voicectl">
-                  <button class="btn primary" id="voip-voice-join">Join voice</button>
-                  <button class="btn danger" id="voip-voice-leave">Leave voice</button>
-                  <button class="btn toggle" id="voip-mute" title="Mute your microphone">Mute</button>
-                  <button class="btn toggle" id="voip-deaf" title="Mute everyone else, and your mic">Deafen</button>
-                </div>
-                <div class="meterrow" id="voip-meterrow">
-                  <span class="meter"><span class="meter-bar" id="voip-meter"></span></span>
-                  <span class="meta" id="voip-devices"></span>
-                </div>
-                <p class="warn" id="voip-voice-error"></p>
-                <p class="warn" id="voip-media-state"></p>
-                <p class="warn" id="voip-room-notice"></p>
-
-                <!-- Screen share: pick a screen or window, sound, size and frame
-                     rate, then go live. Portside captures and encodes it itself. -->
-                <div class="sharerow" id="ss-row">
-                  <button class="btn" id="ss-open">
-                    <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><rect x="1.5" y="2.5" width="13" height="9" rx="1.5" stroke="currentColor" stroke-width="1.4"/><path d="M5.5 14h5M8 11.5V14" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
-                    Share screen
-                  </button>
-                </div>
-                <div class="sharebox hide" id="ss-box">
-                  <div class="ss-pick" id="ss-pick">
-                    <div class="ss-pick-head">
-                      <div class="seg" id="ss-kind">
-                        <button class="seg-btn on" data-kind="screen">Screens</button>
-                        <button class="seg-btn" data-kind="window">Windows</button>
-                      </div>
-                      <span class="grow"></span>
-                      <button class="btn small ghost" id="ss-refresh" title="List screens and windows again">Refresh</button>
-                    </div>
-                    <div class="ss-sources" id="ss-sources"><div class="empty">Looking for screens and windows…</div></div>
-                    <label class="share-opt"><span class="field-label">Sound</span>
-                      <select class="input" id="ss-audio">
-                        <option value="off">No sound</option>
-                        <option value="app">Only this app's sound</option>
-                        <option value="system">All computer sound (except Portside)</option>
-                      </select>
-                    </label>
-                  </div>
-                  <label class="share-opt"><span class="field-label">Quality</span>
-                    <select class="input" id="ss-quality">
-                      <option value="text">Text and detail (sharpest, most data)</option>
-                      <option value="balanced" selected>Balanced</option>
-                      <option value="motion">Smooth motion (games, video)</option>
-                      <option value="saver">Data saver (slow connections)</option>
-                    </select>
-                  </label>
-                  <div class="share-opts">
-                    <label class="share-opt"><span class="field-label">Resolution</span><select class="input" id="ss-res"></select></label>
-                    <label class="share-opt"><span class="field-label">Frame rate</span>
-                      <select class="input" id="ss-fps">
-                        <option value="15">15 fps</option>
-                        <option value="30" selected>30 fps</option>
-                        <option value="60">60 fps</option>
-                      </select>
-                    </label>
-                  </div>
-                  <span class="meta" id="ss-est"></span>
-                  <label class="writebox">
-                    <input type="checkbox" id="ss-preview-on">
-                    <span class="set-text">
-                      <span class="set-title">Show me a preview</span>
-                      <span class="set-desc">What the others see, here. Off uses a little less of your computer.</span>
-                    </span>
-                  </label>
-                  <div class="row">
-                    <button class="btn primary" id="ss-go">Go live</button>
-                    <button class="btn ghost" id="ss-cancel">Cancel</button>
-                    <button class="btn ghost hide" id="ss-web" title="The web view's own screen picker: no sound, no window-only sharing">Use the basic picker</button>
-                  </div>
-                </div>
-                <div class="livebox hide" id="ss-live">
-                  <video id="ss-preview" muted autoplay playsinline></video>
-                  <canvas id="ss-preview-canvas" class="hide"></canvas>
-                  <div class="live-info">
-                    <span class="live-tag">LIVE</span>
-                    <span class="meta" id="ss-stats"></span>
-                  </div>
-                  <button class="btn small danger" id="ss-stop">Stop sharing</button>
-                </div>
-                <p class="warn" id="ss-error"></p>
-                <p class="warn" id="ss-notice"></p>
-
-                <span class="field-label">In voice</span>
-                <div class="people" id="voip-invoice"></div>
-                <span class="field-label">In the room</span>
-                <div class="people" id="voip-members"></div>
-              </div>
             </div>
             <div class="card logcard">
               <div class="logbox" data-log="voip"></div>
@@ -770,6 +710,107 @@
           </div>
         </div>
       </section>
+
+      <!-- Settings for the whole app. Each section is a tab on the left, so
+           more can be added over time. -->
+      <section id="page-settings" class="page">
+        <div class="column wide">
+          <div class="lib-head">
+            <h1 class="page-title">Settings</h1>
+          </div>
+          <div class="settings">
+            <nav class="set-nav" id="set-nav">
+              <button class="set-tab on" data-set="overlay">
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true"><rect x="1.5" y="2.5" width="13" height="10" rx="1.6" stroke="currentColor" stroke-width="1.4"/><rect x="3.5" y="4.5" width="4" height="3" rx=".6" fill="currentColor"/></svg>
+                Overlay
+              </button>
+              <button class="set-tab" data-set="about">
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true"><circle cx="8" cy="8" r="6.5" stroke="currentColor" stroke-width="1.4"/><path d="M8 7v4.2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><circle cx="8" cy="4.8" r=".9" fill="currentColor"/></svg>
+                About
+              </button>
+            </nav>
+
+            <div class="set-body">
+              <div class="set-pane on" id="set-overlay">
+                <div class="card">
+                  <div class="card-head">
+                    <h3>In-game overlay</h3>
+                    <input type="checkbox" id="ov-on" class="switch" aria-label="Turn the overlay on">
+                  </div>
+                  <p class="set-desc ov-lead">Shows who's talking in your voice channel, and a stream you pin, on top of
+                    your game. Press the hotkey to open it: the game dims behind it while you move things, pin a
+                    stream or mute. Press it again and only your voice list and stream stay, with nothing behind them.
+                    Works with games in <b>windowed</b> or <b>borderless windowed</b> mode, not exclusive full screen.</p>
+                  <div class="ov-safe">
+                    <svg width="18" height="18" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M8 1.5 2.5 3.6v4c0 3.3 2.3 5.9 5.5 6.9 3.2-1 5.5-3.6 5.5-6.9v-4z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/><path d="m5.6 8 1.7 1.7 3.2-3.4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                    <span><b>Built to stay clear of anti-cheat.</b> The overlay is Portside's own see-through window
+                      sitting on top. Nothing is injected into the game, no keyboard hooks are installed, and the game's
+                      memory and drawing are never touched. It's off until you turn it on.</span>
+                  </div>
+                  <p class="set-desc ov-unsupported hide" id="ov-unsupported">The overlay is available on Windows and macOS.</p>
+
+                  <div class="ov-rows" id="ov-rows">
+                    <div class="set-row">
+                      <span class="set-text">
+                        <span class="set-title">Hotkey</span>
+                        <span class="set-desc">Opens and closes the overlay while you're in a game.</span>
+                        <span class="err" id="ov-hk-err"></span>
+                      </span>
+                      <select class="input ov-select" id="ov-hotkey"></select>
+                    </div>
+                    <div class="set-row">
+                      <label class="set-text" for="ov-voice">
+                        <span class="set-title">Show people in your voice channel</span>
+                        <span class="set-desc">Their names, and a green ring when they talk.</span>
+                      </label>
+                      <input type="checkbox" id="ov-voice" class="switch">
+                    </div>
+                    <div class="set-row">
+                      <span class="set-text">
+                        <span class="set-title">Names</span>
+                        <span class="set-desc">Or keep it small: just the round pictures until someone talks.</span>
+                      </span>
+                      <select class="input ov-select" id="ov-names">
+                        <option value="always">Always show</option>
+                        <option value="talking">Only while talking</option>
+                      </select>
+                    </div>
+                    <div class="set-row">
+                      <span class="set-text">
+                        <span class="set-title">Pinned stream opacity</span>
+                        <span class="set-desc">Lower it to see your game through the stream. Pin one from the overlay, or with the pin on a stream in VOIP.</span>
+                      </span>
+                      <span class="ov-range"><input type="range" id="ov-opacity" min="20" max="100" step="5"><span id="ov-opacity-val">100%</span></span>
+                    </div>
+                    <div class="set-row">
+                      <label class="set-text" for="ov-capture">
+                        <span class="set-title">Hide the overlay from screen shares</span>
+                        <span class="set-desc">When you share your screen or record, people see the game, not the overlay.</span>
+                      </label>
+                      <input type="checkbox" id="ov-capture" class="switch">
+                    </div>
+                    <div class="actions">
+                      <button class="btn" id="ov-open">Open the overlay now</button>
+                      <button class="btn ghost" id="ov-reset">Reset positions</button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="set-pane" id="set-about">
+                <div class="card">
+                  <div class="card-head"><h3>About Portside</h3></div>
+                  <div class="about-grid">
+                    <span class="field-label">Version</span><span id="about-version"></span>
+                    <span class="field-label">TailCat</span><span id="about-tailcat"></span>
+                    <span class="field-label">Settings and data</span><span class="mono" id="about-data"></span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
     </main>
 
     <!-- An invite from the hub, shown on any tab. -->
@@ -778,6 +819,13 @@
       <span class="toast-text" id="toast-text"></span>
       <button class="btn small primary" id="toast-join">Join</button>
       <button class="btn small ghost" id="toast-dismiss">No</button>
+    </div>
+    <!-- Someone wants you in voice. -->
+    <div id="ring-toast" class="toast hide" role="status">
+      <span class="avatar small" id="ring-avatar"></span>
+      <span class="toast-text" id="ring-text"></span>
+      <button class="btn small primary" id="ring-join">Join voice</button>
+      <button class="btn small ghost" id="ring-dismiss">Not now</button>
     </div>
 
     <footer id="status">
@@ -854,6 +902,66 @@
     </div>
   </div>
 
+  <!-- Screen share picker: live previews of each screen and app window, then
+       sound and quality. Portside captures and encodes it itself. -->
+  <div class="modal hide" id="ss-box" role="dialog" aria-labelledby="ss-title">
+    <div class="modal-card sharecard">
+      <div class="card-head">
+        <h3 id="ss-title">Share your screen</h3>
+        <button class="iconbtn" id="ss-close" title="Close">
+          <svg width="11" height="11" viewBox="0 0 10 10"><path d="M2 2l6 6M8 2L2 8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+        </button>
+      </div>
+      <div class="ss-pick-head">
+        <div class="seg" id="ss-kind">
+          <button class="seg-btn" data-kind="window">Applications</button>
+          <button class="seg-btn on" data-kind="screen">Screens</button>
+        </div>
+        <span class="grow"></span>
+        <label class="ss-all" id="ss-all-wrap" title="Also list background, system and untitled windows">
+          <input type="checkbox" id="ss-all"> Show all windows
+        </label>
+        <button class="btn small ghost" id="ss-refresh" title="List screens and windows again">Refresh</button>
+      </div>
+      <div class="ss-sources" id="ss-sources"><div class="empty">Looking for screens and windows…</div></div>
+      <div class="ss-opts">
+        <label class="share-opt"><span class="field-label">Sound</span>
+          <select class="input" id="ss-audio">
+            <option value="off">No sound</option>
+            <option value="app">Only this app's sound</option>
+            <option value="system">All computer sound (except Portside)</option>
+          </select>
+        </label>
+        <label class="share-opt"><span class="field-label">Quality</span>
+          <select class="input" id="ss-quality">
+            <option value="text">Text and detail (sharpest, most data)</option>
+            <option value="balanced" selected>Balanced</option>
+            <option value="motion">Smooth motion (games, video)</option>
+            <option value="saver">Data saver (slow connections)</option>
+          </select>
+        </label>
+        <label class="share-opt"><span class="field-label">Resolution</span><select class="input" id="ss-res"></select></label>
+        <label class="share-opt"><span class="field-label">Frame rate</span>
+          <select class="input" id="ss-fps">
+            <option value="15">15 fps</option>
+            <option value="30" selected>30 fps</option>
+            <option value="60">60 fps</option>
+          </select>
+        </label>
+      </div>
+      <span class="meta" id="ss-est"></span>
+      <div class="ss-foot">
+        <label class="ss-all">
+          <input type="checkbox" id="ss-preview-on"> Show me a preview of what the others see
+        </label>
+        <span class="grow"></span>
+        <button class="btn ghost hide" id="ss-web" title="The web view's own screen picker: no sound, no window-only sharing">Use the basic picker</button>
+        <button class="btn ghost" id="ss-cancel">Cancel</button>
+        <button class="btn primary" id="ss-go">Go live</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Voice settings, from the gear in the voice panel. Yours only. -->
   <div class="modal hide" id="vs-modal" role="dialog" aria-labelledby="vs-title">
     <div class="modal-card">
@@ -895,6 +1003,26 @@
             <span class="set-desc">Removes background noise like fans, typing and traffic.</span>
           </label>
           <input type="checkbox" id="vs-ns" class="switch" checked>
+        </div>
+      </div>
+
+      <div class="vs-row">
+        <div class="set-row">
+          <label class="set-text" for="vs-ec">
+            <span class="set-title">Echo cancelling</span>
+            <span class="set-desc">Stops others hearing themselves when you use speakers instead of headphones.</span>
+          </label>
+          <input type="checkbox" id="vs-ec" class="switch" checked>
+        </div>
+      </div>
+
+      <div class="vs-row">
+        <div class="set-row">
+          <label class="set-text" for="vs-sounds">
+            <span class="set-title">Join and leave sounds</span>
+            <span class="set-desc">A short chime when someone joins or leaves your voice channel, and a ring when someone calls you in.</span>
+          </label>
+          <input type="checkbox" id="vs-sounds" class="switch" checked>
         </div>
       </div>
 

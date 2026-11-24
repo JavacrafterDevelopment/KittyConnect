@@ -41,6 +41,7 @@ mod platform {
     pub fn audio_modes() -> Vec<&'static str> {
         Vec::new()
     }
+    pub fn thumbnails(_: &[String], _: bool, _: &mut dyn FnMut(&str, Thumb)) {}
 }
 
 use std::num::NonZeroU32;
@@ -66,6 +67,10 @@ pub struct Source {
     pub w: u32,
     pub h: u32,
     pub minimized: bool,
+    /// One of the windows people actually share: an app's own main window
+    /// (what Alt+Tab or the Dock shows), not a background, system, overlay,
+    /// tiny or untitled one. The picker shows only these unless asked for all.
+    pub main: bool,
 }
 
 impl Source {
@@ -73,8 +78,134 @@ impl Source {
         json!({
             "id": self.id, "kind": if self.screen { "screen" } else { "window" },
             "title": self.title, "app": self.app, "w": self.w, "h": self.h, "minimized": self.minimized,
+            "main": self.screen || self.main,
         })
     }
+}
+
+/// What the platforms know about a window, for [`is_main_window`].
+pub struct WindowFacts<'a> {
+    pub title: &'a str,
+    /// The program's file name (Windows) or the app's name (macOS).
+    pub app: &'a str,
+    pub w: u32,
+    pub h: u32,
+    /// The system itself counts it as an app window: Alt+Tab would show it
+    /// (Windows), or its app is a regular Dock app (macOS).
+    pub app_window: bool,
+    /// Click-through or invisible: a game overlay, a notification layer.
+    pub overlay: bool,
+}
+
+/// Parts of the system, and helpers that put up windows nobody shares
+/// (lower case, no ".exe").
+const BACKGROUND_APPS: &[&str] = &[
+    // Windows shell and input.
+    "textinputhost", "shellexperiencehost", "startmenuexperiencehost", "searchhost", "searchapp", "searchui",
+    "lockapp", "sihost", "ctfmon", "dwm", "csrss", "winlogon", "fontdrvhost", "rundll32", "dllhost",
+    "shellhost", "widgets", "widgetservice", "crossdeviceresume", "securityhealthsystray",
+    // Overlays and their helpers.
+    "nvidia overlay", "nvidia share", "nvcontainer", "nvsphelper64", "gamebar", "gamebarftserver",
+    "gamebarpresencewriter", "xboxgamebarwidgets", "rtss", "rtsshooksloader64", "overwolf",
+    "crashpad_handler", "werfault",
+    // macOS.
+    "dock", "window server", "windowserver", "control center", "controlcenter", "notification center",
+    "notificationcenter", "spotlight", "systemuiserver", "wallpaper", "loginwindow", "screenshot",
+    "screencaptureui", "textinputmenuagent", "textinputswitcher", "universalaccessauthwarn", "window manager",
+    "windowmanager", "coreservicesuiagent", "usernotificationcenter",
+];
+
+/// Window titles that are the system's, whoever owns them.
+const BACKGROUND_TITLES: &[&str] = &[
+    "program manager", "windows input experience", "microsoft text input application", "default ime",
+    "msctfime ui", "nvidia geforce overlay", "task switching", "start", "search", "notification center",
+];
+
+/// The smallest window worth listing (in pixels).
+pub const MAIN_MIN_W: u32 = 160;
+pub const MAIN_MIN_H: u32 = 100;
+
+pub fn background_app(app: &str) -> bool {
+    let a = app.trim().to_ascii_lowercase();
+    let a = a.strip_suffix(".exe").unwrap_or(&a);
+    BACKGROUND_APPS.contains(&a)
+}
+
+/// Is this a window people would want to share: a browser, a game, an editor?
+/// (Like the lists other voice apps show, rather than every window there is.)
+pub fn is_main_window(f: &WindowFacts) -> bool {
+    let title = f.title.trim();
+    f.app_window
+        && !f.overlay
+        && !title.is_empty()
+        && f.w >= MAIN_MIN_W
+        && f.h >= MAIN_MIN_H
+        && !background_app(f.app)
+        && !BACKGROUND_TITLES.contains(&title.to_ascii_lowercase().as_str())
+}
+
+// ------------------------------------------------------------- previews
+
+/// A picture of what a source shows now, for the picker, and its app's icon.
+#[derive(Default)]
+pub struct Thumb {
+    /// JPEG, at most [`THUMB_W`]×[`THUMB_H`].
+    pub image: Option<Vec<u8>>,
+    /// PNG, [`ICON_SIZE`] square.
+    pub icon: Option<Vec<u8>>,
+}
+
+pub const THUMB_W: u32 = 400;
+pub const THUMB_H: u32 = 225;
+pub const ICON_SIZE: u32 = 32;
+
+/// Pictures of these sources, one call of `each` per source as soon as it's
+/// ready (slow windows don't hold the rest up). `icons`: also each app's icon.
+/// Nothing here goes on the network; the pictures only go to the page.
+pub fn thumbnails(ids: &[String], icons: bool, each: &mut dyn FnMut(&str, Thumb)) {
+    platform::thumbnails(ids, icons, each)
+}
+
+/// A preview's size: `src` shrunk to fit in `max_w`×`max_h`, same shape,
+/// never larger than the source.
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+pub fn thumb_size(src_w: u32, src_h: u32, max_w: u32, max_h: u32) -> (u32, u32) {
+    if src_w == 0 || src_h == 0 {
+        return (max_w.max(1), max_h.max(1));
+    }
+    let scale = (max_w as f64 / src_w as f64).min(max_h as f64 / src_h as f64).min(1.0);
+    (((src_w as f64 * scale).round() as u32).max(1), ((src_h as f64 * scale).round() as u32).max(1))
+}
+
+/// BGRA rows to BGR (what JPEG takes), dropping any row padding.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn bgra_to_bgr(px: &[u8], w: usize, h: usize, stride: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(w * h * 3);
+    for row in px.chunks(stride).take(h) {
+        for p in row[..w * 4].chunks_exact(4) {
+            out.extend_from_slice(&p[..3]);
+        }
+    }
+    out
+}
+
+/// Premultiplied BGRA (what Windows draws icons as) to straight BGRA (what
+/// PNG keeps). False if nothing has any alpha: an old icon with a mask
+/// instead, which is then drawn on a plain background.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn unpremultiply(px: &mut [u8]) -> bool {
+    if px.chunks_exact(4).all(|p| p[3] == 0) {
+        return false;
+    }
+    for p in px.chunks_exact_mut(4) {
+        let a = p[3] as u32;
+        if a != 0 && a != 255 {
+            for c in &mut p[..3] {
+                *c = ((*c as u32 * 255 + a / 2) / a).min(255) as u8;
+            }
+        }
+    }
+    true
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -381,6 +512,47 @@ mod tests {
                 assert!(!code.contains(b), "{name} mentions {b}");
             }
         }
+    }
+
+    #[test]
+    fn only_real_app_windows_are_main() {
+        let w = |title, app, w, h| WindowFacts { title, app, w, h, app_window: true, overlay: false };
+        assert!(is_main_window(&w("YouTube - Google Chrome", "chrome", 1600, 900)));
+        assert!(is_main_window(&w("Minecraft 1.21", "javaw", 854, 480)));
+        assert!(is_main_window(&w("Untitled - Notepad", "Notepad.exe", 800, 600)));
+        assert!(!is_main_window(&w("", "chrome", 1600, 900)), "untitled");
+        assert!(!is_main_window(&w("Tooltip", "chrome", 120, 40)), "tiny");
+        assert!(!is_main_window(&w("Program Manager", "explorer", 1920, 1080)), "the desktop");
+        assert!(!is_main_window(&w("NVIDIA GeForce Overlay", "NVIDIA Overlay", 1920, 1080)));
+        assert!(!is_main_window(&w("Windows Input Experience", "TextInputHost", 1920, 1080)));
+        assert!(!is_main_window(&w("Dock", "Dock", 1920, 80)));
+        assert!(!is_main_window(&w("Wallpaper-", "Wallpaper", 1920, 1080)));
+        assert!(!is_main_window(&WindowFacts { app_window: false, ..w("Hidden helper", "steam", 800, 600) }));
+        assert!(!is_main_window(&WindowFacts { overlay: true, ..w("Steam Overlay", "gameoverlayui", 1920, 1080) }));
+        assert!(background_app("SearchHost.exe"));
+        assert!(!background_app("explorer"), "File Explorer windows are real");
+    }
+
+    #[test]
+    fn previews_keep_the_shape_and_never_grow() {
+        assert_eq!(thumb_size(1920, 1080, 400, 225), (400, 225));
+        assert_eq!(thumb_size(1080, 1920, 400, 225), (127, 225));
+        assert_eq!(thumb_size(3440, 1440, 400, 225), (400, 167));
+        assert_eq!(thumb_size(200, 100, 400, 225), (200, 100));
+        assert_eq!(thumb_size(0, 0, 400, 225), (400, 225));
+    }
+
+    #[test]
+    fn pixel_helpers() {
+        // Two pixels a row, padded to 12 bytes.
+        let px = [1, 2, 3, 255, 4, 5, 6, 255, 0, 0, 0, 0, 7, 8, 9, 255, 10, 11, 12, 255, 0, 0, 0, 0];
+        assert_eq!(bgra_to_bgr(&px, 2, 2, 12), vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+        let mut icon = [64, 32, 0, 128, 0, 0, 0, 0, 255, 255, 255, 255];
+        assert!(unpremultiply(&mut icon));
+        assert_eq!(&icon[..4], &[128, 64, 0, 128]);
+        assert_eq!(&icon[8..], &[255, 255, 255, 255]);
+        let mut old = [10, 20, 30, 0];
+        assert!(!unpremultiply(&mut old), "no alpha at all");
     }
 
     #[test]

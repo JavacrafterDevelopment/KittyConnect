@@ -1,5 +1,6 @@
-//! The room a VOIP host runs: one text channel, one voice channel, screen
-//! shares, file attachments, and the list of who's here. It listens on
+//! The room a VOIP host runs: one text channel, voice channels (one to start
+//! with; the host can add more and move people between them), screen shares,
+//! file attachments, and the list of who's here. It listens on
 //! 127.0.0.1 only, TCP and UDP on the same port; friends reach it through
 //! `kc-voip serve` (TailCat), so every byte between members crosses the
 //! encrypted tunnel. The host joins their own room over loopback, which never
@@ -10,8 +11,9 @@
 //! registered their UDP address with the key from their welcome.
 //!
 //! Voice is relayed, not mixed: each speaker's packets go to everyone else in
-//! voice, and each member mixes what they receive. Screen video goes only to
-//! the members watching that share, and the room keeps the last second of it
+//! their voice channel, and each member mixes what they receive. Screen video
+//! goes only to the members watching that share (a member can watch up to
+//! [`MAX_WATCH`] at once), and the room keeps the last second of it
 //! to resend pieces a watcher missed. Each watcher (from 0.9) gets only the
 //! frame-rate layers their connection keeps up with, so one slow connection
 //! doesn't lower the picture for the others (see `media::Thinning`).
@@ -49,6 +51,16 @@ pub const PROTOCOL: u64 = 3;
 /// How much of each screen share the room keeps, to resend missed pieces.
 const VIDEO_KEEP: Duration = Duration::from_secs(1);
 const VIDEO_KEEP_BYTES: usize = 8 * 1024 * 1024;
+/// Shares one member can watch at once.
+pub const MAX_WATCH: usize = 4;
+/// Voice channels in one room.
+const MAX_CHANNELS: usize = 8;
+/// A sharer's preview picture for the others' tiles (base64 JPEG).
+const MAX_THUMB: usize = 96 * 1024;
+/// Ringing again waits this long.
+const RING_AGAIN: Duration = Duration::from_secs(8);
+/// The voice channel everyone starts in.
+pub const GENERAL: u16 = 1;
 /// Largest single attachment, and all attachments in one room together.
 pub const MAX_ATTACHMENT: u64 = 100 * 1024 * 1024;
 const MAX_ROOM_FILES: u64 = 1024 * 1024 * 1024;
@@ -71,8 +83,14 @@ struct Member {
     rtt: Option<u32>,
     /// Set while they're sharing their screen: size, frame rate, codec.
     screen: Option<Value>,
-    /// The member whose screen they're watching.
-    watching: Option<u16>,
+    /// The members whose screens they're watching (from 0.15 several; before, one).
+    watching: Vec<u16>,
+    /// Which voice channel they're in (or will be, when they join voice).
+    channel: u16,
+    /// The latest small picture of their share, for the others' tiles.
+    thumb: Option<String>,
+    /// When they last rang someone.
+    rang: Option<Instant>,
     /// When this sharer was last asked for a key frame.
     key_asked: Option<Instant>,
     /// Lets this member's files connection and UDP address attach to them.
@@ -86,11 +104,20 @@ struct Member {
     /// They understand frame-rate layers (0.9 and later), so they can be sent
     /// fewer frames when they fall behind. Older members get every frame.
     layers: bool,
-    /// What they're sent of the share they're watching.
-    thin: media::Thinning,
+    /// What they're sent of each share they're watching.
+    thin: HashMap<u16, media::Thinning>,
 }
 
 impl Member {
+    fn watches(&self, sharer: u16) -> bool {
+        self.watching.contains(&sharer)
+    }
+
+    fn unwatch(&mut self, sharer: u16) {
+        self.watching.retain(|w| *w != sharer);
+        self.thin.remove(&sharer);
+    }
+
     fn files(&self) -> SyncSender<Out> {
         self.files_tx.as_ref().map(|s| s.1.clone()).unwrap_or_else(|| self.tx.clone())
     }
@@ -149,6 +176,9 @@ struct Attachment {
 struct Room {
     name: String,
     members: Vec<Member>,
+    /// Voice channels: id and name. Never empty; [`GENERAL`] is always there.
+    channels: Vec<(u16, String)>,
+    next_channel: u16,
     history: VecDeque<Value>,
     next_id: u16,
     next_msg: u64,
@@ -212,6 +242,8 @@ impl RoomServer {
         let room = Arc::new(Mutex::new(Room {
             name: if name.is_empty() { "Hangout".into() } else { name },
             members: Vec::new(),
+            channels: vec![(GENERAL, "General".into())],
+            next_channel: GENERAL + 1,
             history: VecDeque::new(),
             next_id: 1,
             next_msg: 1,
@@ -267,7 +299,10 @@ fn members_json(room: &Room) -> Value {
             "id": m.id, "name": m.name, "host": m.host, "voice": m.voice,
             "muted": m.muted, "deaf": m.deaf, "smuted": m.server_muted,
             "path": m.path, "rtt": m.rtt, "screen": m.screen,
+            "channel": m.channel,
+            "watchers": if m.screen.is_some() { room.members.iter().filter(|o| o.watches(m.id)).count() } else { 0 },
         })).collect::<Vec<_>>(),
+        "channels": room.channels.iter().map(|(id, name)| json!({ "id": id, "name": name })).collect::<Vec<_>>(),
     })
 }
 
@@ -348,7 +383,8 @@ fn datagram(r: &mut Room, sock: &UdpSocket, src: SocketAddr, d: &[u8]) {
             out.push(media::VOICE);
             out.extend_from_slice(&id.to_be_bytes());
             out.extend_from_slice(&d[1..]);
-            for o in r.members.iter().filter(|o| o.id != id && o.voice && !o.deaf) {
+            let ch = m.channel;
+            for o in r.members.iter().filter(|o| o.id != id && o.voice && !o.deaf && o.channel == ch) {
                 if let Some(a) = o.udp {
                     let _ = sock.send_to(&out, a);
                 }
@@ -364,7 +400,7 @@ fn datagram(r: &mut Room, sock: &UdpSocket, src: SocketAddr, d: &[u8]) {
             out.push(media::SHARE_AUDIO);
             out.extend_from_slice(&id.to_be_bytes());
             out.extend_from_slice(&d[1..]);
-            for o in r.members.iter().filter(|o| o.watching == Some(id) && !o.deaf) {
+            for o in r.members.iter().filter(|o| o.watches(id) && !o.deaf) {
                 if let Some(a) = o.udp {
                     let _ = sock.send_to(&out, a);
                 }
@@ -373,7 +409,7 @@ fn datagram(r: &mut Room, sock: &UdpSocket, src: SocketAddr, d: &[u8]) {
         media::NACK if d.len() >= 7 => {
             let sharer = media::u16_at(d, 1);
             let frame = media::u32_at(d, 3);
-            let Some(to) = r.members[me].udp.filter(|_| r.members[me].watching == Some(sharer)) else { return };
+            let Some(to) = r.members[me].udp.filter(|_| r.members[me].watches(sharer)) else { return };
             let Some(s) = r.members.iter().find(|m| m.id == sharer) else { return };
             let Some(f) = s.video.frames.iter().find(|f| f.frame == frame) else { return };
             let wanted: Vec<usize> = d[7..].chunks_exact(2).map(|c| u16::from_be_bytes([c[0], c[1]]) as usize).collect();
@@ -389,12 +425,12 @@ fn datagram(r: &mut Room, sock: &UdpSocket, src: SocketAddr, d: &[u8]) {
         }
         media::REPORT if d.len() >= 11 => {
             let sharer = media::u16_at(d, 1);
-            if r.members[me].watching != Some(sharer) {
+            if !r.members[me].watches(sharer) {
                 return;
             }
             // How this watcher is doing decides what they're sent.
             if let Some((_, report)) = media::Report::decode(d).filter(|_| r.members[me].layers) {
-                r.members[me].thin.report(&report);
+                r.members[me].thin.entry(sharer).or_default().report(&report);
             }
             if let Some(a) = r.members.iter().find(|m| m.id == sharer && m.screen.is_some()).and_then(|m| m.udp) {
                 let mut out = d[..11].to_vec();
@@ -419,9 +455,9 @@ fn relay_video(room: &mut Room, sock: &UdpSocket, me: usize, d: &[u8]) {
     out.push(media::VIDEO);
     out.extend_from_slice(&id.to_be_bytes());
     out.extend_from_slice(&d[1..]);
-    for o in room.members.iter_mut().filter(|o| o.watching == Some(id)) {
+    for o in room.members.iter_mut().filter(|o| o.watches(id)) {
         // Only the layers this watcher keeps up with.
-        if o.layers && !o.thin.pass(frame, key, layer) {
+        if o.layers && !o.thin.entry(id).or_default().pass(frame, key, layer) {
             continue;
         }
         if let Some(a) = o.udp {
@@ -617,7 +653,10 @@ fn serve_member(stream: TcpStream, room: &Arc<Mutex<Room>>, host_token: &str) {
             path: if host { "host".into() } else { "unknown".into() },
             rtt: None,
             screen: None,
-            watching: None,
+            watching: Vec::new(),
+            channel: GENERAL,
+            thumb: None,
+            rang: None,
             key_asked: None,
             key: key.clone(),
             tx: tx.clone(),
@@ -625,11 +664,16 @@ fn serve_member(stream: TcpStream, room: &Arc<Mutex<Room>>, host_token: &str) {
             udp: None,
             video: VideoBuffer::default(),
             layers: hello["layers"] == true,
-            thin: media::Thinning::default(),
+            thin: HashMap::new(),
         });
         // "udp": voice and video go as UDP datagrams to this port.
         let welcome = json!({ "t": "welcome", "you": id, "name": name, "room": r.name, "history": r.history, "host": host, "key": key, "udp": true, "v": PROTOCOL });
         send(&tx, wire::json(&welcome));
+        for m in r.members.iter().filter(|m| m.screen.is_some()) {
+            if let Some(img) = &m.thumb {
+                send(&tx, wire::json(&json!({ "t": "thumb", "id": m.id, "img": img })));
+            }
+        }
         let members = members_json(&r);
         broadcast(&r, &members);
         system(&mut r, format!("{name} joined the room"));
@@ -664,11 +708,38 @@ fn serve_member(stream: TcpStream, room: &Arc<Mutex<Room>>, host_token: &str) {
             }
             "voice" => {
                 let on = msg["on"].as_bool().unwrap_or(false);
-                if r.members[me].voice != on {
+                // From 0.15: which channel (older members: the one they're in).
+                let ch = msg["channel"].as_u64().map(|c| c as u16).filter(|c| r.channels.iter().any(|(id, _)| id == c));
+                let moved = ch.is_some_and(|c| c != r.members[me].channel);
+                if let Some(c) = ch {
+                    r.members[me].channel = c;
+                }
+                if r.members[me].voice != on || moved {
                     r.members[me].voice = on;
                     let members = members_json(&r);
                     broadcast(&r, &members);
                 }
+            }
+            // Asks someone in the room to come into voice: they hear a ring.
+            "ring" => {
+                let target = msg["id"].as_u64().unwrap_or(0) as u16;
+                if r.members[me].rang.is_some_and(|t| t.elapsed() < RING_AGAIN) || target == id {
+                    continue;
+                }
+                r.members[me].rang = Some(Instant::now());
+                let (name, ch) = (r.members[me].name.clone(), r.members[me].channel);
+                if let Some(t) = r.members.iter().find(|m| m.id == target) {
+                    send(&t.tx, wire::json(&json!({ "t": "ring", "from": id, "name": name, "channel": ch })));
+                }
+            }
+            // A small picture of the sharer's screen, for everyone's tiles.
+            "thumb" => {
+                let img = msg["img"].as_str().unwrap_or("");
+                if r.members[me].screen.is_none() || img.len() > MAX_THUMB || !img.bytes().all(|b| b.is_ascii_alphanumeric() || b"+/=".contains(&b)) {
+                    continue;
+                }
+                r.members[me].thumb = Some(img.to_string());
+                broadcast(&r, &json!({ "t": "thumb", "id": id, "img": img }));
             }
             "mute" => {
                 r.members[me].muted = msg["muted"].as_bool().unwrap_or(false);
@@ -714,21 +785,35 @@ fn serve_member(stream: TcpStream, room: &Arc<Mutex<Room>>, host_token: &str) {
                     }
                 } else {
                     r.members[me].screen = None;
+                    r.members[me].thumb = None;
                     r.members[me].video.clear();
-                    for o in r.members.iter_mut().filter(|o| o.watching == Some(id)) {
-                        o.watching = None;
+                    for o in r.members.iter_mut() {
+                        o.unwatch(id);
                     }
                 }
                 let members = members_json(&r);
                 broadcast(&r, &members);
             }
             "watch" => {
-                let target = msg["id"].as_u64().map(|v| v as u16).filter(|t| *t != id);
-                r.members[me].watching = target;
-                r.members[me].thin = media::Thinning::default();
+                // From 0.15 "ids", several at once; before, "id" (one or none).
+                let mut wanted: Vec<u16> = match msg["ids"].as_array() {
+                    Some(a) => a.iter().filter_map(|v| v.as_u64()).map(|v| v as u16).collect(),
+                    None => msg["id"].as_u64().map(|v| v as u16).into_iter().collect(),
+                };
+                wanted.retain(|t| *t != id);
+                wanted.dedup();
+                wanted.truncate(MAX_WATCH);
+                let before = std::mem::take(&mut r.members[me].watching);
+                r.members[me].thin.retain(|s, _| wanted.contains(s));
+                r.members[me].watching = wanted.clone();
                 // A new viewer starts from a key frame.
-                if let Some(t) = target {
-                    ask_key(&mut r, t, true);
+                for t in wanted.iter().filter(|t| !before.contains(t)) {
+                    ask_key(&mut r, *t, true);
+                }
+                // The viewer counts changed.
+                if before.len() != wanted.len() || before.iter().any(|b| !wanted.contains(b)) {
+                    let members = members_json(&r);
+                    broadcast(&r, &members);
                 }
             }
             "keyframe" => {
@@ -740,8 +825,70 @@ fn serve_member(stream: TcpStream, room: &Arc<Mutex<Room>>, host_token: &str) {
             "attach.begin" | "attach.end" | "attach.get" => attachment(&mut r, me, &msg, &mut uploads, &tx),
 
             // ------------------------------------------------- host controls
+            "channels" => {
+                if !r.members[me].host {
+                    continue;
+                }
+                let host_name = r.members[me].name.clone();
+                match msg["action"].as_str().unwrap_or("") {
+                    "add" => {
+                        let name = clean(msg["name"].as_str().unwrap_or(""), 32);
+                        if name.is_empty() || r.channels.len() >= MAX_CHANNELS {
+                            continue;
+                        }
+                        let cid = r.next_channel;
+                        r.next_channel = r.next_channel.wrapping_add(1).max(GENERAL + 1);
+                        r.channels.push((cid, name.clone()));
+                        let members = members_json(&r);
+                        broadcast(&r, &members);
+                        system(&mut r, format!("{host_name} made the voice channel {name}"));
+                    }
+                    "rename" => {
+                        let cid = msg["channel"].as_u64().unwrap_or(0) as u16;
+                        let name = clean(msg["name"].as_str().unwrap_or(""), 32);
+                        let Some(c) = r.channels.iter_mut().find(|c| c.0 == cid).filter(|_| !name.is_empty()) else { continue };
+                        c.1 = name;
+                        let members = members_json(&r);
+                        broadcast(&r, &members);
+                    }
+                    // Its people go back to General.
+                    "remove" => {
+                        let cid = msg["channel"].as_u64().unwrap_or(0) as u16;
+                        if cid == GENERAL {
+                            continue;
+                        }
+                        let Some(pos) = r.channels.iter().position(|c| c.0 == cid) else { continue };
+                        let (_, name) = r.channels.remove(pos);
+                        for m in r.members.iter_mut().filter(|m| m.channel == cid) {
+                            m.channel = GENERAL;
+                        }
+                        let members = members_json(&r);
+                        broadcast(&r, &members);
+                        system(&mut r, format!("{host_name} removed the voice channel {name}"));
+                    }
+                    _ => {}
+                }
+            }
             "mod" => {
                 if !r.members[me].host {
+                    continue;
+                }
+                // Moving someone (the host too) to another voice channel.
+                if msg["action"] == "move" {
+                    let target = msg["id"].as_u64().unwrap_or(0) as u16;
+                    let cid = msg["channel"].as_u64().unwrap_or(0) as u16;
+                    let Some(cname) = r.channels.iter().find(|c| c.0 == cid).map(|c| c.1.clone()) else { continue };
+                    let host_name = r.members[me].name.clone();
+                    let Some(t) = r.members.iter().position(|m| m.id == target && m.channel != cid) else { continue };
+                    r.members[t].channel = cid;
+                    let target_name = r.members[t].name.clone();
+                    if target != id {
+                        let notice = format!("{host_name} moved you to {cname}.");
+                        send(&r.members[t].tx, wire::json(&json!({ "t": "notice", "text": notice })));
+                    }
+                    let members = members_json(&r);
+                    broadcast(&r, &members);
+                    system(&mut r, format!("{host_name} moved {target_name} to {cname}"));
                     continue;
                 }
                 let target = msg["id"].as_u64().unwrap_or(0) as u16;
@@ -774,8 +921,8 @@ fn serve_member(stream: TcpStream, room: &Arc<Mutex<Room>>, host_token: &str) {
                         let bye = json!({ "t": "closed", "reason": format!("{host_name} disconnected you from the room.") });
                         let _ = m.tx.try_send(Out::Frame(wire::json(&bye)));
                         m.close();
-                        for o in r.members.iter_mut().filter(|o| o.watching == Some(m.id)) {
-                            o.watching = None;
+                        for o in r.members.iter_mut() {
+                            o.unwatch(m.id);
                         }
                         let members = members_json(&r);
                         broadcast(&r, &members);
@@ -796,8 +943,8 @@ fn serve_member(stream: TcpStream, room: &Arc<Mutex<Room>>, host_token: &str) {
     if let Some(pos) = r.members.iter().position(|m| m.id == id) {
         let m = r.members.remove(pos);
         m.close();
-        for o in r.members.iter_mut().filter(|o| o.watching == Some(id)) {
-            o.watching = None;
+        for o in r.members.iter_mut() {
+            o.unwatch(id);
         }
         let members = members_json(&r);
         broadcast(&r, &members);

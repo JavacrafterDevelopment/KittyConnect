@@ -21,6 +21,7 @@ mod icon;
 mod lan;
 mod loopback;
 mod mount;
+mod overlay;
 mod peers;
 mod portable;
 mod share;
@@ -63,6 +64,11 @@ const LOG_LINES: usize = 200;
 
 pub enum UserEvent {
     Ipc(String),
+    /// A message from the overlay window's page.
+    OverlayIpc(String),
+    /// The overlay's hotkey was pressed.
+    #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+    OverlayHotkey,
     /// A menu bar item (macOS).
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     Menu(String),
@@ -639,6 +645,7 @@ fn main() {
         let _ = revealer.send_event(UserEvent::Ipc(r#"{"cmd":"reveal"}"#.into()));
     });
 
+    let mut overlay = overlay::Overlay::new(proxy.clone());
     let mut app = App::new(proxy);
     // The name from last time, so nobody is asked again.
     let name = saved_name();
@@ -646,15 +653,47 @@ fn main() {
         app.set_name(&name);
     }
 
-    event_loop.run(move |event, _, flow| {
+    event_loop.run(move |event, target, flow| {
         *flow = ControlFlow::Wait;
-        let _ = &web_context;
         let changed = match event {
-            // NSApp only exists once the loop is running.
-            #[cfg(target_os = "macos")]
             Event::NewEvents(tao::event::StartCause::Init) => {
+                // NSApp only exists once the loop is running.
+                #[cfg(target_os = "macos")]
                 menu.init_for_nsapp();
+                overlay.apply(target, &mut web_context);
                 false
+            }
+            Event::WindowEvent { window_id, event: WindowEvent::CloseRequested, .. } if overlay.is_window(window_id) => {
+                overlay.close_edit();
+                false
+            }
+            Event::WindowEvent { window_id, .. } if overlay.is_window(window_id) => false,
+            Event::UserEvent(UserEvent::OverlayHotkey) => {
+                overlay.toggle_edit();
+                send(&webview, overlay.config_json());
+                false
+            }
+            Event::UserEvent(UserEvent::OverlayIpc(body)) => {
+                let Ok(msg) = serde_json::from_str::<Value>(&body) else { return };
+                match overlay.on_overlay(&msg) {
+                    overlay::FromOverlay::Nothing => {}
+                    overlay::FromOverlay::Config => send(&webview, overlay.config_json()),
+                    overlay::FromOverlay::App(cmd) => {
+                        app.on_message(&cmd, &window, &webview);
+                        send(&webview, overlay.config_json());
+                    }
+                }
+                overlay.push_state(&app.voip.json());
+                !matches!(msg["cmd"].as_str(), Some("voip.keyframe" | "ready" | "close" | "set"))
+            }
+            Event::UserEvent(UserEvent::Ipc(body)) if body.contains("\"overlay.") => {
+                if let Ok(msg) = serde_json::from_str::<Value>(&body) {
+                    if let Some(cmd) = overlay.on_main(&msg, target, &mut web_context) {
+                        app.on_message(&cmd, &window, &webview);
+                    }
+                    send(&webview, overlay.config_json());
+                }
+                true
             }
             Event::UserEvent(UserEvent::Menu(id)) => {
                 if id == MENU_QUIT {
@@ -677,6 +716,9 @@ fn main() {
                     if app.on_message(&msg, &window, &webview) {
                         app.shutdown();
                         *flow = ControlFlow::Exit;
+                    }
+                    if msg["cmd"] == "ready" {
+                        send(&webview, overlay.config_json());
                     }
                     // Screen video chunks arrive many times a second and change nothing on screen.
                     !matches!(msg["cmd"].as_str(), Some("voip.video" | "voip.keyframe" | "page"))
@@ -739,6 +781,7 @@ fn main() {
                 // Talking lights and the mic meter go on their own, many times a second.
                 Some(live) => {
                     if !live.is_null() {
+                        overlay.forward(&live);
                         send(&webview, live);
                     }
                     false
@@ -749,6 +792,9 @@ fn main() {
         };
         if changed {
             send(&webview, app.snapshot());
+            if overlay.active() {
+                overlay.push_state(&app.voip.json());
+            }
         }
     });
 }
@@ -1273,7 +1319,9 @@ impl App {
                 self.set_status("Left the room", "idle");
             }
             "voip.chat" => self.voip.chat(&s("text")),
-            "voip.voice" => self.voip.voice(msg["on"].as_bool().unwrap_or(false), &self.proxy),
+            "voip.voice" => self.voip.voice(msg["on"].as_bool().unwrap_or(false), msg["channel"].as_u64().map(|c| c as u16), &self.proxy),
+            "voip.ring" => self.voip.ring(msg["id"].as_u64().unwrap_or(0) as u16),
+            "voip.channels" => self.voip.channels(msg),
             "voip.mute" => self.voip.set_mute(msg["muted"].as_bool().unwrap_or(false), msg["deaf"].as_bool().unwrap_or(false)),
             "voip.screen" => self.voip.screen(msg.get("info").filter(|v| v.is_object()).cloned()),
             "voip.video" => {
@@ -1286,13 +1334,25 @@ impl App {
                     }
                 }
             }
-            "voip.watch" => self.voip.watch(msg["id"].as_u64().map(|v| v as u16)),
+            // {id, on}: start or stop watching one share (several can be watched).
+            "voip.watch" => match msg["id"].as_u64() {
+                Some(id) => self.voip.watch(id as u16, msg["on"].as_bool().unwrap_or(true)),
+                None => self.voip.set_watching(Vec::new()),
+            },
             // Native screen share: list what can be shared, start, stop.
             "voip.sources" => self.voip.list_sources(&self.proxy),
+            "voip.thumbs" => {
+                let ids: Vec<String> = msg["ids"].as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect()).unwrap_or_default();
+                self.voip.thumbnails(&ids, msg["icons"] == true, &self.proxy);
+            }
             "voip.share" => self.voip.share(msg, &self.proxy),
             "voip.unshare" => self.voip.unshare(),
             "voip.preview" => self.voip.set_preview(msg["on"].as_bool().unwrap_or(false)),
-            "voip.shareVolume" => self.voip.set_share_volume(msg["volume"].as_f64().unwrap_or(1.0) as f32),
+            "voip.shareVolume" => self.voip.set_share_volume(
+                msg["id"].as_u64().unwrap_or(0) as u16,
+                msg["volume"].as_f64().map(|v| v as f32),
+                msg["muted"].as_bool(),
+            ),
             "voip.keyframe" => self.voip.request_keyframe(msg["id"].as_u64().unwrap_or(0) as u16),
             "voip.attach" => {
                 if let Some(files) = rfd::FileDialog::new().set_title("Send files in chat").set_parent(window).pick_files() {

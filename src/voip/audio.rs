@@ -3,6 +3,8 @@
 //! Send path, every 10 ms block of microphone audio:
 //!   device rate → 48 kHz (windowed-sinc resampler, no aliasing)
 //!   → 80 Hz high-pass (rumble, desk knocks, DC)
+//!   → echo cancelling (see `aec`): what the speakers played is taken back
+//!     out, so speakers work without headphones
 //!   → input volume (the user's setting)
 //!   → noise suppression (RNNoise, which also says whether it's speech)
 //!   → voice gate: automatic (speech detected) or a manual dB threshold,
@@ -16,8 +18,6 @@
 //! order (UDP can reorder), then one Opus decoder per person, which rebuilds a
 //! lost frame from the next one's FEC or conceals it, per-person volume, then
 //! the mix is resampled to the speakers' rate.
-//!
-//! There's no echo cancellation: use headphones, or the mic picks up the call.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::num::NonZeroU32;
@@ -30,6 +30,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, SampleFormat, SizedSample};
 use opus1::{Application, Bitrate, Channels, InbandFec, OpusDecoder, OpusEncoder, SampleRate};
 
+use super::aec::{self, EchoCanceller};
 use super::media;
 
 pub const RATE: u32 = 48_000;
@@ -65,6 +66,7 @@ pub struct Settings {
     /// With automatic off: send when the level is above this, in dBFS.
     threshold_db: AtomicU32,
     noise_suppression: AtomicBool,
+    echo_cancellation: AtomicBool,
     /// Everyone else's volume, 1.0 = normal, up to 2.0.
     output_gain: AtomicU32,
 }
@@ -76,6 +78,7 @@ impl Default for Settings {
             auto_sensitivity: AtomicBool::new(true),
             threshold_db: f32_atomic(-50.0),
             noise_suppression: AtomicBool::new(true),
+            echo_cancellation: AtomicBool::new(true),
             output_gain: f32_atomic(1.0),
         }
     }
@@ -88,6 +91,10 @@ impl Settings {
         self.threshold_db.store(threshold_db.clamp(-100.0, 0.0).to_bits(), Ordering::Relaxed);
         self.noise_suppression.store(noise_suppression, Ordering::Relaxed);
         self.output_gain.store(output_gain.clamp(0.0, 2.0).to_bits(), Ordering::Relaxed);
+    }
+
+    pub fn set_echo_cancellation(&self, on: bool) {
+        self.echo_cancellation.store(on, Ordering::Relaxed);
     }
 
     fn get(a: &AtomicU32) -> f32 {
@@ -418,7 +425,8 @@ impl Engine {
                 return;
             };
             let settings = mixer.settings.clone();
-            let output = match build_output(&speaker, mixer) {
+            let played = Arc::new(aec::Reference::default());
+            let output = match build_output(&speaker, mixer, played.clone()) {
                 Ok(o) => o,
                 Err(e) => {
                     let _ = ready_tx.send(Err(format!("Couldn't open the speakers: {e}")));
@@ -427,7 +435,7 @@ impl Engine {
             };
             let mic = host.default_input_device();
             let sink: Sink = Box::new(move |d| out.urgent(d));
-            let input = mic.as_ref().map(|d| Capture::new(sink, m, l, t, settings).and_then(|c| build_input(d, c)));
+            let input = mic.as_ref().map(|d| Capture::new(sink, m, l, t, settings, played).and_then(|c| build_input(d, c)));
             let mic_name = match (&mic, &input) {
                 (Some(d), Some(Ok(_))) => d.name().unwrap_or_else(|_| "Microphone".into()),
                 (Some(_), Some(Err(e))) => format!("Microphone unavailable ({e})"),
@@ -470,6 +478,10 @@ struct Capture {
     highpass: HighPass,
     denoise: Box<nnnoiseless::DenoiseState<'static>>,
     denoised: Vec<f32>,
+    aec: Box<EchoCanceller>,
+    /// What the speakers played, from the playback side.
+    played: Arc<aec::Reference>,
+    reference: Vec<f32>,
     encoder: OpusEncoder,
     packet: Vec<u8>,
     seq: u32,
@@ -490,6 +502,7 @@ impl Capture {
         level: Arc<AtomicU32>,
         talking: Arc<AtomicBool>,
         settings: Arc<Settings>,
+        played: Arc<aec::Reference>,
     ) -> Result<Capture, String> {
         let mut encoder = OpusEncoder::new(SampleRate::Hz48000, Channels::Mono, Application::Voip).map_err(|e| format!("{e:?}"))?;
         encoder.set_bitrate(Bitrate::BitsPerSecond(NonZeroU32::new(BITRATE).unwrap()));
@@ -506,6 +519,9 @@ impl Capture {
             highpass: HighPass::new(RATE as f32, 80.0),
             denoise: nnnoiseless::DenoiseState::new(),
             denoised: vec![0.0; BLOCK],
+            aec: Box::new(EchoCanceller::new()),
+            played,
+            reference: vec![0.0; aec::HOP],
             encoder,
             packet: vec![0u8; 1500],
             seq: 0,
@@ -538,9 +554,21 @@ impl Capture {
 
     /// One 10 ms block: filter, gain, suppress, gate, and every second block an Opus packet.
     fn finish_block(&mut self) {
+        for s in self.block.iter_mut() {
+            *s = self.highpass.run(*s);
+        }
+        // Always take the same stretch of what was played, so the timing
+        // between the two stays put whether cancelling is on or not.
+        let aec_on = self.settings.echo_cancellation.load(Ordering::Relaxed);
+        for part in self.block.chunks_mut(aec::HOP) {
+            self.played.pop(&mut self.reference);
+            if aec_on {
+                self.aec.process(part, &self.reference);
+            }
+        }
         let gain = Settings::get(&self.settings.input_gain);
         for s in self.block.iter_mut() {
-            *s = self.highpass.run(*s) * gain;
+            *s *= gain;
         }
         let rms = (self.block.iter().map(|s| s * s).sum::<f32>() / BLOCK as f32).sqrt();
         let level = db(rms);
@@ -625,6 +653,8 @@ where
 /// The 48 kHz mix, resampled to the device rate and copied to every channel.
 struct Playback {
     mixer: Arc<Mixer>,
+    /// Handed to the mic side for echo cancelling.
+    played: Arc<aec::Reference>,
     channels: usize,
     resampler: Resampler,
     chunk: Vec<f32>,
@@ -636,6 +666,7 @@ impl Playback {
     fn next_sample(&mut self) -> f32 {
         while self.ready.is_empty() {
             self.mixer.pull(&mut self.chunk);
+            self.played.push(&self.chunk);
             self.scratch.clear();
             self.resampler.process(&self.chunk, &mut self.scratch);
             self.ready.extend(self.scratch.iter());
@@ -644,10 +675,11 @@ impl Playback {
     }
 }
 
-fn build_output(device: &cpal::Device, mixer: Arc<Mixer>) -> Result<cpal::Stream, String> {
+fn build_output(device: &cpal::Device, mixer: Arc<Mixer>, played: Arc<aec::Reference>) -> Result<cpal::Stream, String> {
     let config = device.default_output_config().map_err(|e| e.to_string())?;
     let pb = Playback {
         mixer,
+        played,
         channels: config.channels().max(1) as usize,
         resampler: Resampler::new(RATE, config.sample_rate().0),
         chunk: vec![0.0; 480],
@@ -700,6 +732,7 @@ mod tests {
             Arc::new(f32_atomic(-100.0)),
             Arc::new(AtomicBool::new(false)),
             settings,
+            Arc::new(aec::Reference::default()),
         )
         .unwrap();
         (cap, rx)
