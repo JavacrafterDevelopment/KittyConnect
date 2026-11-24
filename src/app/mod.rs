@@ -2,6 +2,7 @@
 //! messages from the page and its state snapshot are in main.rs.
 
 mod events;
+mod game_api;
 mod hub_tab;
 mod mounts;
 mod ports;

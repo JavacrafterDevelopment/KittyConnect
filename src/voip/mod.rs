@@ -1218,6 +1218,28 @@ impl Voip {
         }
     }
 
+    /// The game API's view of the voice room we're in (None when we're in none).
+    pub fn api_json(&self) -> Value {
+        if !self.is_live() {
+            return Value::Null;
+        }
+        json!({
+            "room": self.room,
+            "me": self.me,
+            "host": self.is_host,
+            "inVoice": self.in_voice,
+            "muted": self.muted,
+            "deaf": self.deaf,
+            "channel": self.channel,
+            "channels": self.channels,
+            "members": self.members.iter().map(|m| json!({
+                "id": m["id"], "name": m["name"], "host": m["host"], "voice": m["voice"],
+                "muted": m["muted"], "deaf": m["deaf"], "channel": m["channel"],
+                "sharing": !m["screen"].is_null(), "me": m["id"].as_u64() == Some(self.me as u64),
+            })).collect::<Vec<_>>(),
+        })
+    }
+
     /// The small, frequent update: who's talking and the mic meter.
     fn live_json(&self, level: Option<(f32, bool)>) -> Value {
         json!({

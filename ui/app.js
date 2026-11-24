@@ -418,7 +418,10 @@ function hubMembersHtml(h) {
     return `
       <div class="person">
         <span class="avatar" style="--h:${hue(m.name)}">${esc(initials(m.name))}</span>
-        <span class="person-name">${esc(m.name)}${me ? ' <span class="meta">(you)</span>' : ''}${m.host ? ' <span class="meta">· host</span>' : ''}</span>
+        <span class="api-text">
+          <span class="person-name">${esc(m.name)}${me ? ' <span class="meta">(you)</span>' : ''}${m.host ? ' <span class="meta">· host</span>' : ''}</span>
+          ${m.activity && m.activity.app ? `<span class="person-activity" title="From the game, through Portside's game API">Playing ${esc(m.activity.app)}${m.activity.text ? ` · ${esc(m.activity.text)}` : ''}</span>` : ''}
+        </span>
         <span class="grow"></span>
         ${kick}${me && h.mode === 'host' ? '' : pathLabel(m)}
       </div>`;
@@ -2900,6 +2903,7 @@ window.onHost = (msg) => {
       renderPfCounts(msg.hosts, msg.joins);
       renderMounts(msg.mounts, msg.hosts.filter((h) => h.mount), msg.joins.filter((j) => j.mount));
       renderVoip(msg.voip);
+      renderGameApi(msg.gameApi);
       if (msg.name && msg.name !== myName) setMe(msg.name);
       $('statusText').textContent = msg.status.text;
       $('lamp').className = msg.status.kind;
@@ -2974,6 +2978,7 @@ window.onHost = (msg) => {
       // An invite was joined: show where it's connecting (and any error there).
       page(msg.page);
       if (msg.view) pfView(msg.view);
+      if (msg.set) setTab(msg.set);
       break;
     case 'window':
       document.documentElement.classList.toggle('maximized', msg.maximized);
@@ -2999,10 +3004,63 @@ document.addEventListener('contextmenu', (e) => { if (!e.target.closest('input, 
    checked in a browser. Never runs inside the app. */
 /* --------------------------------------------------------------- settings */
 
-document.querySelectorAll('.set-tab').forEach((t) => t.addEventListener('click', () => {
-  document.querySelectorAll('.set-tab').forEach((x) => x.classList.toggle('on', x === t));
-  document.querySelectorAll('.set-pane').forEach((p) => p.classList.toggle('on', p.id === `set-${t.dataset.set}`));
-}));
+function setTab(name) {
+  document.querySelectorAll('.set-tab').forEach((x) => x.classList.toggle('on', x.dataset.set === name));
+  document.querySelectorAll('.set-pane').forEach((p) => p.classList.toggle('on', p.id === `set-${name}`));
+}
+document.querySelectorAll('.set-tab').forEach((t) => t.addEventListener('click', () => setTab(t.dataset.set)));
+
+/* The game API: on or off, who's allowed, sessions running, and the
+   "Allow this program?" prompt (shown on any tab). */
+let apiPrompt = null;
+function renderGameApi(g) {
+  if (!g) return;
+  $('api-on').checked = !!g.enabled;
+  $('api-rows').classList.toggle('off', !g.enabled);
+  $('api-addr').textContent = g.enabled ? (g.port ? `127.0.0.1:${g.port}` : 'Not listening') : 'Off';
+  $('api-err').textContent = g.error || '';
+  setHtml($('api-apps'), g.apps.length ? g.apps.map((a) => `
+    <div class="person">
+      <span class="avatar small" style="--h:${hue(a.name)}">${esc(initials(a.name))}</span>
+      <span class="api-text">
+        <span class="person-name">${esc(a.name)} <span class="meta">${esc(a.id)}</span></span>
+        <span class="api-exe" title="${esc(a.exe || '')}">${esc(a.exe || 'Program file unknown')}</span>
+      </span>
+      <span class="grow"></span>
+      ${a.connected ? '<span class="pill ok"><span class="dot"></span>Connected</span>' : ''}
+      <button class="btn small ghost" data-api-remove="${esc(a.id)}" title="Its key stops working; it has to ask again">Remove</button>
+    </div>`).join('') : '<div class="peers-empty">None yet. The first time a game connects, Portside asks you.</div>');
+  hide($('api-sess-card'), !g.sessions.length);
+  setHtml($('api-sessions'), g.sessions.map((s) => `
+    <div class="person">
+      <span class="api-text">
+        <span class="person-name">${esc(s.app)}${s.title ? ` · ${esc(s.title)}` : ''}</span>
+        <span class="api-exe">${s.kind === 'host' ? `Hosting on port ${s.port}` : `Joined ${esc(s.host)}'s session · this PC's port ${s.port}`}</span>
+      </span>
+      <span class="grow"></span>
+      ${s.kind === 'join' && s.live ? linkPill({ path: s.path }, s.host) : ''}
+      ${s.live ? '' : '<span class="pill busy"><span class="dot"></span>Starting</span>'}
+    </div>`).join(''));
+  const p = g.prompt;
+  const was = apiPrompt;
+  apiPrompt = p ? p.conn : null;
+  hide($('api-ask'), !p);
+  if (p && was !== p.conn) {
+    $('api-ask-avatar').style.setProperty('--h', hue(p.name));
+    $('api-ask-avatar').textContent = initials(p.name);
+    $('api-ask-name').textContent = `${p.name} wants to use Portside`;
+    $('api-ask-exe').textContent = p.exe ? p.exe : `Calls itself "${p.id}". Portside couldn't see which program file it is.`;
+    hide($('api-ask-other'), !p.otherExe);
+    $('api-ask-more').textContent = p.waiting > 1 ? `${p.waiting - 1} more waiting` : '';
+  }
+}
+$('api-on').addEventListener('change', () => post({ cmd: 'api.enable', on: $('api-on').checked }));
+$('api-apps').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-api-remove]');
+  if (b) post({ cmd: 'api.remove', id: b.dataset.apiRemove });
+});
+$('api-allow').addEventListener('click', () => { if (apiPrompt != null) post({ cmd: 'api.allow', conn: apiPrompt }); });
+$('api-deny').addEventListener('click', () => { if (apiPrompt != null) post({ cmd: 'api.deny', conn: apiPrompt }); });
 $('about-version').textContent = BOOT.version ? `v${BOOT.version}` : '';
 $('about-tailcat').textContent = BOOT.tailcat || '';
 $('about-data').textContent = BOOT.dataDir || '';
@@ -3152,11 +3210,22 @@ if (window.ipc) {
       prompt: null,
       members: [
         { id: 1, name: 'Kit', host: true, path: 'host', rtt: null },
-        { id: 2, name: 'Priya', host: false, path: 'direct', rtt: 18 },
+        { id: 2, name: 'Priya', host: false, path: 'direct', rtt: 18, activity: { app: 'Space Game', text: 'In a lobby' } },
         { id: 3, name: 'Sam', host: false, path: 'relay', rtt: 74 },
       ],
       invites: [{ id: 4, from: 'Priya', kind: 'mount', code: '', title: 'Minecraft Worlds', ago: 40 }],
       sent: 'Invited 2 people.', reconnecting: false, link: { path: 'unknown' }, log: ['# \u{1F408} Server listening with new address: tc\u2026'],
+    },
+    gameApi: {
+      enabled: true, port: 47800, error: '',
+      apps: [
+        { id: 'com.kit.space-game', name: 'Space Game', exe: 'C:\\Games\\Space Game\\SpaceGame.exe', connected: 1 },
+        { id: 'portside.example', name: 'Portside example', exe: 'C:\\Python312\\python.exe', connected: 0 },
+      ],
+      sessions: [{ kind: 'join', app: 'Space Game', title: "Priya's lobby", host: 'Priya', port: 51234, live: true, path: 'direct' }],
+      prompt: /[?&]ask/.test(location.search)
+        ? { conn: 9, id: 'com.sam.racer', name: 'Kart Racer', exe: 'C:\\Users\\Kit\\Downloads\\KartRacer\\KartRacer.exe', exeName: 'KartRacer.exe', otherExe: false, waiting: 1 }
+        : null,
     },
     invitables: [
       { what: 'voip', kind: 'voip', title: 'Hangout' },

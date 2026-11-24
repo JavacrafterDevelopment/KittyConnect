@@ -1466,6 +1466,17 @@ select.input { padding: 7px 9px; }
 .ov-select { width: auto; min-width: 180px; }
 .ov-range { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; color: var(--ink-faint); }
 .ov-range input { width: 160px; accent-color: var(--blue); }
+.api-addr { font-size: 12px; color: var(--ink-soft); white-space: nowrap; }
+#api-apps .person, #api-sessions .person { cursor: default; }
+.api-exe { font-size: 11px; color: var(--ink-faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.api-text { display: flex; flex-direction: column; min-width: 0; }
+.api-who { display: flex; align-items: center; gap: 12px; padding: 6px 0 2px; }
+.api-who-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.api-who-text .mono { word-break: break-all; font-size: 11px; }
+.api-who .set-title { font-weight: 600; font-size: 14px; }
+.api-can { margin: -4px 0 0; padding-left: 20px; font-size: 12px; line-height: 1.6; color: var(--ink-soft); }
+.api-warn { color: var(--danger); }
+.person-activity { font-size: 11px; color: var(--ok); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .about-grid { display: grid; grid-template-columns: 140px 1fr; gap: 8px 14px; font-size: 13px; padding: 4px 0 6px; }
 .about-grid .mono { font-size: 12px; word-break: break-all; }
 .sbtn.pinned { color: var(--gilt); }

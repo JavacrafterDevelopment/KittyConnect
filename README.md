@@ -260,6 +260,18 @@ their own.
 and when the other side stops sharing, closes the port or ends the room, your
 side disconnects by itself and says so. Downloads show their speed.
 
+**Game API** (Settings, off until you turn it on): games you make can use
+Portside, like Discord's game SDK. A game on the same PC connects to
+`127.0.0.1` (ports 47800 to 47809; never reachable from the network) and
+Portside asks you whether to allow it, showing its program file. Once allowed,
+it can see the hub you're in and who's in it, your voice channel and who's
+talking, show "Playing *your game*" next to your name, send messages to the
+same game on friends' PCs, and **host or join multiplayer sessions over UDP or
+TCP**: each session gets its own encrypted tunnel (the VOIP helper's, the same
+as voice), whose address only goes to the people in your hub. The game only
+ever talks to 127.0.0.1. See [docs/game-api.md](docs/game-api.md) and the
+example client in `examples/game-api/`.
+
 File codes look like `kitty:file:51234:tc…`, room codes `kitty:voip:50211:tc…`,
 hub codes `kitty:hub:50400:tc…`, and port codes are a plain TailCat address
 (`tc…`). A code is a secret: anyone who has it can connect while that share is

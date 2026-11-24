@@ -16,6 +16,11 @@ pub(super) struct Member {
     pub(super) invites: VecDeque<Instant>,
     /// Their own code for a saved hub, once they've said (a rename updates it).
     pub(super) code: Option<String>,
+    /// What a game on their PC says they're doing (the game API), shown
+    /// beside their name: {"app": "My Game", "text": "In a lobby"}.
+    pub(super) activity: Option<Value>,
+    /// When their last game messages went, to keep them to a sane rate.
+    pub(super) app_sent: VecDeque<Instant>,
 }
 
 /// What a hub is, the same in everyone's copy of a saved one.
@@ -37,6 +42,18 @@ pub(super) struct Offer {
     pub(super) title: String,
 }
 
+/// A game session someone's game is hosting through Portside (the game
+/// API): its own tunnel's address and port, which only the hub hears.
+pub(super) struct GameSession {
+    pub(super) from: u64,
+    pub(super) sid: String,
+    pub(super) app: String,
+    pub(super) title: String,
+    pub(super) port: u16,
+    pub(super) addr: String,
+    pub(super) info: Value,
+}
+
 pub(super) struct State {
     pub(super) meta: Meta,
     pub(super) members: Vec<Member>,
@@ -45,6 +62,7 @@ pub(super) struct State {
     pub(super) book: Vec<Entry>,
     pub(super) gone: Vec<Gone>,
     pub(super) offers: Vec<Offer>,
+    pub(super) sessions: Vec<GameSession>,
 }
 
 impl State {
@@ -84,11 +102,23 @@ impl State {
         json!({ "op": "offers", "list": list })
     }
 
+    pub(super) fn sessions_msg(&self) -> Value {
+        let list: Vec<Value> = self
+            .sessions
+            .iter()
+            .map(|g| {
+                let name = self.members.iter().find(|m| m.id == g.from).map(|m| m.name.as_str()).unwrap_or("Someone");
+                json!({ "from": g.from, "name": name, "sid": g.sid, "app": g.app, "title": g.title, "port": g.port, "addr": g.addr, "info": g.info })
+            })
+            .collect();
+        json!({ "op": "sessions", "list": list })
+    }
+
     pub(super) fn list(&self) -> Value {
         json!(self
             .members
             .iter()
-            .map(|m| json!({ "id": m.id, "name": m.name, "host": m.host, "path": m.path, "rtt": m.rtt, "code": m.code }))
+            .map(|m| json!({ "id": m.id, "name": m.name, "host": m.host, "path": m.path, "rtt": m.rtt, "code": m.code, "activity": m.activity }))
             .collect::<Vec<_>>())
     }
 
@@ -107,6 +137,11 @@ impl State {
         self.offers.retain(|o| o.from != id);
         if self.offers.len() != had {
             self.broadcast(&self.offers_msg());
+        }
+        let had = self.sessions.len();
+        self.sessions.retain(|g| g.from != id);
+        if self.sessions.len() != had {
+            self.broadcast(&self.sessions_msg());
         }
         true
     }
@@ -139,6 +174,7 @@ impl HubServer {
             book: Vec::new(),
             gone: Vec::new(),
             offers: Vec::new(),
+            sessions: Vec::new(),
         }));
         let stop = Arc::new(AtomicBool::new(false));
         let host_token = crate::peers::secret();
@@ -302,14 +338,18 @@ pub(super) fn serve_member(stream: TcpStream, state: &Mutex<State>, stop: &Atomi
             stream: stream.try_clone()?,
             invites: VecDeque::new(),
             code: None,
+            activity: None,
+            app_sent: VecDeque::new(),
         });
+        // "games": this hub passes on game sessions and messages (0.16.0 on).
         let _ = out_tx.send(json!({
             "op": "welcome", "v": PROTOCOL, "you": id, "hub": st.meta.name, "id": st.meta.id,
-            "expiresIn": st.expires_in(), "host": host,
+            "expiresIn": st.expires_in(), "host": host, "games": GAMES,
         }));
         st.broadcast_members();
         let _ = out_tx.send(st.book_msg());
         let _ = out_tx.send(st.offers_msg());
+        let _ = out_tx.send(st.sessions_msg());
         id
     };
 
@@ -427,6 +467,57 @@ pub(super) fn serve_member(stream: TcpStream, state: &Mutex<State>, stop: &Atomi
                 }
                 st.broadcast(&st.offers_msg());
             }
+            // The game API: a session someone's game hosts, or not any more.
+            "session" | "unsession" => {
+                let mut st = state.lock().unwrap();
+                let sid = clean(msg["sid"].as_str().unwrap_or_default(), 32);
+                if sid.is_empty() {
+                    continue;
+                }
+                st.sessions.retain(|g| !(g.from == id && g.sid == sid));
+                if msg["op"] == "session" {
+                    let mine = st.sessions.iter().filter(|g| g.from == id).count();
+                    if let (Some(g), true) = (game_session(id, sid, &msg), mine < MAX_SESSIONS_EACH) {
+                        st.sessions.push(g);
+                    }
+                }
+                st.broadcast(&st.sessions_msg());
+            }
+            // The game API: a message from a game to the same game on others' PCs.
+            "app" => {
+                let mut st = state.lock().unwrap();
+                let (Some(app), Some(data)) = (crate::api::app_id(msg["app"].as_str().unwrap_or_default()), msg.get("data")) else { continue };
+                if data.to_string().len() > MAX_APP_DATA {
+                    continue;
+                }
+                let now = Instant::now();
+                let Some(m) = st.members.iter_mut().find(|m| m.id == id) else { break };
+                while m.app_sent.front().is_some_and(|t| now.duration_since(*t) > Duration::from_secs(1)) {
+                    m.app_sent.pop_front();
+                }
+                if m.app_sent.len() >= APP_PER_SECOND {
+                    continue;
+                }
+                m.app_sent.push_back(now);
+                let name = m.name.clone();
+                let to: Vec<u64> = msg["to"].as_array().map(|a| a.iter().filter_map(Value::as_u64).collect()).unwrap_or_default();
+                let out = json!({ "op": "app", "from": id, "name": name, "app": app, "data": data });
+                for m in st.members.iter().filter(|m| m.id != id && (to.is_empty() || to.contains(&m.id))) {
+                    let _ = m.out.send(out.clone());
+                }
+            }
+            // The game API: what a game says they're doing, beside their name.
+            "activity" => {
+                let mut st = state.lock().unwrap();
+                let app = clean(msg["app"].as_str().unwrap_or_default(), 48);
+                let text = clean(msg["text"].as_str().unwrap_or_default(), MAX_TITLE);
+                let activity = (!app.is_empty()).then(|| json!({ "app": app, "text": text }));
+                let Some(m) = st.members.iter_mut().find(|m| m.id == id) else { break };
+                if m.activity != activity {
+                    m.activity = activity;
+                    st.broadcast_members();
+                }
+            }
             // Anyone in it can delete a saved hub for everyone in it now.
             "delete" => {
                 let st = state.lock().unwrap();
@@ -464,6 +555,21 @@ pub(super) fn serve_member(stream: TcpStream, state: &Mutex<State>, stop: &Atomi
     drop(out_tx);
     let _ = writer_thread.join();
     Ok(())
+}
+
+/// A game session as a member announced it, checked: a real tunnel
+/// address and port, a game id, short text, and a little info.
+pub(super) fn game_session(from: u64, sid: String, msg: &Value) -> Option<GameSession> {
+    let app = crate::api::app_id(msg["app"].as_str()?)?;
+    let addr = msg["addr"].as_str().filter(|a| tailcat::is_addr(a) && a.len() <= 400)?.to_string();
+    let port = msg["port"].as_u64().filter(|p| (1..=65535).contains(p))? as u16;
+    let info = match msg.get("info") {
+        Some(v) if v.to_string().len() <= crate::api::MAX_INFO => v.clone(),
+        Some(_) => return None,
+        None => Value::Null,
+    };
+    let title = clean(msg["title"].as_str().unwrap_or(""), MAX_TITLE);
+    Some(GameSession { from, sid, app, title, port, addr, info })
 }
 
 pub(super) fn path_of(msg: &Value) -> &'static str {

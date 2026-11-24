@@ -84,6 +84,7 @@ impl App {
             }
             Role::VoipHost | Role::VoipJoin => return self.voip.on_tailcat(role, id, ev),
             Role::HubHost | Role::HubJoin => return self.hub.on_tailcat(role, id, ev),
+            Role::GameHost | Role::GameJoin => return self.api.on_tailcat(role, id, ev),
             _ => return false,
         }
         true
@@ -237,6 +238,8 @@ impl App {
         // "Open to hub": what's open goes to the hub (and stops once it closes).
         let open = self.invitables().into_iter().map(|i| (i.what, i.title, i.code)).collect();
         self.hub.sync_offers(open);
+        // The game API: sessions and activity to the hub, and anyone asking too long.
+        changed |= self.api_tick();
         changed
     }
 
