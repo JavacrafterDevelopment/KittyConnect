@@ -251,6 +251,8 @@ pub struct Voip {
     watching: Vec<u16>,
     /// The voice channel we're in, or join next.
     channel: u16,
+    /// The room's voice channels, as it last listed them.
+    channels: Vec<Value>,
     next_tid: u32,
     uploads: Vec<UploadState>,
     downloads: HashMap<u32, DownloadState>,
@@ -306,6 +308,7 @@ impl Default for Voip {
             media: "off",
             watching: Vec::new(),
             channel: server::GENERAL,
+            channels: Vec::new(),
             next_tid: 1,
             uploads: Vec::new(),
             downloads: HashMap::new(),
@@ -354,6 +357,7 @@ impl Voip {
         self.media = "off";
         self.watching.clear();
         self.channel = server::GENERAL;
+        self.channels.clear();
         self.uploads.clear();
         self.downloads.clear();
         self.previews.clear();
@@ -1017,6 +1021,8 @@ impl Voip {
                 match m["t"].as_str().unwrap_or("") {
                     "members" => {
                         self.members = m["members"].as_array().cloned().unwrap_or_default();
+                        // Rooms from before 0.15 have one voice channel and don't list it.
+                        self.channels = m["channels"].as_array().cloned().unwrap_or_default();
                         // Stop watching shares that have ended.
                         let live: Vec<u16> = self.watching.iter().copied().filter(|w| self.members.iter().any(|x| x["id"] == *w && !x["screen"].is_null())).collect();
                         if live.len() != self.watching.len() {
@@ -1321,6 +1327,7 @@ impl Voip {
             "shareMuted": self.share_muted.iter().collect::<Vec<_>>(),
             "watching": self.watching,
             "channel": self.channel,
+            "channels": self.channels,
             "uploads": self.uploads.iter().map(|u| json!({
                 "tid": u.tid, "name": u.name, "sent": u.sent, "size": u.size, "error": u.error,
             })).collect::<Vec<_>>(),

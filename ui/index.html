@@ -555,31 +555,8 @@
             <div class="roomgrid">
               <!-- Voice on the left (who's in it, the stream you watch), chat on the right. -->
               <div class="voicecol">
-                <!-- Someone's screen, while you watch it. -->
-                <div class="card stage hide" id="voip-stage">
-                  <div class="stage-head">
-                    <span class="live-dot"></span>
-                    <span class="stage-title" id="stage-title"></span>
-                    <span class="meta" id="stage-stats"></span>
-                    <span class="grow"></span>
-                    <label class="stage-vol hide" id="stage-vol-wrap" title="The stream's sound, for you only">
-                      <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M2.5 6h2.5l3.5-3v10l-3.5-3H2.5z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/><path d="M11 5.5a3.5 3.5 0 0 1 0 5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
-                      <input type="range" id="stage-vol" min="0" max="200" value="100">
-                    </label>
-                    <button class="btn small" id="stage-full">Full screen</button>
-                    <button class="btn small danger" id="stage-stop">Stop watching</button>
-                  </div>
-                  <div class="stage-view" id="stage-view" title="Double-click for full screen">
-                    <canvas id="stage-canvas"></canvas>
-                    <div class="stage-wait" id="stage-wait">Waiting for the picture…</div>
-                    <div class="stage-paused hide" id="stage-paused">The shared window is minimized. The picture comes back when it's restored.</div>
-                    <div class="stage-bar">
-                      <span id="stage-bar-title"></span>
-                      <span class="grow"></span>
-                      <button class="btn small" id="stage-exit">Exit full screen (Esc)</button>
-                    </div>
-                  </div>
-                </div>
+                <!-- The streams you're watching (up to four), side by side. -->
+                <div class="stages hide" id="voip-stage"></div>
 
                 <div class="card voicecard">
                   <div class="card-head">
@@ -595,7 +572,10 @@
                     </span>
                   </div>
 
-                  <!-- Everyone in voice, a tile each; the ring lights up while they talk. -->
+                  <!-- The room's voice channels: join one, or (the host) add more. -->
+                  <div class="vchannels" id="voip-channels"></div>
+
+                  <!-- Everyone in your voice channel, a tile each; the ring lights up while they talk. -->
                   <div class="tiles" id="voip-invoice"></div>
 
                   <div class="callbar">
@@ -731,6 +711,13 @@
       <span class="toast-text" id="toast-text"></span>
       <button class="btn small primary" id="toast-join">Join</button>
       <button class="btn small ghost" id="toast-dismiss">No</button>
+    </div>
+    <!-- Someone wants you in voice. -->
+    <div id="ring-toast" class="toast hide" role="status">
+      <span class="avatar small" id="ring-avatar"></span>
+      <span class="toast-text" id="ring-text"></span>
+      <button class="btn small primary" id="ring-join">Join voice</button>
+      <button class="btn small ghost" id="ring-dismiss">Not now</button>
     </div>
 
     <footer id="status">
@@ -908,6 +895,16 @@
             <span class="set-desc">Removes background noise like fans, typing and traffic.</span>
           </label>
           <input type="checkbox" id="vs-ns" class="switch" checked>
+        </div>
+      </div>
+
+      <div class="vs-row">
+        <div class="set-row">
+          <label class="set-text" for="vs-sounds">
+            <span class="set-title">Join and leave sounds</span>
+            <span class="set-desc">A short chime when someone joins or leaves your voice channel, and a ring when someone calls you in.</span>
+          </label>
+          <input type="checkbox" id="vs-sounds" class="switch" checked>
         </div>
       </div>
 
