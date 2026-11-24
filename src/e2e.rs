@@ -330,7 +330,7 @@ fn script(d: &Drive, work: &std::path::Path) -> Result<Value, String> {
     d.on(|a| {
         a.host.voip.screen(Some(json!({ "w": 640, "h": 360, "fps": 30, "codec": "avc1.42E01F", "bitrate": 1_000_000 })));
         let host_id = a.host.voip.json()["me"].as_u64().unwrap_or(0) as u16;
-        a.friend.voip.watch(Some(host_id));
+        a.friend.voip.watch(host_id, true);
     });
     std::thread::sleep(Duration::from_secs(2));
     // A frame several pieces long, the marker all through it.

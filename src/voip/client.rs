@@ -615,6 +615,106 @@ mod tests {
         assert_eq!(next_json(&mut b, "closed")["t"], "closed");
     }
 
+    /// From 0.15: voice channels (voice only reaches the same channel, the host
+    /// moves people), watching two shares at once with viewer counts, ringing
+    /// someone into voice, and sharers' preview pictures.
+    #[test]
+    fn channels_several_streams_rings_and_previews() {
+        let room = RoomServer::start("Test", std::env::temp_dir().join("kc-room-test-015")).unwrap();
+        let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, room.port));
+        let (mut h, wh) = try_join(addr, &hello("Host", Some(&room.host_token))).unwrap();
+        let (mut a, wa) = try_join(addr, &hello("Ann", None)).unwrap();
+        let (mut b, wb) = try_join(addr, &hello("Bo", None)).unwrap();
+        let (hid, aid, bid) = (wh["you"].as_u64().unwrap() as u16, wa["you"].as_u64().unwrap() as u16, wb["you"].as_u64().unwrap() as u16);
+        let (uh, ua, ub) = (udp_member(room.port, &wh), udp_member(room.port, &wa), udp_member(room.port, &wb));
+
+        // A second channel; Ann and the host in General, Bo in it.
+        h.write_all_frame(&json!({ "t": "channels", "action": "add", "name": "Raid" })).unwrap();
+        let raid = loop {
+            let m = next_json(&mut b, "members");
+            if let Some(c) = m["channels"].as_array().unwrap().iter().find(|c| c["name"] == "Raid") {
+                break c["id"].as_u64().unwrap();
+            }
+        };
+        // Only the host can make channels.
+        a.write_all_frame(&json!({ "t": "channels", "action": "add", "name": "Nope" })).unwrap();
+        h.write_all_frame(&json!({ "t": "voice", "on": true })).unwrap();
+        a.write_all_frame(&json!({ "t": "voice", "on": true, "channel": 1 })).unwrap();
+        b.write_all_frame(&json!({ "t": "voice", "on": true, "channel": raid })).unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        ua.send(&media::voice(1, &[1; 60])).unwrap();
+        assert_eq!(media::u16_at(&next_udp(&uh, media::VOICE).unwrap(), 1), aid, "same channel hears it");
+        assert!(no_udp(&ub, media::VOICE), "another channel doesn't");
+        // The host moves Ann to Raid: now Bo hears her and the host doesn't.
+        h.write_all_frame(&json!({ "t": "mod", "action": "move", "id": aid, "channel": raid })).unwrap();
+        assert!(next_json(&mut a, "notice")["text"].as_str().unwrap().contains("moved you to Raid"));
+        ua.send(&media::voice(2, &[2; 60])).unwrap();
+        assert_eq!(media::u32_at(&next_udp(&ub, media::VOICE).unwrap(), 3), 2);
+        assert!(no_udp(&uh, media::VOICE));
+        let members = loop {
+            let m = next_json(&mut h, "members");
+            if m["channels"].as_array().unwrap().len() == 2 && m["members"].as_array().unwrap().iter().any(|x| x["id"] == aid && x["channel"] == raid) {
+                break m;
+            }
+        };
+        assert!(!members["channels"].as_array().unwrap().iter().any(|c| c["name"] == "Nope"));
+
+        // Ann and Bo both share; the host watches both at once.
+        a.write_all_frame(&json!({ "t": "screen", "on": true, "w": 1280, "h": 720, "fps": 30, "codec": "vp8" })).unwrap();
+        b.write_all_frame(&json!({ "t": "screen", "on": true, "w": 1280, "h": 720, "fps": 30, "codec": "vp8" })).unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        h.write_all_frame(&json!({ "t": "watch", "ids": [aid, bid], "id": bid })).unwrap();
+        next_json(&mut a, "keyframe");
+        next_json(&mut b, "keyframe");
+        for (u, n) in [(&ua, 1u32), (&ub, 2)] {
+            for p in media::video_pieces(n, true, 1, &[n as u8; 100]) {
+                u.send(&p).unwrap();
+            }
+        }
+        let froms: Vec<u16> = (0..2).map(|_| media::u16_at(&next_udp(&uh, media::VIDEO).unwrap(), 1)).collect();
+        assert!(froms.contains(&aid) && froms.contains(&bid), "{froms:?}");
+        let counts = loop {
+            let m = next_json(&mut a, "members");
+            let w: Vec<u64> = m["members"].as_array().unwrap().iter().filter(|x| x["id"] == aid || x["id"] == bid).map(|x| x["watchers"].as_u64().unwrap()).collect();
+            if w == [1, 1] {
+                break w;
+            }
+        };
+        assert_eq!(counts, [1, 1]);
+
+        // Previews: from a sharer only, to everyone.
+        a.write_all_frame(&json!({ "t": "thumb", "img": "QUJD" })).unwrap();
+        let t = next_json(&mut b, "thumb");
+        assert_eq!((t["id"].as_u64().unwrap() as u16, t["img"].as_str().unwrap()), (aid, "QUJD"));
+        h.write_all_frame(&json!({ "t": "thumb", "img": "WFla" })).unwrap();
+
+        // Ringing: the one rung hears who, and in which channel.
+        h.write_all_frame(&json!({ "t": "ring", "id": bid })).unwrap();
+        let r = next_json(&mut b, "ring");
+        assert_eq!((r["from"].as_u64().unwrap() as u16, r["name"].as_str().unwrap()), (hid, "Host"));
+        // Not again straight away.
+        h.write_all_frame(&json!({ "t": "ring", "id": bid })).unwrap();
+        b.write_all_frame(&json!({ "t": "ping", "n": 5 })).unwrap();
+        loop {
+            let (kind, body) = wire::read(&mut b).unwrap();
+            let v: Value = if kind == wire::JSON { serde_json::from_slice(&body).unwrap() } else { continue };
+            assert_ne!(v["t"], "ring", "rung twice");
+            assert!(!(v["t"] == "thumb" && v["img"] == "WFla"), "a non-sharer's preview went out");
+            if v["t"] == "pong" {
+                break;
+            }
+        }
+        // Removing Raid sends its people back to General.
+        h.write_all_frame(&json!({ "t": "channels", "action": "remove", "channel": raid })).unwrap();
+        loop {
+            let m = next_json(&mut h, "members");
+            if m["channels"].as_array().unwrap().len() == 1 {
+                assert!(m["members"].as_array().unwrap().iter().all(|x| x["channel"] == 1));
+                break;
+            }
+        }
+    }
+
     /// An older KittyConnect (voice and video on TCP) is turned away with a
     /// reason, not let in to send what no one would hear.
     #[test]
@@ -909,7 +1009,7 @@ mod tests {
 
         ann.write_all_frame(&json!({ "t": "screen", "on": true, "w": 1280, "h": 720, "fps": 30, "codec": "vp8" })).unwrap();
         std::thread::sleep(Duration::from_millis(100));
-        bo_link.watch(Some(ann_id));
+        bo_link.watch(&[ann_id]);
         bo.write_all_frame(&json!({ "t": "watch", "id": ann_id })).unwrap();
         next_json(&mut ann, "keyframe");
 

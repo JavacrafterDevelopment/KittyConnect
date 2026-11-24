@@ -1273,7 +1273,9 @@ impl App {
                 self.set_status("Left the room", "idle");
             }
             "voip.chat" => self.voip.chat(&s("text")),
-            "voip.voice" => self.voip.voice(msg["on"].as_bool().unwrap_or(false), &self.proxy),
+            "voip.voice" => self.voip.voice(msg["on"].as_bool().unwrap_or(false), msg["channel"].as_u64().map(|c| c as u16), &self.proxy),
+            "voip.ring" => self.voip.ring(msg["id"].as_u64().unwrap_or(0) as u16),
+            "voip.channels" => self.voip.channels(msg),
             "voip.mute" => self.voip.set_mute(msg["muted"].as_bool().unwrap_or(false), msg["deaf"].as_bool().unwrap_or(false)),
             "voip.screen" => self.voip.screen(msg.get("info").filter(|v| v.is_object()).cloned()),
             "voip.video" => {
@@ -1286,7 +1288,11 @@ impl App {
                     }
                 }
             }
-            "voip.watch" => self.voip.watch(msg["id"].as_u64().map(|v| v as u16)),
+            // {id, on}: start or stop watching one share (several can be watched).
+            "voip.watch" => match msg["id"].as_u64() {
+                Some(id) => self.voip.watch(id as u16, msg["on"].as_bool().unwrap_or(true)),
+                None => self.voip.set_watching(Vec::new()),
+            },
             // Native screen share: list what can be shared, start, stop.
             "voip.sources" => self.voip.list_sources(&self.proxy),
             "voip.thumbs" => {
@@ -1296,7 +1302,11 @@ impl App {
             "voip.share" => self.voip.share(msg, &self.proxy),
             "voip.unshare" => self.voip.unshare(),
             "voip.preview" => self.voip.set_preview(msg["on"].as_bool().unwrap_or(false)),
-            "voip.shareVolume" => self.voip.set_share_volume(msg["volume"].as_f64().unwrap_or(1.0) as f32),
+            "voip.shareVolume" => self.voip.set_share_volume(
+                msg["id"].as_u64().unwrap_or(0) as u16,
+                msg["volume"].as_f64().map(|v| v as f32),
+                msg["muted"].as_bool(),
+            ),
             "voip.keyframe" => self.voip.request_keyframe(msg["id"].as_u64().unwrap_or(0) as u16),
             "voip.attach" => {
                 if let Some(files) = rfd::FileDialog::new().set_title("Send files in chat").set_parent(window).pick_files() {

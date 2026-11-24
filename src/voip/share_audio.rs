@@ -1,10 +1,10 @@
-//! The sound of the screen share you're watching: stereo Opus from the
+//! The sound of the screen shares you're watching: stereo Opus from each
 //! sharer (see `capture::AudioEncoder`), held briefly so packets play in
-//! order, and played on its own output stream with its own volume. It plays
+//! order, each at its own volume, mixed and played on their own output stream. It plays
 //! whether or not you're in voice, and goes quiet when you deafen.
 
-use std::collections::{BTreeMap, VecDeque};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -26,8 +26,9 @@ const MAX_GAP: u32 = 25;
 /// Packets concealed in a row before going quiet.
 const MAX_PLC: u32 = 3;
 
+/// One sharer's sound.
+#[derive(Default)]
 struct Inner {
-    from: Option<u16>,
     decoder: Option<OpusDecoder>,
     pending: BTreeMap<u32, Vec<u8>>,
     next: Option<u32>,
@@ -36,51 +37,38 @@ struct Inner {
     plc: u32,
 }
 
+/// The sound of every share being watched, each with its own volume, mixed.
 pub struct ShareAudio {
-    inner: Mutex<Inner>,
-    /// Volume, 0..2, as f32 bits.
-    gain: AtomicU32,
+    streams: Mutex<HashMap<u16, Inner>>,
+    /// Each sharer's volume, 0..2 (1 when not set).
+    gains: Mutex<HashMap<u16, f32>>,
     deaf: AtomicBool,
 }
 
 impl Default for ShareAudio {
     fn default() -> Self {
-        ShareAudio {
-            inner: Mutex::new(Inner { from: None, decoder: None, pending: BTreeMap::new(), next: None, buf: VecDeque::new(), plc: 0 }),
-            gain: AtomicU32::new(1f32.to_bits()),
-            deaf: AtomicBool::new(false),
-        }
+        ShareAudio { streams: Mutex::default(), gains: Mutex::default(), deaf: AtomicBool::new(false) }
     }
 }
 
 impl ShareAudio {
-    pub fn set_gain(&self, g: f32) {
-        self.gain.store(g.clamp(0.0, 2.0).to_bits(), Ordering::Relaxed);
+    pub fn set_gain(&self, from: u16, g: f32) {
+        self.gains.lock().unwrap().insert(from, g.clamp(0.0, 2.0));
     }
 
     pub fn set_deaf(&self, deaf: bool) {
         self.deaf.store(deaf, Ordering::Relaxed);
     }
 
-    pub fn clear(&self) {
-        let mut i = self.inner.lock().unwrap();
-        i.from = None;
-        i.decoder = None;
-        i.pending.clear();
-        i.next = None;
-        i.buf.clear();
+    /// Forgets one sharer's sound (no longer watched).
+    pub fn clear(&self, from: u16) {
+        self.streams.lock().unwrap().remove(&from);
     }
 
     /// One packet of `from`'s shared sound.
     pub fn push(&self, from: u16, seq: u32, packet: &[u8]) {
-        let mut i = self.inner.lock().unwrap();
-        if i.from != Some(from) {
-            i.from = Some(from);
-            i.decoder = None;
-            i.pending.clear();
-            i.next = None;
-            i.buf.clear();
-        }
+        let mut all = self.streams.lock().unwrap();
+        let i = all.entry(from).or_default();
         if let Some(n) = i.next {
             let ahead = seq.wrapping_sub(n) as i32;
             if ahead < 0 && ahead > -(MAX_GAP as i32) {
@@ -104,28 +92,35 @@ impl ShareAudio {
         }
     }
 
-    /// Fills `out` (interleaved stereo, 48 kHz).
+    /// Fills `out` (interleaved stereo, 48 kHz) with every stream, mixed.
     pub fn pull(&self, out: &mut [f32]) {
         out.fill(0.0);
-        let mut i = self.inner.lock().unwrap();
-        if i.next.is_none() {
-            if i.pending.len() < PRIME {
-                return;
+        let deaf = self.deaf.load(Ordering::Relaxed);
+        let gains = self.gains.lock().unwrap().clone();
+        let mut all = self.streams.lock().unwrap();
+        for (from, i) in all.iter_mut() {
+            if i.next.is_none() {
+                if i.pending.len() < PRIME {
+                    continue;
+                }
+                i.next = i.pending.keys().next().copied();
+                i.plc = 0;
             }
-            i.next = i.pending.keys().next().copied();
-            i.plc = 0;
-        }
-        while i.buf.len() < out.len() {
-            if !decode_next(&mut i) {
-                break;
+            while i.buf.len() < out.len() {
+                if !decode_next(i) {
+                    break;
+                }
+            }
+            let gain = if deaf { 0.0 } else { gains.get(from).copied().unwrap_or(1.0) };
+            for o in out.iter_mut() {
+                match i.buf.pop_front() {
+                    Some(s) => *o += s * gain,
+                    None => break,
+                }
             }
         }
-        let gain = if self.deaf.load(Ordering::Relaxed) { 0.0 } else { f32::from_bits(self.gain.load(Ordering::Relaxed)) };
         for o in out.iter_mut() {
-            match i.buf.pop_front() {
-                Some(s) => *o = (s * gain).clamp(-1.0, 1.0),
-                None => break,
-            }
+            *o = o.clamp(-1.0, 1.0);
         }
     }
 }
@@ -313,13 +308,29 @@ mod tests {
     }
 
     #[test]
-    fn another_sharer_starts_fresh() {
+    fn two_shares_mix_each_at_its_own_volume() {
         let sa = ShareAudio::default();
-        for p in packets(5) {
+        let ps = packets(10);
+        for p in &ps {
             sa.push(1, p.0, &p.1);
+            sa.push(2, p.0, &p.1);
         }
-        sa.push(2, 0, &packets(1)[0].1);
-        assert_eq!(sa.inner.lock().unwrap().pending.len(), 1);
-        assert_eq!(sa.inner.lock().unwrap().from, Some(2));
+        let rms = |sa: &ShareAudio| {
+            let mut out = vec![0f32; FRAME * 2];
+            let mut sum = 0.0;
+            for _ in 0..4 {
+                sa.pull(&mut out);
+                sum += out.iter().map(|s| s * s).sum::<f32>();
+            }
+            sum
+        };
+        let both = rms(&sa);
+        assert!(both > 0.0);
+        // The second one muted: only the first is heard.
+        sa.set_gain(2, 0.0);
+        sa.set_gain(1, 0.0);
+        assert_eq!(rms(&sa), 0.0, "both muted");
+        sa.clear(2);
+        assert_eq!(sa.streams.lock().unwrap().len(), 1);
     }
 }
