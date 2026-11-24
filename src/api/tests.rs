@@ -209,3 +209,12 @@ fn events_go_once_and_messages_reach_the_same_game() {
     host.pump();
     assert_eq!(host.api.activity(), None);
 }
+
+#[test]
+fn on_by_default_and_off_stays_off() {
+    assert!(Config::default().enabled);
+    let c: Config = serde_json::from_value(json!({})).unwrap();
+    assert!(c.enabled, "no setting saved yet: on");
+    let c: Config = serde_json::from_value(json!({ "enabled": false })).unwrap();
+    assert!(!c.enabled, "turned off in Settings: stays off");
+}

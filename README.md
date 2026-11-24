@@ -260,7 +260,7 @@ their own.
 and when the other side stops sharing, closes the port or ends the room, your
 side disconnects by itself and says so. Downloads show their speed.
 
-**Game API** (Settings, off until you turn it on): games you make can use
+**Game API** (on by default; turn it off in Settings): games you make can use
 Portside, like Discord's game SDK. A game on the same PC connects to
 `127.0.0.1` (ports 47800 to 47809; never reachable from the network) and
 Portside asks you whether to allow it, showing its program file. Once allowed,

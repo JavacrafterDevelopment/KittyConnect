@@ -1,7 +1,7 @@
 //! The game API: games (and other programs) on this PC can use Portside.
 //!
 //! It listens on 127.0.0.1 only, at the first free port from 47800 to 47809,
-//! so nothing on the network can reach it, and it's off until turned on in
+//! so nothing on the network can reach it. It's on unless turned off in
 //! Settings. The first time a program connects, Portside asks whether to
 //! allow it; once allowed it gets a key, which only works for that program.
 //!
@@ -96,11 +96,18 @@ pub struct Allowed {
     pub used: u64,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Config {
+    /// On unless turned off in Settings: each program still has to be allowed.
     pub enabled: bool,
     pub apps: Vec<Allowed>,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Config { enabled: true, apps: Vec::new() }
+    }
 }
 
 fn settings_path() -> std::path::PathBuf {

@@ -6,7 +6,7 @@ next to your name, send small messages to the same game on friends' PCs, and
 host or join a multiplayer session with friends in your hub, peer to peer,
 over **UDP or TCP**.
 
-It's off until you turn it on in **Settings › Game API**.
+It's on by default (each game still has to be allowed by you the first time). Turn it off in **Settings › Game API** if you don't want it.
 
 ## How it stays private
 

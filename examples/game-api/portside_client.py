@@ -8,7 +8,7 @@ library. Copy the Portside class into your own tools, or run this file:
     python portside_client.py chat hello    # sends a message to this game on friends' PCs
     python portside_client.py listen        # prints every event
 
-Turn the API on first in Portside (Settings > Game API). The first run asks
+The game API is on by default in Portside (Settings > Game API). The first run asks
 you to allow it in Portside; the key it gets is saved in
 portside-token.json beside this file. See docs/game-api.md.
 """
