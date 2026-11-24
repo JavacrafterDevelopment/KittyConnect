@@ -2,21 +2,21 @@
   "schema": 1,
   "channels": {
     "beta": {
-      "version": "0.14.0",
-      "published": "2026-11-22T10:15:43Z",
-      "notes": "## What's Changed\n* macOS test fix, CI time limits, and smaller hub/main files by @JavacrafterDevelopment in https://github.com/JavacrafterDevelopment/KittyConnect/pull/2\n* Combine hub split, UI jitter fix and native screen share by @JavacrafterDevelopment in https://github.com/JavacrafterDevelopment/KittyConnect/pull/3\n\n\n**Full Changelog**: https://github.com/JavacrafterDevelopment/KittyConnect/compare/v0.13.0...v0.14.0",
-      "page": "https://github.com/JavacrafterDevelopment/KittyConnect/releases/tag/v0.14.0",
+      "version": "0.15.0",
+      "published": "2026-11-24T02:47:33Z",
+      "notes": "## What's Changed\n* Portside 0.15.0: new voice room, game overlay, Settings tab, release on merge by @JavacrafterDevelopment in https://github.com/JavacrafterDevelopment/KittyConnect/pull/4\n\n\n**Full Changelog**: https://github.com/JavacrafterDevelopment/KittyConnect/compare/v0.14.0...v0.15.0",
+      "page": "https://github.com/JavacrafterDevelopment/KittyConnect/releases/tag/v0.15.0",
       "package": {
-        "url": "https://github.com/JavacrafterDevelopment/KittyConnect/releases/download/v0.14.0/KittyConnect-windows-x64.zip",
-        "size": 15990117,
-        "sha256": "b8cb4781cad3238b34e832dd4de7903e58bf07c3607c95242cd969a256227a52"
+        "url": "https://github.com/JavacrafterDevelopment/KittyConnect/releases/download/v0.15.0/KittyConnect-windows-x64.zip",
+        "size": 16061446,
+        "sha256": "7ed079f82939b8cf56ef6de43c82e809faf995d09359c555eb12362e311ac22f"
       },
       "exe": "KittyConnect.exe",
       "files": [
         {
           "path": "KittyConnect.exe",
-          "size": 39436800,
-          "sha256": "ebb06f75128936cc9fe253f7d51effaf0e10d2fa38b593d8c5e72de4dd3d9472"
+          "size": 39613952,
+          "sha256": "f929b966b28e7d3aa0231c010c523f415bf0463590a845c9c6cfa3d2dbddc6b7"
         },
         {
           "path": "licenses/kc-voip/github.com_anmitsu_go-shlex/LICENSE",
@@ -386,21 +386,21 @@
       ]
     },
     "stable": {
-      "version": "0.14.0",
-      "published": "2026-11-22T10:15:43Z",
-      "notes": "## What's Changed\n* macOS test fix, CI time limits, and smaller hub/main files by @JavacrafterDevelopment in https://github.com/JavacrafterDevelopment/KittyConnect/pull/2\n* Combine hub split, UI jitter fix and native screen share by @JavacrafterDevelopment in https://github.com/JavacrafterDevelopment/KittyConnect/pull/3\n\n\n**Full Changelog**: https://github.com/JavacrafterDevelopment/KittyConnect/compare/v0.13.0...v0.14.0",
-      "page": "https://github.com/JavacrafterDevelopment/KittyConnect/releases/tag/v0.14.0",
+      "version": "0.15.0",
+      "published": "2026-11-24T02:47:33Z",
+      "notes": "## What's Changed\n* Portside 0.15.0: new voice room, game overlay, Settings tab, release on merge by @JavacrafterDevelopment in https://github.com/JavacrafterDevelopment/KittyConnect/pull/4\n\n\n**Full Changelog**: https://github.com/JavacrafterDevelopment/KittyConnect/compare/v0.14.0...v0.15.0",
+      "page": "https://github.com/JavacrafterDevelopment/KittyConnect/releases/tag/v0.15.0",
       "package": {
-        "url": "https://github.com/JavacrafterDevelopment/KittyConnect/releases/download/v0.14.0/KittyConnect-windows-x64.zip",
-        "size": 15990117,
-        "sha256": "b8cb4781cad3238b34e832dd4de7903e58bf07c3607c95242cd969a256227a52"
+        "url": "https://github.com/JavacrafterDevelopment/KittyConnect/releases/download/v0.15.0/KittyConnect-windows-x64.zip",
+        "size": 16061446,
+        "sha256": "7ed079f82939b8cf56ef6de43c82e809faf995d09359c555eb12362e311ac22f"
       },
       "exe": "KittyConnect.exe",
       "files": [
         {
           "path": "KittyConnect.exe",
-          "size": 39436800,
-          "sha256": "ebb06f75128936cc9fe253f7d51effaf0e10d2fa38b593d8c5e72de4dd3d9472"
+          "size": 39613952,
+          "sha256": "f929b966b28e7d3aa0231c010c523f415bf0463590a845c9c6cfa3d2dbddc6b7"
         },
         {
           "path": "licenses/kc-voip/github.com_anmitsu_go-shlex/LICENSE",

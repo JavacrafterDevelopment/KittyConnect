@@ -2,26 +2,26 @@
   "schema": 1,
   "channels": {
     "beta": {
-      "version": "0.14.0",
-      "published": "2026-11-22T10:15:43Z",
-      "notes": "## What's Changed\n* macOS test fix, CI time limits, and smaller hub/main files by @JavacrafterDevelopment in https://github.com/JavacrafterDevelopment/KittyConnect/pull/2\n* Combine hub split, UI jitter fix and native screen share by @JavacrafterDevelopment in https://github.com/JavacrafterDevelopment/KittyConnect/pull/3\n\n\n**Full Changelog**: https://github.com/JavacrafterDevelopment/KittyConnect/compare/v0.13.0...v0.14.0",
-      "page": "https://github.com/JavacrafterDevelopment/KittyConnect/releases/tag/v0.14.0",
+      "version": "0.15.0",
+      "published": "2026-11-24T02:47:33Z",
+      "notes": "## What's Changed\n* Portside 0.15.0: new voice room, game overlay, Settings tab, release on merge by @JavacrafterDevelopment in https://github.com/JavacrafterDevelopment/KittyConnect/pull/4\n\n\n**Full Changelog**: https://github.com/JavacrafterDevelopment/KittyConnect/compare/v0.14.0...v0.15.0",
+      "page": "https://github.com/JavacrafterDevelopment/KittyConnect/releases/tag/v0.15.0",
       "package": {
-        "url": "https://github.com/JavacrafterDevelopment/KittyConnect/releases/download/v0.14.0/KittyConnect-macos.zip",
-        "size": 56584023,
-        "sha256": "dd0c907b6c66b3dff800935f029164fc6904a2ac45bedc8691658a5f407b04b0"
+        "url": "https://github.com/JavacrafterDevelopment/KittyConnect/releases/download/v0.15.0/KittyConnect-macos.zip",
+        "size": 56724267,
+        "sha256": "ba726c809e2126ffbec79604aa95a5a189dd33108d79ffa1416dd0af6a201629"
       },
       "exe": "KittyConnect.app/Contents/MacOS/KittyConnect",
       "files": [
         {
           "path": "KittyConnect.app/Contents/Info.plist",
           "size": 1302,
-          "sha256": "b6ac9afd1f7055ec826031fd97045587151cc05699b03a010a3f0044b60562cb"
+          "sha256": "15551a4a8cf941e769970b2ecc78cdc951bbc6fd5197d060ea377fe3c1ca8fab"
         },
         {
           "path": "KittyConnect.app/Contents/MacOS/KittyConnect",
-          "size": 142933872,
-          "sha256": "1b16c12c3277a95bffdd316f4d5d258272416e0deb2c76bfe666a17e900b1c7e"
+          "size": 143280432,
+          "sha256": "572ea527c7a816aa48bef7c599cad1f49fa77e885e2db3a370c28b3e11d3ecf5"
         },
         {
           "path": "KittyConnect.app/Contents/Resources/KittyConnect.icns",
@@ -781,26 +781,26 @@
       ]
     },
     "stable": {
-      "version": "0.14.0",
-      "published": "2026-11-22T10:15:43Z",
-      "notes": "## What's Changed\n* macOS test fix, CI time limits, and smaller hub/main files by @JavacrafterDevelopment in https://github.com/JavacrafterDevelopment/KittyConnect/pull/2\n* Combine hub split, UI jitter fix and native screen share by @JavacrafterDevelopment in https://github.com/JavacrafterDevelopment/KittyConnect/pull/3\n\n\n**Full Changelog**: https://github.com/JavacrafterDevelopment/KittyConnect/compare/v0.13.0...v0.14.0",
-      "page": "https://github.com/JavacrafterDevelopment/KittyConnect/releases/tag/v0.14.0",
+      "version": "0.15.0",
+      "published": "2026-11-24T02:47:33Z",
+      "notes": "## What's Changed\n* Portside 0.15.0: new voice room, game overlay, Settings tab, release on merge by @JavacrafterDevelopment in https://github.com/JavacrafterDevelopment/KittyConnect/pull/4\n\n\n**Full Changelog**: https://github.com/JavacrafterDevelopment/KittyConnect/compare/v0.14.0...v0.15.0",
+      "page": "https://github.com/JavacrafterDevelopment/KittyConnect/releases/tag/v0.15.0",
       "package": {
-        "url": "https://github.com/JavacrafterDevelopment/KittyConnect/releases/download/v0.14.0/KittyConnect-macos.zip",
-        "size": 56584023,
-        "sha256": "dd0c907b6c66b3dff800935f029164fc6904a2ac45bedc8691658a5f407b04b0"
+        "url": "https://github.com/JavacrafterDevelopment/KittyConnect/releases/download/v0.15.0/KittyConnect-macos.zip",
+        "size": 56724267,
+        "sha256": "ba726c809e2126ffbec79604aa95a5a189dd33108d79ffa1416dd0af6a201629"
       },
       "exe": "KittyConnect.app/Contents/MacOS/KittyConnect",
       "files": [
         {
           "path": "KittyConnect.app/Contents/Info.plist",
           "size": 1302,
-          "sha256": "b6ac9afd1f7055ec826031fd97045587151cc05699b03a010a3f0044b60562cb"
+          "sha256": "15551a4a8cf941e769970b2ecc78cdc951bbc6fd5197d060ea377fe3c1ca8fab"
         },
         {
           "path": "KittyConnect.app/Contents/MacOS/KittyConnect",
-          "size": 142933872,
-          "sha256": "1b16c12c3277a95bffdd316f4d5d258272416e0deb2c76bfe666a17e900b1c7e"
+          "size": 143280432,
+          "sha256": "572ea527c7a816aa48bef7c599cad1f49fa77e885e2db3a370c28b3e11d3ecf5"
         },
         {
           "path": "KittyConnect.app/Contents/Resources/KittyConnect.icns",
