@@ -47,7 +47,8 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Securit
 # Native screen share: Windows' own Graphics Capture, a hardware H.264 encoder
 # through Media Foundation, and WASAPI process loopback for the sound. The same
 # Microsoft bindings Portside already ships (through wry's WebView2), with more
-# of Windows' APIs switched on.
+# of Windows' APIs switched on. (Imaging and Xps: the picker's previews,
+# with the Windows Imaging Component's JPEG/PNG and PrintWindow.)
 windows = { version = "0.62", features = [
     "Foundation",
     "Graphics",
@@ -61,11 +62,13 @@ windows = { version = "0.62", features = [
     "Win32_Graphics_Dxgi",
     "Win32_Graphics_Dxgi_Common",
     "Win32_Graphics_Gdi",
+    "Win32_Graphics_Imaging",
     "Win32_Media_Audio",
     "Win32_Media_KernelStreaming",
     "Win32_Media_MediaFoundation",
     "Win32_Media_Multimedia",
     "Win32_Security",
+    "Win32_Storage_Xps",
     "Win32_System_Com",
     "Win32_System_Com_StructuredStorage",
     "Win32_System_Ole",

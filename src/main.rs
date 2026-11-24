@@ -1289,6 +1289,10 @@ impl App {
             "voip.watch" => self.voip.watch(msg["id"].as_u64().map(|v| v as u16)),
             // Native screen share: list what can be shared, start, stop.
             "voip.sources" => self.voip.list_sources(&self.proxy),
+            "voip.thumbs" => {
+                let ids: Vec<String> = msg["ids"].as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect()).unwrap_or_default();
+                self.voip.thumbnails(&ids, msg["icons"] == true, &self.proxy);
+            }
             "voip.share" => self.voip.share(msg, &self.proxy),
             "voip.unshare" => self.voip.unshare(),
             "voip.preview" => self.voip.set_preview(msg["on"].as_bool().unwrap_or(false)),

@@ -22,13 +22,15 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use block2::RcBlock;
-use objc2::encode::{Encode, Encoding};
+use objc2::encode::{Encode, Encoding, RefEncode};
 use objc2::rc::{autoreleasepool, Allocated, Retained};
 use objc2::runtime::{AnyClass, AnyObject, AnyProtocol, Bool, ClassBuilder, NSObject, Sel};
 use objc2::{msg_send, sel, ClassType};
 
 use super::h264::{avcc_to_annexb, ParamSets};
-use super::{out_size, Audio, AudioEncoder, Cadence, Control, Hint, Options, Out, Running, Sink, Source};
+use std::collections::HashMap;
+
+use super::{out_size, thumb_size, Audio, AudioEncoder, Cadence, Control, Hint, Options, Out, Running, Sink, Source, Thumb, ICON_SIZE, THUMB_H, THUMB_W};
 
 // ------------------------------------------------------- C declarations
 
@@ -89,6 +91,9 @@ unsafe impl Encode for CGSize {
 unsafe impl Encode for CGRect {
     const ENCODING: Encoding = Encoding::Struct("CGRect", &[CGPoint::ENCODING, CGSize::ENCODING]);
 }
+unsafe impl RefEncode for CGRect {
+    const ENCODING_REF: Encoding = Encoding::Pointer(&Self::ENCODING);
+}
 
 /// A CoreFoundation string passed to an Objective-C method.
 #[repr(transparent)]
@@ -142,7 +147,12 @@ extern "C" {
     fn CFArrayGetValueAtIndex(a: CFArrayRef, i: isize) -> CFTypeRef;
     fn CFRetain(x: CFTypeRef) -> CFTypeRef;
     fn CFRelease(x: CFTypeRef);
+    fn CFDataCreateMutable(a: CFTypeRef, capacity: isize) -> *mut c_void;
+    fn CFDataGetLength(d: *const c_void) -> isize;
+    fn CFDataGetBytePtr(d: *const c_void) -> *const u8;
+    fn CFStringCreateWithCString(a: CFTypeRef, s: *const i8, encoding: u32) -> CFStringRef;
 }
+const kCFStringEncodingUTF8: u32 = 0x0800_0100;
 const kCFNumberSInt32Type: isize = 3;
 const kCFNumberSInt64Type: isize = 4;
 const kCFNumberFloat64Type: isize = 6;
@@ -241,6 +251,26 @@ extern "C" {
     fn CGDisplayModeGetPixelWidth(m: *mut c_void) -> usize;
     fn CGDisplayModeGetWidth(m: *mut c_void) -> usize;
     fn CGDisplayModeRelease(m: *mut c_void);
+    fn CGImageGetWidth(i: CGImageRef) -> usize;
+    fn CGImageGetHeight(i: CGImageRef) -> usize;
+    fn CGImageRelease(i: CGImageRef);
+    fn CGColorSpaceCreateDeviceRGB() -> *mut c_void;
+    fn CGColorSpaceRelease(c: *mut c_void);
+    fn CGBitmapContextCreate(data: *mut c_void, w: usize, h: usize, bits: usize, row: usize, cs: *mut c_void, info: u32) -> *mut c_void;
+    fn CGBitmapContextCreateImage(c: *mut c_void) -> CGImageRef;
+    fn CGContextSetInterpolationQuality(c: *mut c_void, q: i32);
+    fn CGContextDrawImage(c: *mut c_void, r: CGRect, i: CGImageRef);
+    fn CGContextRelease(c: *mut c_void);
+}
+
+type CGImageRef = *mut c_void;
+
+#[link(name = "ImageIO", kind = "framework")]
+extern "C" {
+    static kCGImageDestinationLossyCompressionQuality: CFStringRef;
+    fn CGImageDestinationCreateWithData(data: *mut c_void, ty: CFStringRef, count: usize, opts: CFDictionaryRef) -> *mut c_void;
+    fn CGImageDestinationAddImage(d: *mut c_void, i: CGImageRef, props: CFDictionaryRef);
+    fn CGImageDestinationFinalize(d: *mut c_void) -> bool;
 }
 
 extern "C" {
@@ -443,10 +473,12 @@ pub fn sources() -> Result<Vec<Source>, String> {
                 w: (w as f64 * s) as u32,
                 h: (h as f64 * s) as u32,
                 minimized: false,
+                main: true,
             });
         }
         let me = getpid();
         let s = scale_of(main);
+        let mut regular: HashMap<i32, bool> = HashMap::new();
         for w in content.windows() {
             let layer: isize = msg_send![&*w, windowLayer];
             if layer != 0 {
@@ -463,20 +495,196 @@ pub fn sources() -> Result<Vec<Source>, String> {
             }
             let on: Bool = msg_send![&*w, isOnScreen];
             let id: u32 = msg_send![&*w, windowID];
+            let (pw, ph) = ((frame.size.width * s) as u32, (frame.size.height * s) as u32);
+            // Only apps with a Dock icon count (not menu bar helpers or agents).
+            let app_window = *regular.entry(pid).or_insert_with(|| regular_app(pid));
+            // Untitled but big and on screen: a game or a player; name it for its app.
+            let named = if title.is_empty() && on.as_bool() && frame.size.width >= 400.0 && frame.size.height >= 300.0 { app.clone() } else { title.clone() };
+            let main = super::is_main_window(&super::WindowFacts { title: &named, app: &app, w: pw, h: ph, app_window, overlay: false });
             out.push(Source {
                 id: format!("window:{id}"),
                 screen: false,
                 title: if title.is_empty() { app.clone() } else { title },
                 app,
                 pid: pid as u32,
-                w: (frame.size.width * s) as u32,
-                h: (frame.size.height * s) as u32,
+                w: pw,
+                h: ph,
                 // Off screen: minimized, hidden or on another Space.
                 minimized: !on.as_bool(),
+                main,
             });
         }
         Ok(out)
     })
+}
+
+/// Does the app show in the Dock (a regular app, not a menu bar helper)?
+unsafe fn regular_app(pid: i32) -> bool {
+    let Some(cls) = AnyClass::get(c"NSRunningApplication") else { return true };
+    let app: *mut AnyObject = msg_send![cls, runningApplicationWithProcessIdentifier: pid];
+    if app.is_null() {
+        return false;
+    }
+    let policy: isize = msg_send![&*app, activationPolicy];
+    policy == 0 // NSApplicationActivationPolicyRegular
+}
+
+// ------------------------------------------------------------- previews
+
+/// The picker's previews: one still from ScreenCaptureKit (macOS 14+), or
+/// from Core Graphics on 12.3 and 13; shrunk and made into JPEG by ImageIO.
+/// The icon is the app's own (from its Dock icon).
+pub fn thumbnails(ids: &[String], icons: bool, each: &mut dyn FnMut(&str, Thumb)) {
+    autoreleasepool(|_| unsafe {
+        let Ok(content) = shareable() else { return };
+        let own: Vec<*mut AnyObject> = content.own_app().into_iter().collect();
+        let mut icon_of: HashMap<i32, Option<Vec<u8>>> = HashMap::new();
+        for id in ids {
+            let Some((is_screen, obj, n)) = find(&content, id) else { continue };
+            let mut th = Thumb::default();
+            let on: bool = is_screen || {
+                let b: Bool = msg_send![&*obj, isOnScreen];
+                b.as_bool()
+            };
+            if on {
+                let img = autoreleasepool(|_| still(is_screen, obj, n, &own));
+                if !img.is_null() {
+                    th.image = encode_image(img, THUMB_W, THUMB_H, false);
+                    CGImageRelease(img);
+                }
+            }
+            if icons && !is_screen {
+                let (_, pid) = app_of(obj);
+                th.icon = icon_of.entry(pid).or_insert_with(|| app_icon(pid)).clone();
+            }
+            each(id, th);
+        }
+    })
+}
+
+/// A still of a display or window (ours to release), or null.
+unsafe fn still(is_screen: bool, obj: *mut AnyObject, n: u32, own: &[*mut AnyObject]) -> CGImageRef {
+    let Some(manager) = AnyClass::get(c"SCScreenshotManager") else { return legacy_still(is_screen, n) };
+    let Ok(filter_cls) = class(c"SCContentFilter") else { return null_mut() };
+    let none: Vec<*mut AnyObject> = Vec::new();
+    let a: Allocated<AnyObject> = msg_send![filter_cls, alloc];
+    let (filter, w, h): (Option<Retained<AnyObject>>, f64, f64) = if is_screen {
+        let f = msg_send![a, initWithDisplay: &*obj, excludingApplications: &*nsarray(own), exceptingWindows: &*nsarray(&none)];
+        let w: isize = msg_send![&*obj, width];
+        let h: isize = msg_send![&*obj, height];
+        (f, w as f64, h as f64)
+    } else {
+        let f = msg_send![a, initWithDesktopIndependentWindow: &*obj];
+        let frame: CGRect = msg_send![&*obj, frame];
+        (f, frame.size.width, frame.size.height)
+    };
+    let Some(filter) = filter else { return null_mut() };
+    // Points are enough: the picture is shrunk to a preview anyway.
+    let (tw, th) = thumb_size(w.max(1.0) as u32, h.max(1.0) as u32, THUMB_W * 2, THUMB_H * 2);
+    let Ok(config_cls) = class(c"SCStreamConfiguration") else { return null_mut() };
+    let config: Retained<AnyObject> = msg_send![config_cls, new];
+    let _: () = msg_send![&*config, setWidth: tw as usize];
+    let _: () = msg_send![&*config, setHeight: th as usize];
+    let _: () = msg_send![&*config, setShowsCursor: Bool::NO];
+    let _: () = msg_send![&*config, setScalesToFit: Bool::YES];
+    let (tx, rx) = sync_channel::<usize>(1);
+    let block = RcBlock::new(move |img: *mut c_void, _error: *mut AnyObject| {
+        if !img.is_null() {
+            CFRetain(img);
+        }
+        let _ = tx.try_send(img as usize);
+    });
+    let _: () = msg_send![manager, captureImageWithFilter: &*filter, configuration: &*config, completionHandler: &*block];
+    rx.recv_timeout(Duration::from_secs(3)).map(|p| p as CGImageRef).unwrap_or(null_mut())
+}
+
+/// macOS 12.3 and 13 have no ScreenCaptureKit stills; Core Graphics does it
+/// (looked up at run time: newer SDKs no longer declare these).
+unsafe fn legacy_still(is_screen: bool, n: u32) -> CGImageRef {
+    const RTLD_DEFAULT: *mut c_void = -2isize as *mut c_void;
+    if is_screen {
+        let f = dlsym(RTLD_DEFAULT, c"CGDisplayCreateImage".as_ptr());
+        if f.is_null() {
+            return null_mut();
+        }
+        let f: unsafe extern "C" fn(u32) -> CGImageRef = std::mem::transmute(f);
+        f(n)
+    } else {
+        let f = dlsym(RTLD_DEFAULT, c"CGWindowListCreateImage".as_ptr());
+        if f.is_null() {
+            return null_mut();
+        }
+        let f: unsafe extern "C" fn(CGRect, u32, u32, u32) -> CGImageRef = std::mem::transmute(f);
+        // CGRectNull: just the window's own bounds.
+        let null_rect = CGRect { origin: CGPoint { x: f64::INFINITY, y: f64::INFINITY }, size: CGSize::default() };
+        // Including only this window; without its shadow, at point size.
+        f(null_rect, 1 << 3, n, (1 << 0) | (1 << 4))
+    }
+}
+
+unsafe fn app_icon(pid: i32) -> Option<Vec<u8>> {
+    let cls = AnyClass::get(c"NSRunningApplication")?;
+    let app: *mut AnyObject = msg_send![cls, runningApplicationWithProcessIdentifier: pid];
+    if app.is_null() {
+        return None;
+    }
+    let icon: *mut AnyObject = msg_send![&*app, icon];
+    if icon.is_null() {
+        return None;
+    }
+    let px = (ICON_SIZE * 2) as f64; // Retina
+    let mut rect = CGRect { origin: CGPoint::default(), size: CGSize { width: px, height: px } };
+    let img: *mut c_void = msg_send![&*icon, CGImageForProposedRect: &mut rect as *mut CGRect, context: null_mut::<AnyObject>(), hints: null_mut::<AnyObject>()];
+    if img.is_null() {
+        return None;
+    }
+    encode_image(img, ICON_SIZE * 2, ICON_SIZE * 2, true)
+}
+
+/// A CGImage, shrunk to fit `max_w`×`max_h`, as JPEG (or PNG, which keeps
+/// transparency).
+unsafe fn encode_image(img: CGImageRef, max_w: u32, max_h: u32, png: bool) -> Option<Vec<u8>> {
+    let (w, h) = (CGImageGetWidth(img) as u32, CGImageGetHeight(img) as u32);
+    if w == 0 || h == 0 {
+        return None;
+    }
+    let (tw, th) = thumb_size(w, h, max_w, max_h);
+    let cs = CGColorSpaceCreateDeviceRGB();
+    // Premultiplied BGRA, 32-bit little-endian.
+    let ctx = CGBitmapContextCreate(null_mut(), tw as usize, th as usize, 8, 0, cs, 2 | (2 << 12));
+    CGColorSpaceRelease(cs);
+    if ctx.is_null() {
+        return None;
+    }
+    CGContextSetInterpolationQuality(ctx, 3); // high
+    CGContextDrawImage(ctx, CGRect { origin: CGPoint::default(), size: CGSize { width: tw as f64, height: th as f64 } }, img);
+    let small = CGBitmapContextCreateImage(ctx);
+    CGContextRelease(ctx);
+    if small.is_null() {
+        return None;
+    }
+    let data = CFDataCreateMutable(null(), 0);
+    let ty = CFStringCreateWithCString(null(), if png { c"public.png" } else { c"public.jpeg" }.as_ptr(), kCFStringEncodingUTF8);
+    let dest = CGImageDestinationCreateWithData(data, ty, 1, null());
+    let mut out = None;
+    if !dest.is_null() {
+        let q = cfnum_f64(0.75);
+        let keys = [kCGImageDestinationLossyCompressionQuality as CFTypeRef];
+        let vals = [q];
+        let props = CFDictionaryCreate(null(), keys.as_ptr(), vals.as_ptr(), 1, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+        CGImageDestinationAddImage(dest, small, props);
+        if CGImageDestinationFinalize(dest) {
+            let n = CFDataGetLength(data) as usize;
+            out = Some(std::slice::from_raw_parts(CFDataGetBytePtr(data), n).to_vec());
+        }
+        CFRelease(props);
+        CFRelease(q);
+        CFRelease(dest);
+    }
+    CFRelease(ty);
+    CFRelease(data);
+    CGImageRelease(small);
+    out
 }
 
 // ------------------------------------------------------------- encoder

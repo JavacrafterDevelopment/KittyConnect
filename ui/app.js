@@ -1301,6 +1301,26 @@ function person(m, v, speaking) {
     </div>`;
 }
 
+/* Someone in voice, as a tile: their initials big, name and mic state at the
+   bottom, LIVE and Watch at the top when they're sharing. */
+function tile(m, v, speaking) {
+  const you = m.id === v.me;
+  const icons = m.deaf ? `<span class="ico" title="Deafened">${ICON_DEAF}</span>` : m.muted || m.smuted ? `<span class="ico" title="${m.smuted ? 'Muted by the host' : 'Muted'}">${ICON_MUTED}</span>` : '';
+  const top = [];
+  if (m.screen) top.push('<span class="tag-sm live">LIVE</span>');
+  if (m.host) top.push('<span class="tag-sm">Host</span>');
+  top.push('<span class="grow"></span>');
+  if (m.screen && !you) {
+    top.push(`<button class="btn small ${v.watching === m.id ? '' : 'primary'}" data-watch="${v.watching === m.id ? '' : m.id}">${v.watching === m.id ? 'Watching' : 'Watch'}</button>`);
+  }
+  return `
+    <div class="tile" data-member="${m.id}" style="--h:${hue(m.name)}" title="Right-click for options">
+      <div class="tile-top">${top.join('')}</div>
+      <span class="avatar${speaking.includes(m.id) ? ' speaking' : ''}" style="--h:${hue(m.name)}">${esc(initials(m.name))}</span>
+      <span class="tile-name"><span>${esc(m.name)}${you ? ' (you)' : ''}</span>${icons}</span>
+    </div>`;
+}
+
 function time(ts) {
   const d = new Date(ts * 1000);
   return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
@@ -1374,8 +1394,8 @@ function renderVoip(v) {
   show($('voip-media-state'), mediaText);
   const speaking = liveSpeaking(v);
   setHtml($('voip-invoice'), voiceMembers.length
-    ? voiceMembers.map((m) => person(m, v, speaking)).join('')
-    : '<div class="empty small">Nobody is in voice yet.</div>');
+    ? voiceMembers.map((m) => tile(m, v, speaking)).join('')
+    : `<div class="empty small">${v.inVoice ? 'Connecting to voice…' : 'Nobody is in voice yet. Join to start talking.'}</div>`);
   setHtml($('voip-members'), v.members.map((m) => person(m, v, speaking)).join(''));
   renderLog('voip', v.log);
 }
@@ -1643,7 +1663,7 @@ function shareError(text) {
 
 async function startShare() {
   shareError('');
-  hide($('ss-box'), true);
+  closePicker();
   if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia || !window.VideoEncoder || !window.MediaStreamTrackProcessor) {
     return shareError('Screen sharing needs a newer Microsoft Edge WebView2 runtime. Update Edge and try again.');
   }
@@ -1692,7 +1712,6 @@ async function startShare() {
   post({ cmd: 'voip.screen', info: ss.info });
   $('ss-preview').srcObject = stream;
   track.addEventListener('ended', () => stopShare());
-  hide($('ss-box'), true);
   hide($('ss-live'), false);
   hide($('ss-row'), true);
 
@@ -1755,9 +1774,14 @@ function stopShare(error) {
   if (error) shareError(error);
 }
 
-/* ---- the native picker */
+/* ---- the native picker: a popup with a live picture of each screen and app
+   window. Only the windows people share (apps, browsers, games) are listed
+   unless "Show all windows" is ticked. The pictures are made by the app
+   (src/capture) every few seconds while the popup is open, and never leave
+   this computer. */
 
-const pick = { kind: 'screen', sources: [], audio: [], chosen: null, error: '' };
+const pick = { kind: 'window', sources: [], audio: [], chosen: null, error: '', all: false, thumbs: new Map(), asked: new Set(), timer: 0 };
+const THUMB_EVERY = 2500;
 
 function chosenSource() {
   return pick.sources.find((x) => x.id === pick.chosen) || null;
@@ -1768,21 +1792,43 @@ function srcSize() {
   return c && c.w && c.h ? { w: c.w, h: c.h } : nativeRes();
 }
 
+function shownSources() {
+  return pick.sources.filter((x) => x.kind === pick.kind && (pick.all || x.main));
+}
+
+function thumbHtml(x) {
+  const t = pick.thumbs.get(x.id) || {};
+  if (t.img) return `<img class="pic" src="${t.img}" alt="">`;
+  const why = x.minimized ? 'Minimized. Shares when it\'s restored.' : '';
+  return `${t.icon ? `<img class="big-icon" src="${t.icon}" alt="">` : ''}${why ? `<span class="ss-none">${why}</span>` : ''}`;
+}
+
+function sourceHtml(x) {
+  const t = pick.thumbs.get(x.id) || {};
+  const icon = x.kind === 'window' && t.icon ? `<img class="icon" src="${t.icon}" alt="">` : '';
+  const app = x.kind === 'window' && x.app && x.app !== x.title ? `${esc(x.app)} · ` : '';
+  return `<button class="ss-source${x.id === pick.chosen ? ' on' : ''}" data-src="${esc(x.id)}" title="${esc(x.title)}">
+      <span class="ss-thumb" data-thumb="${esc(x.id)}">${thumbHtml(x)}</span>
+      <span class="ss-label">${icon}<span class="ss-name">${esc(x.title)}</span></span>
+      <span class="meta">${app}${x.w}×${x.h}${x.minimized ? ' · minimized' : ''}</span>
+    </button>`;
+}
+
 function renderSources() {
   for (const b of document.querySelectorAll('#ss-kind .seg-btn')) b.classList.toggle('on', b.dataset.kind === pick.kind);
-  const list = pick.sources.filter((x) => x.kind === pick.kind);
+  hide($('ss-all-wrap'), pick.kind !== 'window');
+  $('ss-all').checked = pick.all;
+  const list = shownSources();
   if (pick.error) {
     setHtml($('ss-sources'), `<div class="empty">${esc(pick.error)}</div>`);
   } else if (!list.length) {
-    setHtml($('ss-sources'), `<div class="empty">${pick.sources.length ? 'No windows to share.' : 'Looking for screens and windows…'}</div>`);
+    const hidden = pick.sources.some((x) => x.kind === 'window' && !x.main);
+    const none = !pick.sources.length ? 'Looking for screens and windows…'
+      : pick.kind === 'window' ? `No app windows are open.${hidden ? ' Tick "Show all windows" to see the rest.' : ''}` : 'No screens found.';
+    setHtml($('ss-sources'), `<div class="empty">${none}</div>`);
   } else {
     if (!list.some((x) => x.id === pick.chosen)) pick.chosen = list[0].id;
-    setHtml($('ss-sources'), list.map((x) => {
-      const what = x.kind === 'window' && x.app && x.app !== x.title ? `${esc(x.app)} · ` : '';
-      const note = x.minimized ? ' · minimized' : '';
-      return `<button class="ss-source${x.id === pick.chosen ? ' on' : ''}" data-src="${esc(x.id)}">
-        <span class="ss-name">${esc(x.title)}</span><span class="meta">${what}${x.w}×${x.h}${note}</span></button>`;
-    }).join(''));
+    setHtml($('ss-sources'), list.map(sourceHtml).join(''));
   }
   // Sound: "this app" only for a window; nothing the computer can't do.
   const can = new Set(pick.audio);
@@ -1796,6 +1842,58 @@ function renderSources() {
   fillResOptions();
 }
 
+function setKind(kind) {
+  pick.kind = kind;
+  // Default sound: a window's own app; a screen, everything.
+  $('ss-audio').value = kind === 'window' ? 'app' : 'system';
+  renderSources();
+  askThumbs();
+}
+
+/* Pictures for what's on show; icons the first time each window is shown. */
+function askThumbs() {
+  if ($('ss-box').classList.contains('hide') || pick.error) return;
+  const ids = shownSources().map((x) => x.id);
+  if (!ids.length) return;
+  const icons = ids.some((id) => !pick.asked.has(id) && id.startsWith('window:'));
+  ids.forEach((id) => pick.asked.add(id));
+  post({ cmd: 'voip.thumbs', ids, icons });
+}
+
+function b64Url(data, type) {
+  return URL.createObjectURL(new Blob([unb64(data)], { type }));
+}
+
+function onThumb(msg) {
+  if ($('ss-box').classList.contains('hide')) return;
+  const t = pick.thumbs.get(msg.id) || {};
+  if (msg.img) {
+    if (t.img) URL.revokeObjectURL(t.img);
+    t.img = b64Url(msg.img, 'image/jpeg');
+  }
+  if (msg.icon) {
+    if (t.icon) URL.revokeObjectURL(t.icon);
+    t.icon = b64Url(msg.icon, 'image/png');
+  }
+  pick.thumbs.set(msg.id, t);
+  const x = pick.sources.find((s) => s.id === msg.id);
+  const el = document.querySelector(`#ss-sources [data-src="${CSS.escape(msg.id)}"]`);
+  // Swap in just this one, so the rest don't flicker.
+  if (x && el) {
+    el.outerHTML = sourceHtml(x);
+    lastHtml.delete($('ss-sources'));
+  }
+}
+
+function dropThumbs() {
+  for (const t of pick.thumbs.values()) {
+    if (t.img) URL.revokeObjectURL(t.img);
+    if (t.icon) URL.revokeObjectURL(t.icon);
+  }
+  pick.thumbs.clear();
+  pick.asked.clear();
+}
+
 function listSources() {
   pick.error = '';
   pick.sources = [];
@@ -1807,18 +1905,43 @@ function onSources(msg) {
   pick.sources = msg.sources || [];
   pick.audio = msg.audio || [];
   pick.error = msg.error || '';
+  // Nothing to show on the apps side: start on the screens.
+  if (pick.kind === 'window' && !pick.sources.some((x) => x.kind === 'window' && x.main)) pick.kind = 'screen';
+  $('ss-audio').value = pick.kind === 'window' ? 'app' : 'system';
   // The basic picker, where the web view has one, if native capture can't run.
   hide($('ss-web'), !(pick.error && !MAC && navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia));
   renderSources();
+  askThumbs();
+}
+
+function openPicker() {
+  shareError('');
+  pick.kind = 'window';
+  pick.chosen = null;
+  dropThumbs();
+  hide($('ss-box'), false);
+  hide($('ss-row'), true);
+  listSources();
+  clearInterval(pick.timer);
+  pick.timer = setInterval(askThumbs, THUMB_EVERY);
+}
+
+function closePicker() {
+  clearInterval(pick.timer);
+  pick.timer = 0;
+  hide($('ss-box'), true);
+  hide($('ss-row'), false);
+  dropThumbs();
 }
 
 $('ss-kind').addEventListener('click', (e) => {
   const b = e.target.closest('[data-kind]');
-  if (!b) return;
-  pick.kind = b.dataset.kind;
-  // Default sound: a window's own app; a screen, everything.
-  $('ss-audio').value = pick.kind === 'window' ? 'app' : 'system';
+  if (b) setKind(b.dataset.kind);
+});
+$('ss-all').addEventListener('change', (e) => {
+  pick.all = e.target.checked;
   renderSources();
+  askThumbs();
 });
 $('ss-sources').addEventListener('click', (e) => {
   const b = e.target.closest('[data-src]');
@@ -1826,7 +1949,16 @@ $('ss-sources').addEventListener('click', (e) => {
   pick.chosen = b.dataset.src;
   renderSources();
 });
-$('ss-refresh').addEventListener('click', () => listSources());
+$('ss-sources').addEventListener('dblclick', (e) => {
+  const b = e.target.closest('[data-src]');
+  if (!b) return;
+  pick.chosen = b.dataset.src;
+  startNative();
+});
+$('ss-refresh').addEventListener('click', () => { dropThumbs(); listSources(); });
+$('ss-close').addEventListener('click', () => closePicker());
+$('ss-box').addEventListener('mousedown', (e) => { if (e.target === $('ss-box')) closePicker(); });
+window.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('ss-box').classList.contains('hide')) closePicker(); });
 
 function startNative() {
   const c = chosenSource();
@@ -1847,7 +1979,8 @@ function startNative() {
     hint: preset().hint,
     preview: $('ss-preview-on').checked,
   });
-  hide($('ss-box'), true);
+  closePicker();
+  hide($('ss-row'), true);
 }
 
 /* ---- our own preview, from the frames we send */
@@ -1908,7 +2041,7 @@ function renderNative(v) {
   ss.native = live ? { codec: info && info.codec, starting: v.shareStarting } : null;
   if (!live) closePreview();
   if (live) {
-    hide($('ss-box'), true);
+    if (!$('ss-box').classList.contains('hide')) closePicker();
     hide($('ss-live'), false);
     hide($('ss-preview'), true);
     hide($('ss-preview-canvas'), !$('ss-preview-on').checked || !pv.decoder);
@@ -1933,13 +2066,8 @@ function renderNative(v) {
   show($('ss-notice'), v.shareNotice);
 }
 
-$('ss-open').addEventListener('click', () => {
-  shareError('');
-  hide($('ss-box'), false);
-  hide($('ss-row'), true);
-  listSources();
-});
-$('ss-cancel').addEventListener('click', () => { hide($('ss-box'), true); hide($('ss-row'), false); });
+$('ss-open').addEventListener('click', () => openPicker());
+$('ss-cancel').addEventListener('click', () => closePicker());
 $('ss-go').addEventListener('click', () => startNative());
 $('ss-web').addEventListener('click', () => startShare());
 $('ss-stop').addEventListener('click', () => {
@@ -2471,6 +2599,9 @@ window.onHost = (msg) => {
       break;
     case 'shareSources':
       onSources(msg);
+      break;
+    case 'shareThumb':
+      onThumb(msg);
       break;
     case 'preview':
       onPreview(msg);

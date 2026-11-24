@@ -41,6 +41,8 @@ pub enum VoipEvent {
     Share(ShareNews),
     /// One of our own frames, for the page's preview.
     Preview { key: bool, ts: u64, data: Vec<u8> },
+    /// A picture of a screen or window (and its app's icon), for the picker.
+    Thumb { id: String, thumb: crate::capture::Thumb },
     Upload { tid: u32, name: String, sent: u64, size: u64, error: Option<String> },
     Fetching { aid: u32, got: u64, size: u64 },
     Fetched { aid: u32, result: Result<std::path::PathBuf, String>, preview: bool },
@@ -212,6 +214,8 @@ pub struct Voip {
     /// What the native picker last listed, to start one of them.
     sources: Vec<crate::capture::Source>,
     sources_error: String,
+    /// The picker's previews are being made (one batch at a time).
+    thumbs_busy: Arc<AtomicBool>,
     share_error: String,
     share_notice: String,
     /// The sound of the share we're watching.
@@ -267,6 +271,7 @@ impl Default for Voip {
             native: None,
             sources: Vec::new(),
             sources_error: String::new(),
+            thumbs_busy: Arc::default(),
             share_error: String::new(),
             share_notice: String::new(),
             player: None,
@@ -574,6 +579,24 @@ impl Voip {
         std::thread::spawn(move || {
             let r = crate::capture::sources();
             let _ = p.send_event(UserEvent::Voip(gen, VoipEvent::Sources(r)));
+        });
+    }
+
+    /// Pictures of what the picker lists, made off the main thread; each comes
+    /// back as [`VoipEvent::Thumb`]. Asked again every few seconds while the
+    /// picker is open (so the pictures are live); a batch still running makes
+    /// the next ask wait for the one after. They only go to the page.
+    pub fn thumbnails(&self, ids: &[String], icons: bool, proxy: &EventLoopProxy<UserEvent>) {
+        let ids: Vec<String> = ids.iter().filter(|id| self.sources.iter().any(|s| &s.id == *id)).take(64).cloned().collect();
+        if ids.is_empty() || self.thumbs_busy.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let (p, gen, busy) = (proxy.clone(), self.gen, self.thumbs_busy.clone());
+        std::thread::spawn(move || {
+            crate::capture::thumbnails(&ids, icons, &mut |id, thumb| {
+                let _ = p.send_event(UserEvent::Voip(gen, VoipEvent::Thumb { id: id.to_string(), thumb }));
+            });
+            busy.store(false, Ordering::Release);
         });
     }
 
@@ -986,6 +1009,11 @@ impl Voip {
                     "type": "preview", "key": key, "ts": ts,
                     "data": base64::engine::general_purpose::STANDARD.encode(&data),
                 }))
+            }
+            VoipEvent::Thumb { id, thumb } => {
+                use base64::Engine as _;
+                let b = |v: &Option<Vec<u8>>| v.as_ref().map(|d| base64::engine::general_purpose::STANDARD.encode(d));
+                Some(json!({ "type": "shareThumb", "id": id, "img": b(&thumb.image), "icon": b(&thumb.icon) }))
             }
             VoipEvent::Media(state) => {
                 self.media = state;
