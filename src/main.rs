@@ -3,6 +3,7 @@
 // The state snapshot is one big json! literal.
 #![recursion_limit = "256"]
 
+mod api;
 mod app;
 mod beacon;
 // Native screen share; only built for Windows and macOS.
@@ -107,6 +108,8 @@ pub enum UserEvent {
     /// Scan: one code of a saved hub's address book (for that scan of that
     /// hub), and what answered there.
     HubScan(u64, String, u64, hubstore::Entry, Result<hub::Peeked, String>),
+    /// The game API: a program on this PC connected, said something, or left.
+    Api(api::ApiEvent),
 }
 
 pub enum Xfer {
@@ -515,6 +518,8 @@ struct App {
     next_key: u64,
     voip: Voip,
     hub: hub::Hub,
+    /// The game API, for games on this PC (Settings).
+    api: api::Api,
     /// The tab on screen, so a drop lands where the user expects.
     page: String,
     status: (String, &'static str),
@@ -748,6 +753,25 @@ fn main() {
             Event::UserEvent(UserEvent::MountDone(key, r)) => app.on_mount_done(key, r),
             Event::UserEvent(UserEvent::MountList(key, path, r)) => app.on_mount_list(key, path, r),
             Event::UserEvent(UserEvent::MountXfer(key, id, x)) => app.on_mount_xfer(key, id, x),
+            Event::UserEvent(UserEvent::Api(ev)) => {
+                let changed = app.on_api(ev);
+                // Someone's asking to be allowed: the window comes up to ask.
+                if app.api.take_attention() {
+                    if !window.is_visible() || window.is_minimized() {
+                        window.set_visible(true);
+                        window.set_minimized(false);
+                    }
+                    window.request_user_attention(Some(tao::window::UserAttentionType::Critical));
+                }
+                changed
+            }
+            // A game message: straight to the game API.
+            Event::UserEvent(UserEvent::Hub(gen, hub::HubEvent::App(msg))) => {
+                if gen == app.hub.generation() {
+                    app.api.deliver(&msg);
+                }
+                false
+            }
             Event::UserEvent(UserEvent::Hub(gen, ev)) => {
                 if let Some((text, kind)) = app.hub.on_event(gen, ev) {
                     app.set_status(text, kind);
@@ -780,6 +804,9 @@ fn main() {
             Event::UserEvent(UserEvent::Voip(gen, ev)) => match app.voip.on_event(gen, ev) {
                 // Talking lights and the mic meter go on their own, many times a second.
                 Some(live) => {
+                    if live["type"] == "voipLive" {
+                        app.api.speaking(&live["speaking"]);
+                    }
                     if !live.is_null() {
                         overlay.forward(&live);
                         send(&webview, live);
@@ -791,6 +818,7 @@ fn main() {
             _ => false,
         };
         if changed {
+            app.api_push();
             send(&webview, app.snapshot());
             if overlay.active() {
                 overlay.push_state(&app.voip.json());
@@ -965,7 +993,12 @@ pub(crate) fn last_words(log: &Log) -> String {
 
 impl App {
     fn new(proxy: EventLoopProxy<UserEvent>) -> App {
+        let api_proxy = Mutex::new(proxy.clone());
+        let emit: api::Emit = Arc::new(move |ev| {
+            let _ = api_proxy.lock().unwrap().send_event(UserEvent::Api(ev));
+        });
         App {
+            api: api::Api::new(api::load(), emit),
             proxy,
             share: ShareHost {
                 st: St::Off,
@@ -1036,6 +1069,9 @@ impl App {
         self.hosts.clear();
         self.joins.clear();
         self.voip.shutdown();
+        // Games' sessions end (their tunnels close).
+        self.api.hosted.clear();
+        self.api.joined.clear();
         // Hosting a saved hub: someone in it takes over; in someone else's
         // hub: they see us go. Either way, a moment for them to hear.
         let joined = self.hub.is_on() && !self.hub.is_host();
@@ -1493,6 +1529,17 @@ impl App {
                 return false;
             }
             "openData" => open_in_shell(data_dir()),
+            // Settings › Game API.
+            "api.enable" => {
+                self.api.set_enabled(msg["on"] == true);
+                self.api_push();
+            }
+            "api.allow" => {
+                self.api.allow(msg["conn"].as_u64().unwrap_or(0));
+                self.api_push();
+            }
+            "api.deny" => self.api.deny(msg["conn"].as_u64().unwrap_or(0)),
+            "api.remove" => self.api.remove(&s("id")),
             _ => return false,
         }
         false
@@ -1564,6 +1611,7 @@ impl App {
             },
             "voip": self.voip.json(),
             "hub": self.hub.json(),
+            "gameApi": self.api.json(),
             "invitables": self.invitables().iter().map(|i| json!({ "what": i.what, "kind": i.kind, "title": i.title })).collect::<Vec<_>>(),
             "connections": self.connections(),
             "hostError": self.host_error,

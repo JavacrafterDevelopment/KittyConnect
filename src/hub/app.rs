@@ -97,6 +97,14 @@ pub struct Hub {
     /// When our last such look started.
     pub(super) last_look: Option<Instant>,
     pub(super) scan_no: u64,
+    /// The hub passes on game sessions and messages (it said "games").
+    pub(super) games: bool,
+    /// Game sessions everyone's games host, checked (the game API).
+    pub(super) sessions: Vec<Value>,
+    /// What we've told the hub our games host: (sid, the message sent).
+    pub(super) sessions_sent: Vec<(String, Value)>,
+    /// The activity we've told the hub, if any: (app name, text).
+    pub(super) activity_sent: Option<(String, String)>,
 }
 
 /// How long a saved hub's host can be gone before someone else takes over.
@@ -152,6 +160,10 @@ impl Default for Hub {
             watch: None,
             last_look: None,
             scan_no: 0,
+            games: false,
+            sessions: Vec::new(),
+            sessions_sent: Vec::new(),
+            activity_sent: None,
         }
     }
 }
@@ -214,6 +226,10 @@ impl Hub {
         self.gone.clear();
         self.offers.clear();
         self.offered.clear();
+        self.games = false;
+        self.sessions.clear();
+        self.sessions_sent.clear();
+        self.activity_sent = None;
         self.finish = None;
         self.lost_since = None;
         self.watch = None;
@@ -577,6 +593,101 @@ impl Hub {
             }
         }
         self.offered = want.into_iter().map(|(o, _, c)| (o, c)).collect();
+    }
+
+    /// The game API: the sessions our games host now, as (sid, app id,
+    /// title, port, tunnel address, info). Everyone in the hub sees them;
+    /// each stops showing once it's gone from here.
+    pub fn sync_sessions(&mut self, mine: Vec<(String, String, String, u16, String, Value)>) {
+        let Some(c) = self.conn.as_ref().filter(|_| self.is_live()) else {
+            self.sessions_sent.clear();
+            return;
+        };
+        let want: Vec<(String, Value)> = mine
+            .into_iter()
+            .map(|(sid, app, title, port, addr, info)| {
+                let msg = json!({ "op": "session", "sid": sid, "app": app, "title": title, "port": port, "addr": addr, "info": info });
+                (sid, msg)
+            })
+            .collect();
+        for (sid, _) in &self.sessions_sent {
+            if !want.iter().any(|(s, _)| s == sid) {
+                c.send(json!({ "op": "unsession", "sid": sid }));
+            }
+        }
+        for (sid, msg) in &want {
+            if !self.sessions_sent.iter().any(|(s, m)| s == sid && m == msg) {
+                c.send(msg.clone());
+            }
+        }
+        self.sessions_sent = want;
+    }
+
+    /// The game API: what a game says we're doing, shown beside our name in
+    /// the hub (None clears it).
+    pub fn set_activity(&mut self, activity: Option<(String, String)>) {
+        let Some(c) = self.conn.as_ref().filter(|_| self.is_live()) else {
+            self.activity_sent = None;
+            return;
+        };
+        if self.activity_sent == activity {
+            return;
+        }
+        match &activity {
+            Some((app, text)) => c.send(json!({ "op": "activity", "app": app, "text": text })),
+            None => c.send(json!({ "op": "activity" })),
+        }
+        self.activity_sent = activity;
+    }
+
+    /// The game API: a game's message to the same game on others' PCs
+    /// (`to` empty: everyone else in the hub).
+    pub fn send_app(&self, app: &str, to: Vec<u64>, data: Value) -> Result<(), String> {
+        let Some(c) = self.conn.as_ref().filter(|_| self.is_live()) else {
+            return Err("Portside isn't in a hub right now.".into());
+        };
+        if !self.games {
+            return Err("This hub's host runs an older Portside, which can't pass on game messages.".into());
+        }
+        c.send(json!({ "op": "app", "app": app, "to": to, "data": data }));
+        Ok(())
+    }
+
+    /// The game API: game sessions in the hub (ours too), as checked.
+    pub fn game_sessions(&self) -> &[Value] {
+        &self.sessions
+    }
+
+    /// The hub can carry game sessions and messages.
+    pub fn has_games(&self) -> bool {
+        self.games
+    }
+
+    /// Our id in the hub (0 until welcomed).
+    pub fn my_id(&self) -> u64 {
+        self.me
+    }
+
+    /// The members as the hub listed them.
+    pub fn member_list(&self) -> &[Value] {
+        &self.members
+    }
+
+    /// Which connection's events are current (the game API takes game
+    /// messages straight from them).
+    pub fn generation(&self) -> u64 {
+        self.gen
+    }
+
+    /// Hubs saved on this PC: (id, name, seconds left).
+    pub fn saved_list(&self) -> Vec<(String, String, u64)> {
+        let now = hubstore::now();
+        self.saved.iter().map(|s| (s.id.clone(), s.name.clone(), s.expires.saturating_sub(now))).collect()
+    }
+
+    /// The hub's id (empty when there's none).
+    pub fn hub_id(&self) -> &str {
+        &self.id
     }
 
     /// Joins something someone has open in the hub.

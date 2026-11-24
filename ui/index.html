@@ -724,6 +724,10 @@
                 <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true"><rect x="1.5" y="2.5" width="13" height="10" rx="1.6" stroke="currentColor" stroke-width="1.4"/><rect x="3.5" y="4.5" width="4" height="3" rx=".6" fill="currentColor"/></svg>
                 Overlay
               </button>
+              <button class="set-tab" data-set="games">
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true"><rect x="1.5" y="4.5" width="13" height="8" rx="3.2" stroke="currentColor" stroke-width="1.4"/><path d="M5 7v3M3.5 8.5h3" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><circle cx="10.6" cy="7.6" r=".9" fill="currentColor"/><circle cx="12" cy="9.6" r=".9" fill="currentColor"/></svg>
+                Game API
+              </button>
               <button class="set-tab" data-set="about">
                 <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true"><circle cx="8" cy="8" r="6.5" stroke="currentColor" stroke-width="1.4"/><path d="M8 7v4.2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><circle cx="8" cy="4.8" r=".9" fill="currentColor"/></svg>
                 About
@@ -794,6 +798,43 @@
                       <button class="btn ghost" id="ov-reset">Reset positions</button>
                     </div>
                   </div>
+                </div>
+              </div>
+
+              <div class="set-pane" id="set-games">
+                <div class="card">
+                  <div class="card-head">
+                    <h3>Game API</h3>
+                    <input type="checkbox" id="api-on" class="switch" aria-label="Turn the game API on">
+                  </div>
+                  <p class="set-desc ov-lead">Lets games you make (or play) on this PC use Portside: see the hub
+                    you're in and who's in it, your voice channel, show what you're playing next to your name,
+                    send messages to the same game on your friends' PCs, and host or join a multiplayer
+                    session with them over <b>UDP or TCP</b>, peer to peer.</p>
+                  <div class="ov-safe">
+                    <svg width="18" height="18" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M8 1.5 2.5 3.6v4c0 3.3 2.3 5.9 5.5 6.9 3.2-1 5.5-3.6 5.5-6.9v-4z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/><path d="m5.6 8 1.7 1.7 3.2-3.4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                    <span><b>Only this PC can reach it.</b> It listens on 127.0.0.1, never on your network, and
+                      each program has to be allowed by you first. A game's traffic to friends goes through its
+                      own encrypted TailCat tunnel, the same as voice, and only people in your hub get it.</span>
+                  </div>
+                  <div class="ov-rows" id="api-rows">
+                    <div class="set-row">
+                      <span class="set-text">
+                        <span class="set-title">Address</span>
+                        <span class="set-desc">Games connect here. See <span class="mono">docs/game-api.md</span> in Portside's source for how.</span>
+                        <span class="err" id="api-err"></span>
+                      </span>
+                      <span class="mono api-addr" id="api-addr">Off</span>
+                    </div>
+                  </div>
+                </div>
+                <div class="card">
+                  <div class="card-head"><h3>Allowed programs</h3></div>
+                  <div class="peers" id="api-apps"></div>
+                </div>
+                <div class="card hide" id="api-sess-card">
+                  <div class="card-head"><h3>Game sessions</h3></div>
+                  <div class="peers" id="api-sessions"></div>
                 </div>
               </div>
 
@@ -873,6 +914,36 @@
         <button type="button" class="btn danger" id="hub-del-all">Delete for everyone</button>
         <span class="grow"></span>
         <button type="button" class="btn ghost" id="hub-del-cancel">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- The game API: a program on this PC asks to use Portside. -->
+  <div class="modal hide" id="api-ask" role="dialog" aria-labelledby="api-ask-title">
+    <div class="modal-card namecard">
+      <div class="card-head"><h3 id="api-ask-title">Allow this program?</h3></div>
+      <div class="api-who">
+        <span class="avatar" id="api-ask-avatar"></span>
+        <span class="api-who-text">
+          <span class="set-title" id="api-ask-name"></span>
+          <span class="mono set-desc" id="api-ask-exe"></span>
+        </span>
+      </div>
+      <p class="set-desc api-warn hide" id="api-ask-other">This name was allowed before, from a different program file. Only allow it if you trust this one too.</p>
+      <p class="set-desc">If you allow it, it can:</p>
+      <ul class="api-can">
+        <li>see the hub you're in, who's in it, and the hubs saved on this PC</li>
+        <li>see your voice channel: who's in it and who's talking</li>
+        <li>show what you're playing next to your name in the hub</li>
+        <li>send messages to the same game on others' PCs in your hub</li>
+        <li>host or join game sessions with people in your hub</li>
+      </ul>
+      <p class="set-desc">It can't read your chat or files, or join anything without the game asking. You can remove it any time in Settings.</p>
+      <div class="actions">
+        <button type="button" class="btn primary" id="api-allow">Allow</button>
+        <button type="button" class="btn ghost" id="api-deny">Don't allow</button>
+        <span class="grow"></span>
+        <span class="meta" id="api-ask-more"></span>
       </div>
     </div>
   </div>

@@ -180,6 +180,8 @@ fn the_app_client_end_to_end() {
                 HubEvent::Old => "old",
                 HubEvent::Book { .. } => "book",
                 HubEvent::Offers(_) => "offers",
+                HubEvent::Sessions(_) => "sessions",
+                HubEvent::App(_) => "app",
                 HubEvent::Deleted { .. } => "deleted",
                 HubEvent::Rtt(_) => "rtt",
                 HubEvent::Moving { .. } => "moving",
@@ -556,4 +558,72 @@ fn invite_kinds() {
     assert_eq!(invite_kind(&format!("kitty:hub:5:{addr}")), None);
     assert_eq!(clean("  a\u{7}b  ", 10), "ab");
     assert!(same_secret("abc", "abc") && !same_secret("abc", "abd") && !same_secret("abc", "ab"));
+}
+
+/// The game API through the hub: a game's session is seen by everyone
+/// (checked: a real tunnel address), goes when it's withdrawn or its host
+/// leaves; game messages reach only whom they're for; activity shows in the
+/// member list.
+#[test]
+fn game_sessions_messages_and_activity_go_through_the_hub() {
+    let hub = temporary("Kit's hub");
+    let mut kit = Raw::join(hub.port, json!({ "op": "hello", "v": PROTOCOL, "peer": 1, "name": "Kit", "host": hub.host_token }));
+    assert_eq!(kit.wait("welcome")["games"], GAMES);
+    let mut jo = Raw::join(hub.port, hello("Jo", 2));
+    jo.wait("welcome");
+    assert_eq!(jo.wait("sessions")["list"], json!([]));
+    let mut sam = Raw::join(hub.port, hello("Sam", 3));
+    sam.wait("welcome");
+
+    let addr = "tcomFwWCCcjS5nKNqAod034nWoJZW0LZqDhhC8U_dKdnDRYQ8uNGFpGQEu";
+    // Not a tunnel address, or too much info: not passed on.
+    kit.send(json!({ "op": "session", "sid": "s1", "app": "space-game", "title": "x", "port": 7777, "addr": "127.0.0.1" }));
+    assert_eq!(jo.wait("sessions")["list"], json!([]));
+    kit.send(json!({ "op": "session", "sid": "s1", "app": "space-game", "port": 7777, "addr": addr, "info": "x".repeat(3000) }));
+    assert_eq!(jo.wait("sessions")["list"], json!([]));
+    kit.send(json!({ "op": "session", "sid": "s1", "app": "Space Game!", "port": 7777, "addr": addr }));
+    assert_eq!(jo.wait("sessions")["list"], json!([]));
+    kit.send(json!({ "op": "session", "sid": "s1", "app": "space-game", "title": "Kit's lobby", "port": 7777, "addr": addr, "info": { "map": "moon" } }));
+    let l = jo.wait("sessions");
+    let g = &l["list"][0];
+    assert_eq!((g["from"].as_u64(), g["name"].as_str(), g["app"].as_str()), (Some(1), Some("Kit"), Some("space-game")));
+    assert_eq!((g["port"].as_u64(), g["addr"].as_str(), g["info"]["map"].as_str()), (Some(7777), Some(addr), Some("moon")));
+    kit.send(json!({ "op": "unsession", "sid": "s1" }));
+    assert_eq!(jo.wait("sessions")["list"], json!([]));
+
+    // A message to Sam alone, from Jo's game.
+    jo.send(json!({ "op": "app", "app": "space-game", "to": [3], "data": { "hi": 1 } }));
+    let m = sam.wait("app");
+    assert_eq!((m["from"].as_u64(), m["name"].as_str(), m["data"]["hi"].as_u64()), (Some(2), Some("Jo"), Some(1)));
+    kit.send(json!({ "op": "ping" }));
+    assert!(kit.wait("pong").is_object());
+    // Too big: dropped.
+    jo.send(json!({ "op": "app", "app": "space-game", "data": "x".repeat(MAX_APP_DATA + 10) }));
+    jo.send(json!({ "op": "app", "app": "space-game", "data": "small" }));
+    assert_eq!(kit.wait("app")["data"], "small");
+
+    // Activity: everyone sees it beside Jo's name, then it clears.
+    jo.send(json!({ "op": "activity", "app": "Space Game", "text": "In a lobby" }));
+    loop {
+        let m = sam.wait("members");
+        assert!(m.is_object());
+        if let Some(j) = m["list"].as_array().unwrap().iter().find(|x| x["name"] == "Jo" && !x["activity"].is_null()) {
+            assert_eq!((j["activity"]["app"].as_str(), j["activity"]["text"].as_str()), (Some("Space Game"), Some("In a lobby")));
+            break;
+        }
+    }
+    jo.send(json!({ "op": "activity" }));
+    loop {
+        let m = sam.wait("members");
+        assert!(m.is_object());
+        if m["list"].as_array().unwrap().iter().any(|x| x["name"] == "Jo" && x["activity"].is_null()) {
+            break;
+        }
+    }
+
+    // Jo hosts, then leaves: the session goes with them.
+    jo.send(json!({ "op": "session", "sid": "j", "app": "space-game", "port": 7000, "addr": addr }));
+    assert_eq!(sam.wait("sessions")["list"].as_array().unwrap().len(), 1);
+    jo.send(json!({ "op": "bye" }));
+    assert_eq!(sam.wait("sessions")["list"], json!([]));
 }

@@ -95,6 +95,10 @@ pub enum Role {
     HubJoin,
     /// A moment's look at a saved hub's copy, to see if it's open (Scan).
     HubScan,
+    /// A game session through the game API, hosted or joined: the helper
+    /// (games send UDP).
+    GameHost,
+    GameJoin,
 }
 
 impl Role {
@@ -102,7 +106,7 @@ impl Role {
     /// official tailcat.exe.
     pub fn binary(self) -> Binary {
         match self {
-            Role::VoipHost | Role::VoipJoin => Binary::Voip,
+            Role::VoipHost | Role::VoipJoin | Role::GameHost | Role::GameJoin => Binary::Voip,
             Role::ShareHost
             | Role::RecvForward
             | Role::PortHost

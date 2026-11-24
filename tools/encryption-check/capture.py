@@ -278,7 +278,7 @@ def check(cap_path, report_path, derp_port, label):
         # Codes never need to travel at all (only the room's, in a hub invite).
         if k != "any KCMARK" and not k.startswith("code:") and not local:
             fail.append(f"{k} never seen at all (the capture missed it, or it was never sent)")
-    for k in ("VoiceFriend", "VoiceHost", "Video"):
+    for k in ("VoiceFriend", "VoiceHost", "Video", "GameUdp"):
         if found_local_udp[k] < 2:
             fail.append(f"{k} wasn't seen as UDP on both sides of a tunnel")
     if kinds.get("OTHER"):

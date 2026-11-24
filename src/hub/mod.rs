@@ -45,6 +45,18 @@
 //!   → {"op":"kick","id":4}                                   (host only)
 //!   ← {"op":"kicked"}  (then the hub closes the connection)
 //!   → {"op":"ping"}  ← {"op":"pong"}                          (every 15 s; timed for the ping shown)
+//!
+//! The game API (0.16.0 on; the welcome says "games":1), for games on
+//! members' PCs, through [`crate::api`]:
+//!
+//!   → {"op":"session","sid":"a1b2","app":"my-game","title":"Kit's lobby","port":7777,"addr":"tc…","info":{…}}
+//!   → {"op":"unsession","sid":"a1b2"}
+//!   ← {"op":"sessions","list":[{"from":1,"name":"Kit","sid":…,"app":…,"title":…,"port":…,"addr":…,"info":…}]}
+//!     (the session's own tunnel, from the VOIP helper: UDP and TCP)
+//!   → {"op":"app","app":"my-game","to":[3],"data":{…}}   ([] for everyone)
+//!   ← {"op":"app","from":1,"name":"Kit","app":"my-game","data":{…}}
+//!   → {"op":"activity","app":"My Game","text":"In a lobby"}   (no app: cleared;
+//!                                    shown as "activity" in the members list)
 //!   → {"op":"bye"}
 //!
 //! Scan sends one line instead of a hello, and gets one back:
@@ -89,6 +101,15 @@ const MAX_LINE: u64 = 64 * 1024;
 /// Things one person can have open in the hub at once ("Open to hub").
 const MAX_OFFERS_EACH: usize = 16;
 const MAX_TITLE: usize = 60;
+/// Game sessions one person's games can host at once (the game API).
+const MAX_SESSIONS_EACH: usize = 8;
+/// Game messages one person may send a second, and how big each may be.
+const APP_PER_SECOND: usize = 60;
+const MAX_APP_DATA: usize = 16 * 1024;
+/// What the welcome says this hub does beyond PROTOCOL: 1 = game sessions,
+/// game messages and activities (0.16.0). Older hubs leave it out, and
+/// ignore those messages.
+const GAMES: u64 = 1;
 /// Invites one person may send a minute; more are refused.
 const INVITES_PER_MINUTE: usize = 12;
 /// Each side pings every this often, and gives up after a few missed.

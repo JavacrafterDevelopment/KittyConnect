@@ -5,11 +5,15 @@ use super::*;
 pub enum HubEvent {
     /// Connected and welcomed: our id, the hub's name, id and time left (a
     /// saved hub), whether we're its host.
-    Welcome { you: u64, hub: String, id: String, expires_in: Option<u64>, host: bool },
+    Welcome { you: u64, hub: String, id: String, expires_in: Option<u64>, host: bool, games: bool },
     /// A saved hub's address book, and the codes deleted from it.
     Book { book: Vec<Entry>, gone: Vec<Gone> },
     /// What everyone has open in the hub ("Open to hub").
     Offers(Vec<Value>),
+    /// Game sessions everyone's games host (the game API).
+    Sessions(Vec<Value>),
+    /// A game message from someone's game (the game API), as the hub sent it.
+    App(Value),
     /// Someone deleted the hub for everyone.
     Deleted { by: String },
     /// The host closed the saved hub: go to this code, `name`'s copy.
@@ -132,6 +136,7 @@ pub(super) fn session(stream: TcpStream, hello: &Value, rx: &Arc<Mutex<Receiver<
             id: welcome["id"].as_str().filter(|i| hubstore::is_id(i)).unwrap_or_default().to_string(),
             expires_in: welcome["expiresIn"].as_u64().map(|s| s.min(hubstore::MAX_LIFE)),
             host: welcome["host"] == true,
+            games: welcome["games"].as_u64().unwrap_or(0) >= 1,
         }),
         Some("full") => return End::Final(HubEvent::Full),
         Some("old") => return End::Final(HubEvent::Old),
@@ -182,6 +187,8 @@ pub(super) fn session(stream: TcpStream, hello: &Value, rx: &Arc<Mutex<Receiver<
                 emit(HubEvent::Book { book, gone });
             }
             "offers" => emit(HubEvent::Offers(msg["list"].as_array().cloned().unwrap_or_default())),
+            "sessions" => emit(HubEvent::Sessions(msg["list"].as_array().cloned().unwrap_or_default())),
+            "app" => emit(HubEvent::App(msg)),
             "deleted" => emit(HubEvent::Deleted { by: clean(msg["by"].as_str().unwrap_or("Someone"), crate::peers::MAX_NAME) }),
             "moving" => {
                 if let Some(code) = hubstore::clean_code(msg["code"].as_str().unwrap_or_default()) {

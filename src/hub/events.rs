@@ -38,8 +38,12 @@ impl Hub {
             return None;
         }
         match ev {
-            HubEvent::Welcome { you, hub, id, expires_in, host } => {
+            HubEvent::Welcome { you, hub, id, expires_in, host, games } => {
                 self.me = you;
+                self.games = games;
+                // A reconnect: the hub hears our games' sessions and activity again.
+                self.sessions_sent.clear();
+                self.activity_sent = None;
                 if !hub.is_empty() {
                     self.name = hub;
                 }
@@ -130,6 +134,24 @@ impl Hub {
                     .take(MAX_MEMBERS * MAX_OFFERS_EACH)
                     .collect();
             }
+            HubEvent::Sessions(list) => {
+                // Checked again here: real tunnel addresses, game ids, short text.
+                self.sessions = list
+                    .into_iter()
+                    .filter_map(|g| {
+                        let from = g["from"].as_u64()?;
+                        let sid = clean(g["sid"].as_str()?, 32);
+                        let s = server::game_session(from, sid, &g)?;
+                        Some(json!({
+                            "from": from, "name": clean(g["name"].as_str().unwrap_or("Someone"), crate::peers::MAX_NAME),
+                            "sid": s.sid, "app": s.app, "title": s.title, "port": s.port, "addr": s.addr, "info": s.info,
+                        }))
+                    })
+                    .take(MAX_MEMBERS * MAX_SESSIONS_EACH)
+                    .collect();
+            }
+            // Taken by the game API before it gets here.
+            HubEvent::App(_) => {}
             HubEvent::Deleted { by } => {
                 let id = self.id.clone();
                 return self.finish_delete(&id, Some(by));

@@ -14,7 +14,7 @@
 //! it needs TailCat programs built for Linux, a display (Xvfb) for the event
 //! loop, and root for the capture.
 
-use std::net::SocketAddr;
+use std::net::{SocketAddr, UdpSocket};
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{channel, Sender as Tx};
 use std::sync::Arc;
@@ -80,7 +80,13 @@ fn route(a: &mut Apps, ev: UserEvent) {
         }
         UserEvent::Hub(gen, e) => {
             let app = if gen >= FRIEND_GEN { &mut a.friend } else { &mut a.host };
-            app.hub.on_event(gen, e);
+            match e {
+                // As main()'s loop does: game messages go to the game API.
+                hub::HubEvent::App(msg) => app.api.deliver(&msg),
+                e => {
+                    app.hub.on_event(gen, e);
+                }
+            }
         }
         UserEvent::HubKey(tag, saved, r, open_after) => {
             let app = if tag == a.friend.hub.tag { &mut a.friend } else { &mut a.host };
@@ -154,6 +160,82 @@ impl Drive {
     }
 }
 
+/// A game using an app's game API, the way a real one would: a plain
+/// connection to 127.0.0.1.
+struct Game {
+    w: TcpStream,
+    r: std::io::BufReader<TcpStream>,
+    next: u64,
+    events: Vec<Value>,
+}
+
+impl Game {
+    /// Connects to the API at `port` as a game, and has its app allow it.
+    fn allowed(d: &Drive, port: u16, host: bool) -> Result<Game, String> {
+        let s = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).map_err(|e| format!("game API: {e}"))?;
+        s.set_read_timeout(Some(Duration::from_secs(90))).ok();
+        let mut g = Game { w: s.try_clone().map_err(|e| e.to_string())?, r: std::io::BufReader::new(s), next: 1, events: Vec::new() };
+        if g.line()?["op"] != "portside" {
+            return Err("the game API didn't greet".into());
+        }
+        g.send(json!({ "op": "hello", "v": 1, "app": { "id": "e2e.game", "name": "E2E Game" } }));
+        if g.line()?["op"] != "asking" {
+            return Err("the game API didn't ask".into());
+        }
+        d.on(move |a| {
+            let app = if host { &mut a.host } else { &mut a.friend };
+            let conn = app.api.json()["prompt"]["conn"].as_u64().unwrap_or(0);
+            app.api.allow(conn);
+            app.api_push();
+        });
+        loop {
+            let v = g.line()?;
+            if v["op"] == "ready" {
+                return Ok(g);
+            }
+        }
+    }
+    fn send(&mut self, v: Value) {
+        let _ = std::io::Write::write_all(&mut self.w, format!("{v}\n").as_bytes());
+    }
+    fn line(&mut self) -> Result<Value, String> {
+        let mut l = String::new();
+        match std::io::BufRead::read_line(&mut self.r, &mut l) {
+            Ok(n) if n > 0 => serde_json::from_str(&l).map_err(|e| e.to_string()),
+            _ => Err("the game API closed the connection".into()),
+        }
+    }
+    /// A request, and its reply's data (events meanwhile are kept).
+    fn ask(&mut self, mut req: Value) -> Result<Value, String> {
+        let id = self.next;
+        self.next += 1;
+        req["id"] = json!(id);
+        let cmd = req["cmd"].clone();
+        self.send(req);
+        loop {
+            let v = self.line()?;
+            if v["id"] == id {
+                return if v["ok"] == true { Ok(v["data"].clone()) } else { Err(format!("{cmd}: {}", v["error"])) };
+            }
+            self.events.push(v);
+        }
+    }
+    /// The next event called `name`.
+    fn event(&mut self, name: &str, secs: u64) -> Result<Value, String> {
+        let until = Instant::now() + Duration::from_secs(secs);
+        loop {
+            if let Some(i) = self.events.iter().position(|e| e["evt"] == name) {
+                return Ok(self.events.remove(i)["data"].clone());
+            }
+            if Instant::now() > until {
+                return Err(format!("no {name} event"));
+            }
+            let v = self.line()?;
+            self.events.push(v);
+        }
+    }
+}
+
 /// A random marker: easy to find in a capture, impossible to come by otherwise.
 fn mark(tag: &str) -> String {
     format!("KCMARK{tag}{}", &peers::secret()[..16])
@@ -182,6 +264,26 @@ fn everything_between_two_kittyconnects_goes_through_the_tunnels() {
             std::thread::sleep(Duration::from_secs(1));
         }
     });
+
+    // Each app's game API, on, with its events taken by that app (as
+    // main()'s loop would).
+    for host in [true, false] {
+        let (t, p) = (Mutex::new(tx.clone()), Mutex::new(proxy.clone()));
+        let emit: api::Emit = Arc::new(move |ev| {
+            let cmd: Cmd = Box::new(move |a: &mut Apps| {
+                let app = if host { &mut a.host } else { &mut a.friend };
+                app.on_api(ev);
+            });
+            let _ = t.lock().unwrap().send(cmd);
+            let _ = p.lock().unwrap().send_event(UserEvent::WebdavLimit(None));
+        });
+        let api = api::Api::new(api::Config { enabled: true, apps: Vec::new() }, emit);
+        if host {
+            apps.host.api = api;
+        } else {
+            apps.friend.api = api;
+        }
+    }
 
     let drive = Drive { tx, proxy: proxy.clone() };
     let (d, p, w) = (done.clone(), proxy.clone(), work.clone());
@@ -483,6 +585,107 @@ fn script(d: &Drive, work: &std::path::Path) -> Result<Value, String> {
         return Err("the mount download differs".into());
     }
     results.insert("mount".into(), json!(format!("listed and downloaded {} bytes", mbody.len())));
+
+    // ------------------------------------------------------------ game API
+    // A game on each PC, through each app's game API (real connections to
+    // 127.0.0.1): allowed, the host's game hosts a session (its own tunnel,
+    // the VOIP helper's), the friend's game finds it in the hub and joins,
+    // then UDP and TCP go through it, a game message goes the other way,
+    // and an activity shows up in the hub.
+    let (game_title, game_udp, game_tcp) = (m("GameTitle"), m("GameUdp"), m("GameTcp"));
+    let (game_msg, game_act) = (m("GameMsg"), m("GameActivity"));
+    let (hport, fport) = d.on(|a| (a.host.api.port().unwrap_or(0), a.friend.api.port().unwrap_or(0)));
+    let mut hg = Game::allowed(d, hport, true)?;
+    let mut fg = Game::allowed(d, fport, false)?;
+    // The host's game server: UDP and TCP echo on 127.0.0.1.
+    let (gu, gt) = loop {
+        let u = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).map_err(|e| e.to_string())?;
+        let p = u.local_addr().map_err(|e| e.to_string())?.port();
+        if let Ok(t) = TcpListener::bind((Ipv4Addr::LOCALHOST, p)) {
+            break (u, t);
+        }
+    };
+    let game_port = gu.local_addr().map_err(|e| e.to_string())?.port();
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 2048];
+        while let Ok((n, from)) = gu.recv_from(&mut buf) {
+            let _ = gu.send_to(&buf[..n], from);
+        }
+    });
+    std::thread::spawn(move || {
+        for c in gt.incoming().flatten() {
+            std::thread::spawn(move || {
+                let mut c = c;
+                let mut buf = [0u8; 4096];
+                while let Ok(n) = std::io::Read::read(&mut c, &mut buf) {
+                    if n == 0 || std::io::Write::write_all(&mut c, &buf[..n]).is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+    });
+    hg.ask(json!({ "cmd": "hostSession", "port": game_port, "title": game_title, "info": { "players": 1 } }))?;
+    let session_addr = d.on(|a| a.host.api.announce().first().map(|s| s.4.clone()).unwrap_or_default());
+    codes.insert("gameSession".into(), json!(session_addr));
+    let mut session = None;
+    for _ in 0..60 {
+        let list = fg.ask(json!({ "cmd": "getSessions" }))?;
+        if let Some(s) = list.as_array().and_then(|l| l.first()).cloned() {
+            session = Some(s);
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    let session = session.ok_or("the friend's game never saw the session")?;
+    if session["title"] != game_title.as_str() {
+        return Err(format!("the session came through as {session}"));
+    }
+    let joined = fg.ask(json!({ "cmd": "joinSession", "session": session["id"] }))?;
+    let jport = joined["port"].as_u64().ok_or("no port from joinSession")? as u16;
+    // UDP: sent until the tunnel's up and it comes back, then some more.
+    let u = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).map_err(|e| e.to_string())?;
+    u.set_read_timeout(Some(Duration::from_millis(300))).ok();
+    let until = Instant::now() + Duration::from_secs(60);
+    let mut echoed = 0;
+    let mut buf = [0u8; 2048];
+    while echoed < 40 && Instant::now() < until {
+        let _ = u.send_to(game_udp.as_bytes(), (Ipv4Addr::LOCALHOST, jport));
+        if let Ok(n) = u.recv(&mut buf) {
+            if &buf[..n] == game_udp.as_bytes() {
+                echoed += 1;
+            }
+        }
+    }
+    if echoed < 40 {
+        return Err(format!("only {echoed} game UDP packets came back through the session"));
+    }
+    let mut s = TcpStream::connect((Ipv4Addr::LOCALHOST, jport)).map_err(|e| e.to_string())?;
+    s.set_read_timeout(Some(Duration::from_secs(20))).ok();
+    let payload = game_tcp.repeat(300);
+    std::io::Write::write_all(&mut s, payload.as_bytes()).map_err(|e| e.to_string())?;
+    let mut back = vec![0u8; payload.len()];
+    std::io::Read::read_exact(&mut s, &mut back).map_err(|e| e.to_string())?;
+    if back != payload.as_bytes() {
+        return Err("the game's TCP echo differs".into());
+    }
+    drop(s);
+    fg.ask(json!({ "cmd": "sendMessage", "data": { "text": game_msg } }))?;
+    let got = hg.event("message", 30)?;
+    if got["data"]["text"] != game_msg.as_str() {
+        return Err(format!("the game message came through as {got}"));
+    }
+    fg.ask(json!({ "cmd": "setActivity", "text": game_act }))?;
+    let ga = game_act.clone();
+    d.wait("the friend's activity in the hub", 30, move |a| {
+        a.host.hub.json()["members"].as_array().is_some_and(|l| l.iter().any(|m| m["activity"]["text"] == ga.as_str()))
+    })?;
+    let path = d.on(|a| a.friend.api.joined.first().map(|j| j.link.path()).unwrap_or("none"));
+    results.insert(
+        "game_api".into(),
+        json!(format!("session hosted and joined ({path}); {echoed} UDP echoes, {} TCP bytes echoed, a message and an activity", payload.len())),
+    );
+    drop((hg, fg));
 
     // ---------------------------------------------------- how each went
     let paths = d.on(|a| {
