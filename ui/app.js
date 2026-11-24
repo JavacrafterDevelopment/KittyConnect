@@ -1591,7 +1591,7 @@ function voipLive(msg) {
 /* ------------------------------------------------------- voice settings */
 
 /* Yours only, remembered on this PC, and applied at once (in a call or not). */
-const VS_DEFAULT = { inputGain: 1, autoSensitivity: true, thresholdDb: -50, noiseSuppression: true, outputGain: 1, sounds: true };
+const VS_DEFAULT = { inputGain: 1, autoSensitivity: true, thresholdDb: -50, noiseSuppression: true, echoCancellation: true, outputGain: 1, sounds: true };
 let vs = { ...VS_DEFAULT };
 try { vs = { ...VS_DEFAULT, ...JSON.parse(localStorage.getItem('kc-audio') || '{}') }; } catch (_) { /* defaults */ }
 
@@ -1602,6 +1602,7 @@ function vsRender() {
   $('vs-out-val').textContent = `${Math.round(vs.outputGain * 100)}%`;
   $('vs-auto').checked = vs.autoSensitivity;
   $('vs-ns').checked = vs.noiseSuppression;
+  $('vs-ec').checked = vs.echoCancellation !== false;
   $('vs-sounds').checked = vs.sounds !== false;
   $('vs-thresh').value = vs.thresholdDb;
   $('vs-thresh').disabled = vs.autoSensitivity;
@@ -1622,6 +1623,7 @@ $('vs-in').addEventListener('input', () => { vs.inputGain = Number($('vs-in').va
 $('vs-out').addEventListener('input', () => { vs.outputGain = Number($('vs-out').value) / 100; vsSave(); });
 $('vs-auto').addEventListener('change', () => { vs.autoSensitivity = $('vs-auto').checked; vsSave(); });
 $('vs-ns').addEventListener('change', () => { vs.noiseSuppression = $('vs-ns').checked; vsSave(); });
+$('vs-ec').addEventListener('change', () => { vs.echoCancellation = $('vs-ec').checked; vsSave(); });
 $('vs-sounds').addEventListener('change', () => { vs.sounds = $('vs-sounds').checked; vsSave(); if (vs.sounds) tones(SOUND_JOIN); });
 $('vs-thresh').addEventListener('input', () => { vs.thresholdDb = Number($('vs-thresh').value); vsSave(); });
 $('vs-open').addEventListener('click', () => { vsRender(); hide($('vs-modal'), false); });

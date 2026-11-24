@@ -4,6 +4,7 @@
 //! host). Rooms run on `kc-voip`, the TailCat-library helper that carries UDP
 //! as well as TCP: chat and attachments use TCP, voice and screen video UDP.
 
+pub mod aec;
 pub mod audio;
 pub mod client;
 pub mod media;
@@ -939,7 +940,7 @@ impl Voip {
     }
 
     /// From the gear menu: input volume, automatic or manual sensitivity,
-    /// noise suppression, output volume. Applies at once, in or out of voice.
+    /// noise suppression, echo cancelling, output volume. Applies at once, in or out of voice.
     pub fn set_audio(&self, v: &Value) {
         let f = |k: &str, d: f64| v[k].as_f64().unwrap_or(d) as f32;
         self.audio.set(
@@ -949,6 +950,7 @@ impl Voip {
             v["noiseSuppression"].as_bool().unwrap_or(true),
             f("outputGain", 1.0),
         );
+        self.audio.set_echo_cancellation(v["echoCancellation"].as_bool().unwrap_or(true));
     }
 
     // ------------------------------------------------- volume and the host
