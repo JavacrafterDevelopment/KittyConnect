@@ -43,7 +43,7 @@ objc2 = { version = "0.6", features = ["disable-encoding-assertions"] }
 block2 = "0.6"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_JobObjects", "Win32_System_Registry", "Win32_System_Threading", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_JobObjects", "Win32_System_Registry", "Win32_System_Threading", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 # Native screen share: Windows' own Graphics Capture, a hardware H.264 encoder
 # through Media Foundation, and WASAPI process loopback for the sound. The same
 # Microsoft bindings Portside already ships (through wry's WebView2), with more

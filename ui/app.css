@@ -1436,3 +1436,40 @@ select.input { padding: 7px 9px; }
 .saved-tile .sess-code { margin-top: 4px; }
 .saved-tile .peers { margin-top: 8px; }
 #hub-share .card { max-width: none; }
+
+/* ------------------------------------------------------------ settings */
+
+.settings { display: grid; grid-template-columns: 190px minmax(0, 1fr); gap: 18px; align-items: start; }
+.set-nav { display: flex; flex-direction: column; gap: 2px; position: sticky; top: 12px; }
+.set-tab {
+  display: flex; align-items: center; gap: 9px; text-align: left;
+  font: inherit; font-size: 13px; color: var(--ink-soft);
+  background: transparent; border: 0; border-radius: 9px; padding: 8px 12px;
+}
+.set-tab:hover { background: var(--card-hover); color: var(--ink); }
+.set-tab.on { background: var(--blue-wash); color: var(--blue); font-weight: 600; }
+.set-pane { display: none; }
+.set-pane.on { display: block; }
+.ov-lead { margin: 0; font-size: 12.5px; color: var(--ink-soft); }
+.ov-lead b { font-weight: 600; }
+.ov-safe {
+  display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; border-radius: 10px;
+  background: var(--ok-wash); color: var(--ok); font-size: 12px; line-height: 1.5;
+}
+.ov-safe svg { flex: 0 0 auto; margin-top: 1px; }
+.ov-safe span { color: var(--ink-soft); }
+.ov-safe b { color: var(--ok); font-weight: 600; }
+.ov-rows { display: flex; flex-direction: column; gap: 10px; border-top: 1px solid var(--rule); padding-top: 12px; }
+.ov-rows.off { opacity: .45; pointer-events: none; }
+.ov-rows .set-row { align-items: center; }
+.ov-rows .set-text { flex: 1; display: flex; flex-direction: column; gap: 2px; }
+.ov-select { width: auto; min-width: 180px; }
+.ov-range { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; color: var(--ink-faint); }
+.ov-range input { width: 160px; accent-color: var(--blue); }
+.about-grid { display: grid; grid-template-columns: 140px 1fr; gap: 8px 14px; font-size: 13px; padding: 4px 0 6px; }
+.about-grid .mono { font-size: 12px; word-break: break-all; }
+.sbtn.pinned { color: var(--gilt); }
+@media (max-width: 820px) {
+  .settings { grid-template-columns: 1fr; }
+  .set-nav { flex-direction: row; position: static; }
+}

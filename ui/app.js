@@ -2262,6 +2262,7 @@ let viewTick = 0;
 
 const ICON_SPEAKER = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M2.5 6h2.5l3.5-3v10l-3.5-3H2.5z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/><path d="M11 5.5a3.5 3.5 0 0 1 0 5M12.8 3.8a6 6 0 0 1 0 8.4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>';
 const ICON_SPEAKER_OFF = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M2.5 6h2.5l3.5-3v10l-3.5-3H2.5z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/><path d="M11 6l4 4M15 6l-4 4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>';
+const ICON_PIN = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M6 1.8h4l-.6 4 2.6 2.4v1.3H4V8.2l2.6-2.4z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/><path d="M8 9.5v4.7" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>';
 const ICON_POPOUT = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><rect x="1.5" y="2.5" width="13" height="11" rx="1.5" stroke="currentColor" stroke-width="1.4"/><rect x="8" y="8" width="5" height="4" rx=".8" fill="currentColor"/></svg>';
 const ICON_FULL = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M2 6V2h4M10 2h4v4M14 10v4h-4M6 14H2v-4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 const ICON_CLOSE = '<svg width="14" height="14" viewBox="0 0 10 10"><path d="M2 2l6 6M8 2L2 8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>';
@@ -2284,6 +2285,7 @@ function streamPane(m) {
     <div class="stream-bar">
       <button class="sbtn" data-act="close" title="Stop watching">${ICON_CLOSE}</button>
       <button class="sbtn" data-act="popout" title="Pop out into its own window">${ICON_POPOUT}</button>
+      <button class="sbtn hide" data-act="pin" title="Pin over your game (overlay)">${ICON_PIN}</button>
       <button class="sbtn" data-act="full" title="Full screen (double-click)">${ICON_FULL}</button>
       <span class="grow"></span>
       <span class="stream-vol" title="The stream's sound, for you only">
@@ -2400,6 +2402,7 @@ function renderStreams(v) {
     if (document.activeElement !== range) range.value = Math.round((muted ? 0 : vol) * 100);
     el.querySelector('.stream-vol-val').textContent = `${muted ? 0 : Math.round(vol * 100)}%`;
   }
+  renderPins();
   $('voip-stage').dataset.count = String(watching.length);
   hide($('voip-stage'), !watching.length);
 }
@@ -2432,6 +2435,7 @@ $('voip-stage').addEventListener('click', (e) => {
     case 'full': setTheater(pane.classList.contains('full') ? null : id); break;
     case 'popout': popOut(vw); break;
     case 'popin': popIn(vw); break;
+    case 'pin': post({ cmd: 'overlay.pin', id }); break;
     case 'mute': {
       const { muted } = shareVol(voipState, id);
       post({ cmd: 'voip.shareVolume', id, muted: !muted });
@@ -2918,6 +2922,9 @@ window.onHost = (msg) => {
     case 'voipLive':
       voipLive(msg);
       break;
+    case 'overlayConfig':
+      onOverlayConfig(msg);
+      break;
     case 'video':
       onVideo(msg);
       break;
@@ -2990,7 +2997,87 @@ document.addEventListener('contextmenu', (e) => { if (!e.target.closest('input, 
 
 /* Opened as a plain page (no host), show a sample state so the layout can be
    checked in a browser. Never runs inside the app. */
-function demo() {}
+/* --------------------------------------------------------------- settings */
+
+document.querySelectorAll('.set-tab').forEach((t) => t.addEventListener('click', () => {
+  document.querySelectorAll('.set-tab').forEach((x) => x.classList.toggle('on', x === t));
+  document.querySelectorAll('.set-pane').forEach((p) => p.classList.toggle('on', p.id === `set-${t.dataset.set}`));
+}));
+$('about-version').textContent = BOOT.version ? `v${BOOT.version}` : '';
+$('about-tailcat').textContent = BOOT.tailcat || '';
+$('about-data').textContent = BOOT.dataDir || '';
+
+/* The overlay's settings live in the app (it owns the overlay window and the
+   hotkey); this page shows them and sends changes. */
+let ov = {
+  config: { enabled: false, hotkey: 'shift+grave', showVoice: true, names: 'always', streamOpacity: 1, hideFromCapture: true },
+  supported: true,
+  hotkeys: [{ id: 'shift+grave', label: 'Shift + `' }, { id: 'ctrl+grave', label: 'Ctrl + `' }, { id: 'alt+grave', label: 'Alt + `' }, { id: 'ctrl+shift+o', label: 'Ctrl + Shift + O' }],
+  hotkeyError: '',
+  pinned: null,
+};
+
+function ovSet(change) {
+  post({ cmd: 'overlay.config', config: change });
+}
+
+function onOverlayConfig(msg) {
+  ov = { ...ov, ...msg };
+  const c = ov.config;
+  $('ov-on').checked = !!c.enabled;
+  $('ov-on').disabled = !ov.supported;
+  hide($('ov-unsupported'), ov.supported);
+  $('ov-rows').classList.toggle('off', !c.enabled || !ov.supported);
+  const sel = $('ov-hotkey');
+  const opts = ov.hotkeys.map((h) => `<option value="${esc(h.id)}">${esc(h.label)}</option>`).join('');
+  if (sel.dataset.opts !== opts) {
+    sel.innerHTML = opts;
+    sel.dataset.opts = opts;
+  }
+  sel.value = c.hotkey;
+  $('ov-hk-err').textContent = ov.hotkeyError || '';
+  $('ov-voice').checked = !!c.showVoice;
+  $('ov-names').value = c.names;
+  if (document.activeElement !== $('ov-opacity')) $('ov-opacity').value = Math.round(c.streamOpacity * 100);
+  $('ov-opacity-val').textContent = `${Math.round(c.streamOpacity * 100)}%`;
+  $('ov-capture').checked = !!c.hideFromCapture;
+  renderPins();
+}
+
+function renderPins() {
+  document.querySelectorAll('#voip-stage .stream').forEach((el) => {
+    const b = el.querySelector('[data-act="pin"]');
+    if (!b) return;
+    const on = ov.pinned === Number(el.dataset.stream);
+    hide(b, !(ov.config.enabled && ov.supported));
+    b.classList.toggle('pinned', on);
+    b.title = on ? 'Unpin from over your game' : 'Pin over your game (overlay)';
+  });
+}
+
+$('ov-on').addEventListener('change', () => ovSet({ enabled: $('ov-on').checked }));
+$('ov-hotkey').addEventListener('change', () => ovSet({ hotkey: $('ov-hotkey').value }));
+$('ov-voice').addEventListener('change', () => ovSet({ showVoice: $('ov-voice').checked }));
+$('ov-names').addEventListener('change', () => ovSet({ names: $('ov-names').value }));
+$('ov-capture').addEventListener('change', () => ovSet({ hideFromCapture: $('ov-capture').checked }));
+$('ov-opacity').addEventListener('input', () => {
+  $('ov-opacity-val').textContent = `${$('ov-opacity').value}%`;
+  ovSet({ streamOpacity: Number($('ov-opacity').value) / 100 });
+});
+$('ov-open').addEventListener('click', () => post({ cmd: 'overlay.open' }));
+$('ov-reset').addEventListener('click', () => post({ cmd: 'overlay.reset' }));
+onOverlayConfig(ov);
+
+function demo(msg) {
+  // Settings work in the browser preview too.
+  if (msg && msg.cmd === 'overlay.config') {
+    ov = { ...ov, config: { ...ov.config, ...msg.config } };
+    onOverlayConfig(ov);
+  } else if (msg && msg.cmd === 'overlay.pin') {
+    ov = { ...ov, pinned: ov.pinned === msg.id ? null : msg.id };
+    onOverlayConfig(ov);
+  }
+}
 
 if (window.ipc) {
   post({ cmd: 'ready', origin: `${location.origin} secure=${window.isSecureContext} encoder=${!!window.VideoEncoder} capture=${!!(navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia)}` });

@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Portside overlay</title>
+  <style>
+    :root {
+      --sans: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+      --ink: #F4EFE8;
+      --ink-soft: #CFC5B8;
+      --ink-faint: #9C9184;
+      --card: rgba(24, 21, 19, .92);
+      --pill: rgba(16, 14, 13, .72);
+      --rule: rgba(255, 255, 255, .12);
+      --blue: #5B8DEF;
+      --ok: #6BCB5A;
+      --danger: #E0604A;
+      --gilt: #D7B26A;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; overflow: hidden; background: transparent; }
+    body { font-family: var(--sans); color: var(--ink); font-size: 13px; user-select: none; cursor: default; }
+    .hide { display: none !important; }
+
+    /* Only while you're changing things: the game shows through, dimmed. */
+    #dim { position: fixed; inset: 0; background: rgba(8, 8, 10, .55); }
+
+    #panel {
+      position: fixed; top: 48px; left: 50%; transform: translateX(-50%);
+      width: min(560px, calc(100vw - 32px)); max-height: calc(100vh - 96px); overflow: auto;
+      background: var(--card); border: 1px solid var(--rule); border-radius: 14px;
+      box-shadow: 0 24px 60px rgba(0, 0, 0, .5); padding: 18px 20px 16px;
+    }
+    .p-head { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }
+    .p-title { font-size: 16px; font-weight: 650; letter-spacing: .01em; }
+    .p-title b { color: var(--gilt); font-weight: 650; }
+    .grow { flex: 1; }
+    .p-hint { color: var(--ink-faint); font-size: 12px; margin: 0 0 14px; }
+    .kbd { display: inline-block; padding: 1px 6px; border: 1px solid var(--rule); border-bottom-width: 2px; border-radius: 5px; font-size: 11px; color: var(--ink-soft); }
+    .p-sec { border-top: 1px solid var(--rule); padding: 12px 0 4px; }
+    .p-sec h4 { margin: 0 0 8px; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-faint); font-weight: 600; }
+    .row { display: flex; align-items: center; gap: 10px; padding: 5px 0; }
+    .row .lab { flex: 1; color: var(--ink-soft); }
+    .btn {
+      font: inherit; color: var(--ink); background: rgba(255, 255, 255, .08); border: 1px solid var(--rule);
+      border-radius: 8px; padding: 6px 12px; display: inline-flex; align-items: center; gap: 6px;
+    }
+    .btn:hover { background: rgba(255, 255, 255, .14); }
+    .btn.on { background: var(--blue); border-color: var(--blue); color: #fff; }
+    .btn.bad { background: var(--danger); border-color: var(--danger); color: #fff; }
+    .x { width: 30px; height: 30px; padding: 0; justify-content: center; border-radius: 50%; }
+    select { font: inherit; color: var(--ink); background: #2a2522; border: 1px solid var(--rule); border-radius: 8px; padding: 5px 8px; }
+    input[type=range] { accent-color: var(--blue); width: 160px; }
+    .switch {
+      appearance: none; width: 34px; height: 20px; border-radius: 10px; background: rgba(255, 255, 255, .18);
+      position: relative; margin: 0; flex: 0 0 auto; transition: background .15s;
+    }
+    .switch::after { content: ""; position: absolute; top: 3px; left: 3px; width: 14px; height: 14px; border-radius: 50%; background: #fff; transition: transform .15s; }
+    .switch:checked { background: var(--blue); }
+    .switch:checked::after { transform: translateX(14px); }
+    .streams { display: flex; flex-direction: column; gap: 6px; }
+    .srow { display: flex; align-items: center; gap: 10px; padding: 6px 8px; border-radius: 8px; background: rgba(255, 255, 255, .05); }
+    .srow .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .live { font-size: 10px; font-weight: 700; letter-spacing: .06em; color: #fff; background: var(--danger); border-radius: 4px; padding: 1px 5px; }
+    .muted-note { color: var(--ink-faint); font-size: 12px; }
+
+    /* Widgets: what stays over the game. */
+    .widget { position: fixed; }
+    body.edit .widget { outline: 2px dashed rgba(255, 255, 255, .35); outline-offset: 4px; border-radius: 10px; cursor: move; }
+    .w-tag { display: none; position: absolute; top: -26px; left: 0; font-size: 11px; color: var(--ink-soft); background: var(--card); padding: 2px 8px; border-radius: 6px; white-space: nowrap; }
+    body.edit .w-tag { display: block; }
+
+    #w-voice { min-width: 40px; }
+    #w-voice ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+    .vrow { display: flex; align-items: center; gap: 8px; height: 30px; }
+    .av {
+      width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center; flex: 0 0 auto;
+      font-size: 10.5px; font-weight: 700; color: #fff; background: hsl(var(--h) 50% 45%);
+      box-shadow: 0 0 0 2px rgba(0, 0, 0, .55); transition: box-shadow .1s;
+    }
+    .av.talk { box-shadow: 0 0 0 2px var(--ok), 0 0 10px rgba(107, 203, 90, .6); }
+    .vname {
+      background: var(--pill); padding: 3px 9px; border-radius: 6px; font-size: 12.5px; font-weight: 600;
+      text-shadow: 0 1px 2px rgba(0, 0, 0, .6); white-space: nowrap; max-width: 200px; overflow: hidden; text-overflow: ellipsis;
+    }
+    .vrow.quiet .vname { color: var(--ink-soft); }
+    .vico { color: var(--danger); display: flex; filter: drop-shadow(0 1px 1px rgba(0, 0, 0, .7)); }
+
+    #w-stream { width: 420px; border-radius: 10px; overflow: hidden; background: #000; box-shadow: 0 10px 30px rgba(0, 0, 0, .45); }
+    #w-stream canvas { display: block; width: 100%; height: auto; aspect-ratio: 16 / 9; object-fit: contain; background: #000; }
+    .ws-bar { display: none; position: absolute; left: 0; right: 0; top: 0; padding: 6px 8px; align-items: center; gap: 8px; background: linear-gradient(rgba(0, 0, 0, .7), transparent); }
+    body.edit .ws-bar { display: flex; }
+    .ws-bar .nm { flex: 1; font-size: 12px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .ws-wait { position: absolute; inset: 0; display: grid; place-items: center; color: var(--ink-faint); font-size: 12px; }
+    .grip { display: none; position: absolute; right: 0; bottom: 0; width: 18px; height: 18px; cursor: nwse-resize; background: linear-gradient(135deg, transparent 50%, rgba(255, 255, 255, .6) 50%); }
+    body.edit .grip { display: block; }
+  </style>
+</head>
+<body>
+  <div id="dim" class="hide"></div>
+
+  <div class="widget hide" id="w-voice">
+    <span class="w-tag" id="wv-tag">Voice</span>
+    <ul id="wv-list"></ul>
+  </div>
+
+  <div class="widget hide" id="w-stream">
+    <span class="w-tag">Pinned stream</span>
+    <canvas id="ws-canvas" width="1280" height="720"></canvas>
+    <div class="ws-wait" id="ws-wait">Waiting for the picture…</div>
+    <div class="ws-bar">
+      <span class="live">LIVE</span><span class="nm" id="ws-name"></span>
+      <button class="btn" data-act="unpin">Unpin</button>
+    </div>
+    <div class="grip" id="ws-grip"></div>
+  </div>
+
+  <div id="panel" class="hide">
+    <div class="p-head">
+      <span class="p-title">Port<b>side</b> overlay</span>
+      <span class="grow"></span>
+      <button class="btn x" data-act="close" title="Back to the game (Esc)">
+        <svg width="12" height="12" viewBox="0 0 12 12"><path d="M2 2l8 8M10 2l-8 8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+      </button>
+    </div>
+    <p class="p-hint">Drag the voice list and the pinned stream where you want them. Press <span class="kbd" id="hk">Shift + `</span> or <span class="kbd">Esc</span> to go back to your game. The game is only dimmed while this is open.</p>
+
+    <div class="p-sec" id="sec-voice">
+      <h4>Voice</h4>
+      <div class="row" id="voice-ctl">
+        <span class="lab" id="voice-where"></span>
+        <button class="btn" data-act="mute" id="b-mute">Mute</button>
+        <button class="btn" data-act="deaf" id="b-deaf">Deafen</button>
+      </div>
+      <p class="muted-note hide" id="voice-none">You're not in voice. Join a channel in Portside and the people in it show here.</p>
+    </div>
+
+    <div class="p-sec">
+      <h4>Streams</h4>
+      <div class="streams" id="streams"></div>
+      <p class="muted-note hide" id="streams-none">Nobody is sharing right now. When someone goes live, pin their stream here to keep it over your game.</p>
+    </div>
+
+    <div class="p-sec">
+      <h4>Show</h4>
+      <div class="row"><span class="lab">People in your voice channel</span><input type="checkbox" class="switch" id="o-voice"></div>
+      <div class="row"><span class="lab">Names</span>
+        <select id="o-names"><option value="always">Always</option><option value="talking">Only while talking</option></select>
+      </div>
+      <div class="row"><span class="lab">Pinned stream opacity</span><input type="range" id="o-opacity" min="20" max="100" step="5"><span id="o-opacity-val" class="muted-note">100%</span></div>
+      <div class="row"><span class="lab"></span><button class="btn" data-act="reset">Reset positions</button></div>
+    </div>
+  </div>
+
+  <script>/*{{JS}}*/</script>
+</body>
+</html>
